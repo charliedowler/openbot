@@ -541,3 +541,5 @@ try {
   process.stdout.write(`${report.passed ? "PASS" : "FAIL"} ${join(OUT, "report.json")}\n`);
   if (report.error) process.stdout.write(`${report.error}\n`);
 }
+
+if (report.passed) await import("./channel-summary-continuation-e2e");
