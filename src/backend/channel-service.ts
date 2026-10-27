@@ -1939,14 +1939,17 @@ export class ChannelService {
           ? `${message.id}-revision-${task.revision}`
           : message.id;
       if (messageId !== message.id && JSON.stringify(original?.message) === JSON.stringify(message)) continue;
+      const requestChanged =
+        assignment.requestMessageId !== null
+          ? task?.requestMessageId !== assignment.requestMessageId
+          : task?.revision !== assignment.taskRevision;
       const value: ChannelMessage = {
         id: messageId,
         channelId,
         sequence: 0,
         author: { kind: "agent", id: snapshot.agentId, name },
         taskId: assignment.taskId,
-        superseded:
-          task?.revision !== assignment.taskRevision || (messageId === message.id && original?.superseded === true),
+        superseded: requestChanged || (messageId === message.id && original?.superseded === true),
         message,
       };
       const previous = existing(value.id);

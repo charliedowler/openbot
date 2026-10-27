@@ -220,8 +220,11 @@ provider replacement or compaction does not remove shared decisions. Unrelated s
 are available through paginated retrieval and are not inserted automatically. Agent memories keep
 their existing meaning.
 
-Task revisions prevent an old assignment from completing a corrected request. The stored request
-keeps its own text and files: only its first dispatch converts the attachment drafts, and a later
+Task revisions prevent an old assignment from completing a corrected request. A continuation after
+delegated work also advances the revision, but keeps the request message ID. Capture uses that ID
+to preserve valid earlier messages and the channel summary. A changed request supersedes the old
+messages; an assignment without a stored request ID keeps the conservative revision check. The stored
+request keeps its own text and files: only its first dispatch converts the attachment drafts, and a later
 dispatch of the same request sends the stored copies again. Stop pauses a task and its descendants
 and interrupts active work. Reassign waits for the old assignment to finish stopping. Restart
 recovery checks accepted provider work before retrying. Unknown outcomes require attention.
