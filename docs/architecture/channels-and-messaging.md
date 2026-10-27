@@ -268,8 +268,11 @@ of an assignment that has ended is not copied: a turn sends its final rows befor
 after a restart the provider history import can write an old turn again with new row ids. An empty
 row is not copied until its first text arrives.
 
-Task revisions prevent an old assignment from completing a corrected request. The stored request
-keeps its own text and files: only its first dispatch converts the attachment drafts, and a later
+Task revisions prevent an old assignment from completing a corrected request. A continuation after
+delegated work also advances the revision, but keeps the request message ID. Capture uses that ID
+to preserve valid earlier messages and the channel summary. A changed request supersedes the old
+messages; an assignment without a stored request ID keeps the conservative revision check. The stored
+request keeps its own text and files: only its first dispatch converts the attachment drafts, and a later
 dispatch of the same request sends the stored copies again. Stop pauses a task and its descendants,
 interrupts active work, and sets the reason `channelTaskStopped`. The clients show Continue and
 Reassign for a paused task that has a reason. A turn that ends interrupted gets the same reason. An
