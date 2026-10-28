@@ -215,6 +215,11 @@ not accept its schedule, so desktop IPC allows it only on the local host.
 Each turn receives bounded channel context: purpose, responsibilities, the current request, source
 messages and replies, shared decisions, recent messages, and attachment references. A versioned
 summary covers older messages, with a sequence and source IDs. Full messages remain retrievable.
+Summary and summary-shortening calls have a ten-minute deadline. They can process up to half the
+context budget in one call, so they do not use the two-minute profile generation deadline. The
+lead's model, provider account and reasoning setting still apply. A timeout leaves the stored
+summary at its last completed chunk. Resume retries the work that remains. Cancellation stops the
+disposable provider client and removes its temporary directory.
 The provider acceptance cursor records context delivery. Context packets remain self-contained so
 provider replacement or compaction does not remove shared decisions. Unrelated server conversations
 are available through paginated retrieval and are not inserted automatically. Agent memories keep
