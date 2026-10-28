@@ -887,3 +887,4 @@ try {
 }
 
 if (report.passed) await import("./channel-summary-continuation-e2e");
+if (report.passed) await import("./channel-generation-timeout-e2e");

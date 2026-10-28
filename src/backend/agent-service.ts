@@ -1191,6 +1191,8 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
                 model.id === selected.model ? { ...model, defaultReasoningEffort: selected.reasoningEffort } : model,
                 prompt,
                 cancelled,
+                undefined,
+                background ? "channel-summary" : "profile",
               ),
             )
             .pipe(
