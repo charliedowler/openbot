@@ -980,7 +980,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     this.channels = new ChannelService(store.database, mailbox, {
       agents: () => this.listAgents(),
       hidden: (agentId) => this.#store.isHidden(agentId),
-      generate: (lead, prompt) =>
+      generate: (lead, prompt, purpose) =>
         Effect.gen({ self: this }, function* () {
           yield* this.#providers.ensureProvider(lead.provider);
           const model = this.#endpoints
@@ -998,6 +998,8 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
                 { ...model, defaultReasoningEffort: lead.reasoningEffort },
                 prompt,
                 cancelled,
+                undefined,
+                purpose,
               ),
             )
             .pipe(

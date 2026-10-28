@@ -101,6 +101,7 @@ export const messages = defineMessages("error.backend", {
   "error.backend.channelHistoryLeadRequired": "Choose a channel lead to prepare the shared history.",
   "error.backend.channelHistoryArriving": "A shared message is still arriving. Resume when it is complete.",
   "error.backend.channelHistoryInvalid": "The history summary is invalid. Resume to try again.",
+  "error.backend.channelSummaryTimedOut": "The channel history summary timed out. Resume to try again.",
   "error.backend.channelContextTooLong":
     "This assignment exceeds the shared context limit. Send a shorter request or reassign it.",
   "error.backend.draftAttachmentLimit": "Keep at most {limit} draft attachments.",
