@@ -24,6 +24,9 @@ import { isBalanceDiagnostic, isPlanLimitDiagnostic } from "./provider-diagnosti
 import { USAGE_LIMIT_METHOD } from "./usage-limit-gate";
 
 const GENERATION_TIMEOUT_MS = 120_000;
+const CHANNEL_SUMMARY_TIMEOUT_MS = 600_000;
+
+type GenerationPurpose = "profile" | "channel-summary";
 
 /** Shown when the endpoints changed under a generation that had not yet spawned its process. */
 const CANCELLED_MESSAGE = sourceText("error.agent.profileEndpointsChanged");
@@ -80,6 +83,7 @@ export const generateTextWithoutTools = Effect.fn("Agent.generateTextWithoutTool
   prompt: string,
   cancelled: () => boolean = () => false,
   observe?: GenerationObserver,
+  purpose: GenerationPurpose = "profile",
 ) {
   let cleanupFailure: ProfileGenerationFailed | null = null;
   const result = yield* Effect.acquireUseRelease(
@@ -98,6 +102,7 @@ export const generateTextWithoutTools = Effect.fn("Agent.generateTextWithoutTool
             : startToolless(client),
         ),
         observe,
+        purpose,
       ).pipe(Effect.result),
     (cwd) =>
       Effect.gen(function* () {
@@ -155,6 +160,7 @@ export const toollessTurn = Effect.fnUntraced(function* (
   prompt: string,
   prepare: Effect.Effect<void, ProfileGenerationFailed>,
   observe?: GenerationObserver,
+  purpose: GenerationPurpose = "profile",
 ) {
   return yield* Effect.gen(function* () {
     const completion = yield* Effect.forkChild(profileCompletion(client, observe), { startImmediately: true });
@@ -242,9 +248,17 @@ export const toollessTurn = Effect.fnUntraced(function* (
     return { text: yield* Fiber.join(completion), threadId };
   }).pipe(
     Effect.timeoutOrElse({
-      duration: GENERATION_TIMEOUT_MS,
+      duration: purpose === "channel-summary" ? CHANNEL_SUMMARY_TIMEOUT_MS : GENERATION_TIMEOUT_MS,
       orElse: () =>
-        Effect.fail(new ProfileGenerationFailed({ cause: new Error(sourceText("error.agent.profileTimedOut")) })),
+        Effect.fail(
+          new ProfileGenerationFailed({
+            cause: new Error(
+              purpose === "channel-summary"
+                ? sourceText("error.backend.channelSummaryTimedOut")
+                : sourceText("error.agent.profileTimedOut"),
+            ),
+          }),
+        ),
     }),
   );
 });
