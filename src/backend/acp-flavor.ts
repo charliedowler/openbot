@@ -165,7 +165,15 @@ export const CLINE_ACP_FLAVOR: AcpFlavor = { subagentTools: ["spawn_agent"] };
  * The result's `_meta.usage` holds the tokens and the cost of this prompt's model calls (#4827).
  */
 export const GROK_ACP_FLAVOR: AcpFlavor = {
-  promptUsage: (response) => (isRecord(response._meta) && isRecord(response._meta.usage) ? response._meta.usage : null),
+  promptUsage: (response) => {
+    const usage = isRecord(response._meta) && isRecord(response._meta.usage) ? response._meta.usage : null;
+    if (!usage || usage.usageIsIncomplete === true) return null;
+    const counts = ["inputTokens", "outputTokens", "cachedReadTokens", "cacheCreationTokens", "totalTokens"] as const;
+    if (!counts.every((key) => Number.isInteger(usage[key]) && Number(usage[key]) >= 0)) return null;
+    return Number(usage.cachedReadTokens) + Number(usage.cacheCreationTokens) > Number(usage.inputTokens)
+      ? null
+      : usage;
+  },
 };
 
 /**

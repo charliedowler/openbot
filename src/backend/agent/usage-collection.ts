@@ -140,7 +140,7 @@ export function collectProviderUsage(
     });
     return;
   }
-  if (session.provider === "grok") {
+  if (session.provider === "grok" && getString(params, "usageScope") === "prompt") {
     // Grok CLI 1.0.22 and 1.0.70 send the tokens of this prompt only, with its cost in units of
     // 10^-10 USD. `inputTokens` include the cache reads and writes, and `outputTokens` the reasoning.
     const ticks = cost(value.costUsdTicks);
@@ -188,6 +188,21 @@ export function workflowUsageObserver(
       collectProviderUsage(usage, { id: WORKFLOWS_USAGE_ID, model }, session, method, params);
     } catch (error) {
       logger.warn("Could not save the usage of a workflow step.", { provider, error });
+    }
+  };
+}
+
+export function channelUsageObserver(
+  usage: AgentUsage,
+  agent: Pick<AgentSummary, "id" | "provider" | "model">,
+  purpose: "channel-routing" | "channel-summary" = "channel-routing",
+): (notification: { method: string; params?: unknown }) => void {
+  const session = { id: `${purpose}:${randomUUID()}`, provider: agent.provider, createdAt: new Date().toISOString() };
+  return ({ method, params }) => {
+    try {
+      collectProviderUsage(usage, agent, session, method, params);
+    } catch (error) {
+      logger.warn("Could not save channel helper usage.", { provider: agent.provider, purpose, error });
     }
   };
 }
