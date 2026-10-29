@@ -80,7 +80,12 @@ const options = {
   accountPrincipal: () => "synthetic-account",
 };
 const events = new HostEventsService({ ...options, watchRegistry: registry });
-const report: { passed: boolean; checks: string[]; error?: string } = { passed: false, checks: [] };
+const report: {
+  passed: boolean;
+  checks: string[];
+  sinkAttempts?: { name: string; blocked: boolean; detail: string }[];
+  error?: string;
+} = { passed: false, checks: [] };
 async function check(name: string, run: () => void | Promise<void>) {
   await run();
   report.checks.push(name);
@@ -223,6 +228,76 @@ try {
       assert.equal(activity[0]?.status, "ignored");
       assert.equal(activity[0]?.reason, "event-type");
     });
+  await check("Metadata sinks refuse non-registry ingress and every native Test or Run path", async () => {
+    const before = countWork();
+    await runCauseEffect(store.updateAgent({ agentId: owner.id, allowAutomation: true }));
+    const ref = { owner: { kind: "agent", id: owner.id } as const, id: primary.routineId };
+    const attempts: { name: string; run: () => Promise<unknown>; status?: number }[] = [
+      {
+        name: "Signed sentinel event",
+        run: () => receive(primary, { value: "sentinel" }, { type: WATCH_REGISTRY_ROUTINE_EVENT_TYPE }),
+        status: 400,
+      },
+      {
+        name: "Other signed event",
+        run: () => receive(primary, { value: "other" }, { type: "bridge.event" }),
+        status: 400,
+      },
+      { name: "Host Test", run: () => runCauseEffect(events.testRoutine(ref)) },
+      { name: "Host signed test event", run: () => runCauseEffect(events.sendTestEvent(ref)) },
+      { name: "Routine records Test", run: () => runCauseEffect(agents.routineRecords.test(ref.owner, ref.id)) },
+      {
+        name: "Native routine Run",
+        run: () => runCauseEffect(agents.testRoutine({ agentId: owner.id, routineId: ref.id })),
+      },
+      {
+        name: "Automation Run",
+        run: () =>
+          runCauseEffect(
+            agents.runRoutineFromAutomation({ agentId: owner.id, routineId: ref.id, payload: "Synthetic event" }),
+          ),
+      },
+      {
+        name: "Direct scheduler webhook",
+        run: () =>
+          runCauseEffect(
+            agents.routineRecords.receiveWebhook(ref.owner, ref.id, {
+              deliveryId: randomUUID(),
+              eventType: WATCH_REGISTRY_ROUTINE_EVENT_TYPE,
+              data: { value: "sentinel" },
+              occurredAt: new Date().toISOString(),
+              receivedAt: new Date().toISOString(),
+            }),
+          ),
+      },
+    ];
+    report.sinkAttempts = [];
+    for (const attempt of attempts) {
+      try {
+        const value = await attempt.run();
+        report.sinkAttempts.push({
+          name: attempt.name,
+          blocked: attempt.status !== undefined && value === attempt.status,
+          detail: String(value),
+        });
+      } catch (error) {
+        report.sinkAttempts.push({
+          name: attempt.name,
+          blocked:
+            attempt.status === undefined &&
+            error instanceof Error &&
+            /metadata receiver|routine no longer exists/i.test(error.message),
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    assert.ok(
+      report.sinkAttempts.every((attempt) => attempt.blocked),
+      JSON.stringify(report.sinkAttempts),
+    );
+    assert.deepEqual(countWork(), before);
+    assert.deepEqual(countWork(), work);
+  });
   await check("Publisher ownership and management authority follow authenticated routes", async () => {
     assert.equal(
       await receive(restricted, { ...publication, watches: [{ ...publication.watches[0], ownerAgentId: other.id }] }),
@@ -389,6 +464,7 @@ try {
     };
     const api = new TeamApiServer({
       store: team,
+      events,
       agents,
       mailbox,
       agentAccess: access,
@@ -429,6 +505,22 @@ try {
         });
       assert.equal((await get()).status, 401);
       assert.equal((await get(admin.sessionToken, false)).status, 400);
+      for (const path of ["/v1/admin/events/routines/test", "/v1/admin/webhook-tests/send"]) {
+        const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+          method: "POST",
+          headers: {
+            "OpenBot-Protocol-Version": "7",
+            "OpenBot-App-Version": "0.53.2",
+            "OpenBot-Capabilities": "events-v1,webhook-tests-v1",
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${admin.sessionToken}`,
+          },
+          body: JSON.stringify({ owner: { kind: "agent", id: owner.id }, id: primary.routineId }),
+        });
+        assert.equal(response.status, 400);
+        const body = await response.json();
+        assert.ok(JSON.stringify(body).includes("metadata receiver"));
+      }
       const ownerResponse = await get(admin.sessionToken);
       assert.equal(ownerResponse.status, 200);
       assert.ok(decodeWatchingSnapshot(await ownerResponse.json()).waits.some((wait) => wait.channelId === channel.id));
@@ -494,6 +586,13 @@ try {
     assert.deepEqual(countWork(), work);
     assert.equal(await receive(ordinary, { value: "ordinary" }, { type: "bridge.event" }), 202);
     assert.notDeepEqual(countWork(), work);
+    const ref = { owner: { kind: "agent", id: owner.id } as const, id: ordinary.routineId };
+    await runCauseEffect(events.testRoutine(ref));
+    assert.equal((await runCauseEffect(events.sendTestEvent(ref))).status, "started");
+    await runCauseEffect(
+      agents.runRoutineFromAutomation({ agentId: owner.id, routineId: ref.id, payload: "Ordinary automation event" }),
+    );
+    assert.equal(await receive(ordinary, { value: "ordinary" }, { type: WATCH_REGISTRY_ROUTINE_EVENT_TYPE }), 202);
   });
   report.passed = true;
 } catch (error) {
