@@ -23,7 +23,8 @@ export function serverSupportsCapability(
   capability: TeamCurrentCapability,
 ): boolean {
   if (
-    (capability === "watch-registry-v1" ||
+    (capability === "context-prs-v1" ||
+      capability === "watch-registry-v1" ||
       capability === "remote-desktop-setup" ||
       capability === "channel-chats-v1" ||
       capability === "channel-delete-v1" ||

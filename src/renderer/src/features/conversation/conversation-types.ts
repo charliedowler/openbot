@@ -406,6 +406,7 @@ export type RightPanelMode =
   | "settings"
   | "file-preview"
   | "files"
+  | "pull-requests"
   | "question"
   | "voice"
   | "subagent"
