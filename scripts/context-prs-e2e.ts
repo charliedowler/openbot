@@ -417,6 +417,17 @@ try {
   await check(
     "Authenticated Team API gates capability, selected agent and every channel member before provider reads",
     async () => {
+      assert.ok(registry);
+      registry.watches.push({
+        id: "private-channel-watch",
+        publisherId: "synthetic",
+        ownerAgentId: owner.id,
+        channelId: channel.id,
+        sourceKind: "github_ci",
+        title: "Private group work",
+        targetUrl: "https://github.com/example/repo/pull/90",
+        status: "active",
+      });
       const team = new TeamStore(join(root, "team.json"));
       await runCauseEffect(team.initialize());
       await runCauseEffect(team.configure("Synthetic", "owner", "synthetic-password"));
@@ -511,6 +522,9 @@ try {
         assert.equal(response.status, 200);
         const snapshot = decodeContextPullRequestsFromHost(await response.json());
         assert.equal(snapshot.scope.id, owner.id);
+        assert.ok(!JSON.stringify(snapshot).includes("https://github.com/example/repo/pull/90"));
+        assert.ok(!requests.some((path) => path.includes("/pulls/90")));
+
         assert.ok(snapshot.open.every((row) => row.number !== 3 && row.number !== 5));
         const group = await fetch(`http://127.0.0.1:${port}${CONTEXT_PRS_ROUTES.read}`, {
           method: "POST",
@@ -571,6 +585,19 @@ try {
         ),
       ),
     );
+  });
+  await check("Streaming SQL snippets and the shared text budget disclose omitted older references", async () => {
+    const bounded = await create("Bounded");
+    insertMessage("https://github.com/example/repo/pull/888", bounded);
+    for (let index = 0; index < 21; index++) insertMessage("a".repeat(199_999), bounded);
+    const scanned = references.read({ kind: "agent", id: bounded.id });
+    assert.equal(scanned.limited, true);
+    assert.deepEqual(scanned.urls, []);
+    const cut = await create("Cut");
+    insertMessage(`${"a".repeat(199_960)} https://github.com/example/repo/pull/1234567890`, cut);
+    const truncated = references.read({ kind: "agent", id: cut.id });
+    assert.equal(truncated.limited, true);
+    assert.deepEqual(truncated.urls, []);
   });
   report.passed = true;
 } catch (error) {
