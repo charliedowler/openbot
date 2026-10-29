@@ -608,6 +608,8 @@ export class TurnLifecycle {
             this.#compaction.observeCompaction(
               threadId,
               notification.method === "item/completed" ? "completed" : "running",
+              "context",
+              source,
             );
           if (notification.method === "item/completed") {
             this.#compaction.markCompacted(threadId);
@@ -712,7 +714,12 @@ export class TurnLifecycle {
         this.#attention.clearForTurn(threadId, turnId);
         if (this.#observedCompactions.get(threadId) === turnId) {
           this.#observedCompactions.delete(threadId);
-          this.#compaction.observeCompaction(threadId, status === "completed" ? "completed" : "failed");
+          this.#compaction.observeCompaction(
+            threadId,
+            status === "completed" ? "completed" : "failed",
+            "context",
+            source,
+          );
         }
         this.#compaction.threadTurnEnded(threadId);
         if (this.#compaction.isCompactionTurn(threadId, turnId)) {
@@ -752,7 +759,7 @@ export class TurnLifecycle {
         const status = getString(params, "status");
         if (status !== "running" && status !== "completed" && status !== "failed") return;
         // Native Claude compaction does not report comparable full-context counts.
-        this.#compaction.observeCompaction(threadId, status, "none");
+        this.#compaction.observeCompaction(threadId, status, "none", source);
         return;
       }
       case "thread/archived": {
