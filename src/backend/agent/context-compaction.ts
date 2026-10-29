@@ -99,6 +99,7 @@ export class ContextCompaction {
   /** How long a stopped compaction, or a refused queue, waits for the turn to end. */
   readonly #graceMs: number;
   readonly #display = new Map<string, Omit<AgentContextState, "agentId" | "threadId">>();
+  readonly #observedClients = new Map<string, AgentClient>();
   readonly #awaitingPostCompaction = new Set<string>();
   readonly #durations = new Map<string, number>();
   readonly #changed: () => void;
@@ -197,7 +198,10 @@ export class ContextCompaction {
     threadId: string,
     status: "running" | "completed" | "failed",
     tokenComparison: "context" | "none" = "context",
+    client?: AgentClient,
   ): void {
+    if (status === "running" && client) this.#observedClients.set(threadId, client);
+    else if (status !== "running") this.#observedClients.delete(threadId);
     const display = this.#display.get(threadId) ?? { usage: null, compaction: null };
     if (status === "running" && display.compaction?.status === "running") return;
     const previous =
@@ -428,6 +432,7 @@ export class ContextCompaction {
   forgetThread(threadId: string): void {
     this.#budgets.delete(threadId);
     const displayed = this.#display.delete(threadId);
+    this.#observedClients.delete(threadId);
     this.#durations.delete(threadId);
     this.#awaitingPostCompaction.delete(threadId);
     if (displayed) this.#emitChanged();
@@ -459,6 +464,8 @@ export class ContextCompaction {
 
   /** The client stopped or exited, so the compactions and refusals it held end with it. */
   clientEnded(client: AgentClient): void {
+    for (const [threadId, owner] of this.#observedClients)
+      if (owner === client) this.observeCompaction(threadId, "failed");
     for (const [threadId, compaction] of this.#compacting) {
       if (compaction.client !== client) continue;
       this.observeCompaction(threadId, "failed");
@@ -478,6 +485,7 @@ export class ContextCompaction {
     this.#refusals.clear();
     this.#budgets.clear();
     this.#display.clear();
+    this.#observedClients.clear();
     this.#durations.clear();
     this.#awaitingPostCompaction.clear();
   }
