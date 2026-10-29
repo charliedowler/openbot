@@ -319,6 +319,7 @@ try {
   const native = await waitFor("native compaction without a projected turn", () =>
     protocol().find((entry) => entry.method === "fixture/native-compaction-running"),
   );
+  await waitFor("native compaction observed by OpenBot", () => agents.nativeWorkSnapshot().compactions === 1);
   assert.ok(native.threadId);
   const projected = database.connection
     .prepare("SELECT COUNT(*) count FROM projection_threads WHERE active_turn_id IS NOT NULL")
@@ -381,6 +382,7 @@ try {
       (entry) => entry.method === "fixture/native-compaction-running" && entry.threadId !== native.threadId,
     ),
   );
+  await waitFor("channel compaction observed by OpenBot", () => agents.nativeWorkSnapshot().compactions === 1);
   const projectedChannel = database.connection
     .prepare("SELECT COUNT(*) count FROM projection_threads WHERE active_turn_id IS NOT NULL")
     .get();
@@ -472,6 +474,7 @@ try {
     () =>
       protocol().filter((entry) => entry.method === "fixture/native-compaction-running").length > compactionsBeforeExit,
   );
+  await waitFor("provider-exit compaction observed by OpenBot", () => agents.nativeWorkSnapshot().compactions === 1);
   assert.equal(agents.nativeWorkSnapshot().compactions, 1);
   assert.equal(
     database.connection.prepare("SELECT COUNT(*) count FROM projection_threads WHERE active_turn_id IS NOT NULL").get()
