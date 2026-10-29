@@ -10,6 +10,7 @@ import type {
   ResetAgentSessionSettingInput,
   SetAgentSessionSettingInput,
 } from "./ipc-agent-session-settings";
+import type { WatchingSnapshot } from "./watch-registry";
 // The one channel list. Each endpoint holds its wire value, the group it belongs to, and whether it
 // is a request the renderer invokes or an event the main process sends. That is what lets a
 // registrar bind its handlers as an object keyed by endpoint, so a channel with no handler, and a
@@ -1302,6 +1303,7 @@ export const IPC_ENDPOINTS = {
      * null and sends its snapshot on its event stream.
      */
     getRuntimeSnapshot: scopedQuery<AgentRuntimeSnapshot | null>()("agent:get-runtime-snapshot"),
+    getWatchingSnapshot: scopedQuery<WatchingSnapshot>()("agent:get-watching-snapshot"),
     getAnalytics: scopedRequest<AgentAnalyticsInput, AgentAnalytics | null, "required">()("agent:get-analytics"),
     getHostAnalytics: scopedRequest<HostAnalyticsInput, HostAnalytics | null, "required">()("host:get-analytics"),
     getUsage: scopedRequest<string | undefined, AccountUsage>()("agent:get-usage"),
