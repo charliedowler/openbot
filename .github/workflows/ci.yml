@@ -475,6 +475,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: bun run test:agent-webhook-routine
 
+      - name: Run the watch registry E2E test
+        if: ${{ !cancelled() }}
+        run: bun --preload ./scripts/team-api-routes-e2e-electron.mjs scripts/watch-registry-e2e.ts
+
       - name: Run the agent channel management E2E test
         if: ${{ !cancelled() }}
         run: bun run test:agent-channel-manage
@@ -647,6 +651,7 @@ jobs:
             .openbot-build/routine-fresh-session-e2e/
             .openbot-build/routine-report-failure-e2e/
             .openbot-build/agent-webhook-routine-e2e/
+            .openbot-build/watch-registry-e2e/
             .openbot-build/agent-channel-manage-e2e/
             .openbot-build/agent-channel-create-e2e/
             .openbot-build/agent-workflow-gate-e2e/
