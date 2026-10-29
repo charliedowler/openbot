@@ -323,12 +323,6 @@ function view(flow: Flow): SignInRelayView {
   return { authorizeUrl: pageUrl, callback: pageUrl ? loopbackCallback(pageUrl) : null, result };
 }
 
-/**
- * Sends the callback to the loopback address that the page of this host's own sign-in names. The
- * address comes only from that page, so a client cannot choose it. The request follows no redirect,
- * and only its status is kept: the answer is a page for a browser. The query holds a grant, so
- * nothing here logs the address.
- */
 const replay = Effect.fn("SignInRelayHost.replay")(function* (query: URLSearchParams, pageUrl: string) {
   if (!loopbackCallback(pageUrl)) return false;
   const code = query.get("code");
@@ -339,6 +333,27 @@ const replay = Effect.fn("SignInRelayHost.replay")(function* (query: URLSearchPa
   return yield* Effect.tryPromise(async (signal) => {
     const response = await fetch(address, { redirect: "manual", signal });
     await response.body?.cancel();
+    const location = response.headers.get("location");
+    if (
+      !query.has("error") &&
+      address.pathname === "/auth/callback" &&
+      response.status >= 300 &&
+      response.status < 400 &&
+      location &&
+      URL.canParse(location, address)
+    ) {
+      const redirect = new URL(location, address);
+      if (
+        redirect.origin === address.origin &&
+        redirect.pathname === "/success" &&
+        !redirect.username &&
+        !redirect.password
+      ) {
+        const completion = await fetch(new URL("/success", address), { redirect: "manual", signal });
+        await completion.body?.cancel();
+        return completion.ok;
+      }
+    }
     return response.status < 400;
   }).pipe(
     Effect.timeout(REPLAY_TIMEOUT),
