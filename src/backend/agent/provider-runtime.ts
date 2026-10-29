@@ -93,9 +93,11 @@ import {
   isMcpSubsystemDiagnostic,
   isTelemetryExportDiagnostic,
   isToolCallDiagnostic,
+  isUntrustedConfigDiagnostic,
   isUsageLimitDiagnostic,
   isUsageReadDiagnostic,
   LOG_TIMESTAMP_PREFIX,
+  untrustedCodexFolders,
 } from "./provider-diagnostics";
 import {
   isProviderTimeout,
@@ -3424,6 +3426,10 @@ export class ProviderRuntime implements ProviderPort {
         logger.info("Codex completed a credential storage fallback.", { provider: client.provider, message });
         return;
       }
+      if (client.provider === "codex" && isUntrustedConfigDiagnostic(message)) {
+        stderrLogger.warn("Codex skipped untrusted project settings.", { provider: client.provider, message });
+        return;
+      }
       // An agent that tears down its sessions while OpenBot stops it (idle release, restart, quit)
       // can write an error for each one. It is not a failure the user can act on, so it goes to the log.
       if (origin?.duringStop) {
@@ -3512,15 +3518,23 @@ export class ProviderRuntime implements ProviderPort {
     client.once("exit", (error) => this.#handleExit(client, error));
   }
 
-  /**
-   * Codex's report of the settings it ignored, with each key named: the stderr copy of it has only
-   * the summary (see `isIgnoredConfigDiagnostic`). The full text, with the path of each file, goes
-   * to the log; the user gets the keys, because the renderer does not show paths.
-   *
-   * Other configuration warnings are not reported here.
-   */
   #reportConfigWarning(client: AgentClient, params: unknown): void {
     const summary = getString(params, "summary");
+    if (summary && client.provider === "codex" && isUntrustedConfigDiagnostic(summary)) {
+      const details = getString(params, "details");
+      const redacted = shortenDiagnostic(this.#redactMcp([summary, details].filter(Boolean).join("\n")));
+      logger.warn("Codex skipped untrusted project settings.", { provider: client.provider, message: redacted });
+      const folders = untrustedCodexFolders(redacted);
+      const message =
+        folders.length > 0
+          ? sourceText("error.provider.codexConfigUntrusted", { folders: folders.join(", ") })
+          : sourceText("error.provider.codexConfigUntrustedUnnamed");
+      const key = `codex_config_untrusted:${message}`;
+      if (this.#reportedConfigWarnings.has(key)) return;
+      this.#reportedConfigWarnings.add(key);
+      this.#emitError("codex_config_untrusted", message);
+      return;
+    }
     const ignored = summary ? ignoredCodexSettings(summary) : null;
     if (!summary || !ignored) return;
     const redacted = shortenDiagnostic(this.#redactMcp(summary));
