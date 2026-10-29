@@ -18,6 +18,7 @@ import {
 } from "@openbot/contracts/ipc";
 import type { EventFilter, EventJsonValue, EventRoutineOwner } from "@openbot/contracts/ipc-events";
 import { type DynamicRecord, isDynamicRecord, isOneOf, isString } from "@openbot/contracts/runtime-values";
+import { WATCH_REGISTRY_ROUTINE_EVENT_TYPE } from "@openbot/contracts/watch-registry";
 import { sourceText } from "@openbot/i18n/source";
 import {
   nextRoutineOccurrence,
@@ -964,6 +965,11 @@ export class RoutineStore {
     scheduledFor: string,
     sequence: number,
   ): void {
+    if (this.tables.ownerKind === "agent") {
+      const trigger = this.getRecord(routine.ownerId, routine.id)?.trigger;
+      if (trigger?.kind === "webhook" && trigger.eventType === WATCH_REGISTRY_ROUTINE_EVENT_TYPE)
+        throw new RoutineInputError(sourceText("error.backend.watchRegistryCannotRun"));
+    }
     const { runTable, ownerColumn, handleColumn } = this.tables;
     const createdAt = new Date().toISOString();
     const { kind, source } = runStartColumns(start);
