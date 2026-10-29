@@ -140,6 +140,7 @@ import {
   type UpdateStatus,
   type WorkspaceDirectory,
 } from "@openbot/contracts/ipc";
+import type { WatchingSnapshot } from "@openbot/contracts/watch-registry";
 import { sourceText } from "@openbot/i18n/source";
 import {
   AGENT_IMPORT_PREVIEW,
@@ -242,6 +243,7 @@ export interface MockOpenBotOptions
   conversationReads?: Record<string, ConversationReadState>;
   /** What `agent.getRuntimeSnapshot` returns when the preview starts. */
   runtimeSnapshot?: AgentRuntimeSnapshot;
+  watchingSnapshot?: WatchingSnapshot;
   /** Adds the Storybook agent and provider of another host to `STORY_FOREIGN_SERVER_ID`. Defaults to true. */
   storyForeignAgent?: boolean;
   /** The channels, and their history, when the preview starts. */
@@ -332,6 +334,7 @@ export interface MockOpenBotControls {
   setQueueSnapshot: (agentId: string, deliveries: QueueDelivery[]) => QueueSnapshot;
   /** Stores the snapshot that `agent.getRuntimeSnapshot` returns and sends it as a `runtime-snapshot` event. */
   setRuntimeSnapshot: (snapshot: AgentRuntimeSnapshot) => void;
+  setWatchingSnapshot: (snapshot: WatchingSnapshot) => void;
   onMessageSent: (listener: (message: MockSentMessage) => boolean) => () => void;
   onPromptResponse: (listener: (input: RespondToPromptInput) => void) => () => void;
   emitAuthState: (state: CentralAuthState) => void;
@@ -619,6 +622,7 @@ export function createMockOpenBot(options: MockOpenBotOptions = {}): MockOpenBot
   const promptResponseListeners = new Set<Listener<RespondToPromptInput>>();
   const conversationReads = new Map(Object.entries(clone(options.conversationReads ?? {})));
   let runtimeSnapshot = options.runtimeSnapshot ? clone(options.runtimeSnapshot) : null;
+  let watchingSnapshot: WatchingSnapshot = clone(options.watchingSnapshot ?? { registry: null, waits: [] });
   const storyForeignServerId = options.storyForeignAgent === false ? null : STORY_FOREIGN_SERVER_ID;
   const timers = new Set<ReturnType<typeof setTimeout>>();
 
@@ -1735,6 +1739,7 @@ export function createMockOpenBot(options: MockOpenBotOptions = {}): MockOpenBot
     agent: {
       getStatus: async (serverId) =>
         clone(serverId === storyForeignServerId ? withStoryForeignProvider(agentStatus) : agentStatus),
+      getWatchingSnapshot: async () => clone(watchingSnapshot),
       getRuntimeSnapshot: async () => clone(runtimeSnapshot),
       getHostAnalytics: async (input) => mockHostAnalytics(input, agents),
       getAnalytics: async (input) => {
@@ -3034,6 +3039,10 @@ export function createMockOpenBot(options: MockOpenBotOptions = {}): MockOpenBot
     updateDirectConversationSnapshot: mockTeam.updateDirectConversationSnapshot,
     emitConversationDelta,
     setQueueSnapshot,
+    setWatchingSnapshot: (snapshot) => {
+      watchingSnapshot = clone(snapshot);
+      emitAgentEvent({ type: "watching-changed" });
+    },
     setRuntimeSnapshot: (snapshot) => {
       runtimeSnapshot = clone(snapshot);
       emitAgentEvent({ type: "runtime-snapshot", snapshot });
