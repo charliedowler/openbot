@@ -1293,6 +1293,7 @@ export class OpenBotToolRouter {
     const callerTaskId = this.#tasks.taskForThread(callerThreadId);
     const caller = {
       agentId: senderAgentId,
+      threadId: callerThreadId,
       inExecutionThread:
         this.#conversation.isExecutionThread(callerThreadId) &&
         !(callerTaskId !== null && this.#tasks.isRoutineThread(callerTaskId)),
