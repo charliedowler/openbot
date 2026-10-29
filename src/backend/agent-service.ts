@@ -1970,6 +1970,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
         break;
       }
     }
+    if (this.#compaction.activeThreadCount() > 0) reasons.push("context-compaction");
     if (this.#routines.hasActiveRuns() || this.#channelRoutines.hasActiveRuns()) reasons.push("routine-run");
     if (this.channels.hasActiveWork()) reasons.push("channel-work");
     if (this.#providers.activeProcessCount() > 0) reasons.push("provider-process");
@@ -1982,6 +1983,16 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
    */
   instructionsSaving(agentId: string, text: string): (written: boolean) => void {
     return this.#instructionChanges.saving(agentId, text);
+  }
+
+  nativeWorkSnapshot(): { idle: boolean; compactions: number; providerOperations: number; reasons: string[] } {
+    const reasons = this.hasActiveWork();
+    return {
+      idle: reasons.length === 0,
+      compactions: this.#compaction.activeThreadCount(),
+      providerOperations: this.#providers.activeProcessCount(),
+      reasons,
+    };
   }
 
   listMemories(agentId: string): AgentMemory[] {
