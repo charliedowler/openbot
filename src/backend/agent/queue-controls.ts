@@ -269,6 +269,8 @@ export class QueueControls {
             routineRun:
               context.delivery.sender.kind === "routine" ? this.#routines.runForDelivery(input.deliveryId) : null,
             wokenWaits: context.delivery.sender.kind === "routine" ? this.#routines.wokenWaits(input.deliveryId) : [],
+            forwardedChannelWaits:
+              context.delivery.sender.kind === "routine" && this.#routines.hasForwardedChannelWaits(input.deliveryId),
           }),
         },
         decodeRecordResponse,
