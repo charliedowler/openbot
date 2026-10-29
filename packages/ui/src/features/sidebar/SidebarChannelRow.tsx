@@ -8,7 +8,7 @@
  */
 
 import type { ChannelSummary } from "@openbot/contracts/ipc";
-import { Badge, buttonVariants, ContextMenu } from "@openbot/ui";
+import { buttonVariants, ContextMenu } from "@openbot/ui";
 import type { JSX } from "@solidjs/web";
 import { createSignal, Show } from "solid-js";
 import { useText } from "../../text";
@@ -72,30 +72,12 @@ export function SidebarChannelRow(rowProps: { channel: ChannelSummary; waiting?:
       >
         <span class="agent-row-avatar">
           <ChannelAvatar members={rowProps.channel.members} agents={props.agents} layout="cluster" />
-          <Show
-            when={channelWait()}
-            fallback={
-              <Show when={rowProps.channel.unreadCount > 0}>
-                <Badge class="person-unread-badge" variant="primary-light" aria-hidden="true">
-                  {Math.min(rowProps.channel.unreadCount, 99)}
-                </Badge>
-              </Show>
-            }
-          >
-            <SidebarAgentIndicator state={channelWait} />
-          </Show>
+          <SidebarAgentIndicator state={channelWait} />
         </span>
         <span class="agent-row-copy">
           <span class="agent-row-heading">
             <span class="agent-row-title">
               <strong>{rowProps.channel.name}</strong>
-              <Show when={title()}>
-                {(label) => (
-                  <Badge class="agent-role-badge" title={label()}>
-                    <span>{label()}</span>
-                  </Badge>
-                )}
-              </Show>
             </span>
             <Show
               when={wait()}
