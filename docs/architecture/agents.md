@@ -42,6 +42,34 @@ trigger, or a moved due time leaves the old list without starting work. An edit 
 trigger and due time uses the current instruction and policies. The run row still commits before
 the trigger advances or completes, so restart recovery keeps the same run and mailbox delivery.
 
+## Channel event waits
+
+`await_event` accepts a current channel assignment as well as an agent's own chat. The host
+checks the execution thread, turn, owner, membership, task revision and request. The wait retains
+its original mailbox delivery. That delivery resolves the durable channel assignment and its
+original task and request. New channel wait IDs have an opaque `channel:` prefix. Existing
+own-chat IDs and rows keep their meaning. A missing or deleted channel origin never falls back
+to the main chat.
+
+The waiting turn releases its assignment and leaves the existing task waiting. A wake queues
+that same task through the normal channel pump, with the same owner and revision. The pump keeps
+its resource and provider gates. Cancelled, completed, paused, reassigned or changed work stays
+stopped. The main inbox handles its event receipt and acknowledgement; the channel request
+continues only in the channel. Cancelling a wait pauses a continuation that has not started.
+
+Wake selection is the same as in an own chat. `routineId` selects an existing owner routine;
+without it, any owner routine can wake the wait. A local script can name one `waitId`. An Event
+Bridge `watchId` does not select a native wait. For group work, register the source and its owner
+route through the existing integration, reuse the owner's event inbox, call `await_event` with
+that inbox's `routineId`, and end the turn. A shared inbox can wake the wait for an unrelated
+event. The agent must check the actual source and leave the wait open when its condition is not
+met. The tool creates no source watch, subscription or recurring routine.
+
+There is no database migration or Team API change. Open channel waits are still persisted data
+that require wait-aware code. Before a rollback, retain this implementation or refuse the rollback
+while channel-prefixed waits exist. Older code can treat them as own-chat waits. Preserve the
+wait rows and their original task records.
+
 ## Quiet routine runs
 
 A scheduled, script or webhook run of an agent routine can end without news, in two ways. No person
