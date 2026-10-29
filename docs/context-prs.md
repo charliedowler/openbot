@@ -7,7 +7,7 @@ The renderer sends only a scope and an optional refresh flag through
 
 The host derives exact `https://github.com/OWNER/REPO/pull/NUMBER` references from
 persisted conversation messages. Agent scope includes its main chat, side threads
-and explicitly owned watch target links. Channel scope includes only that channel's
+and explicitly owned watch target links that have no channel origin. Channel scope includes only that channel's
 messages and task instructions or expected results. Agent membership does not make
 an agent's other PRs relevant to the channel. Slack channel IDs are not native
 channel IDs. An archived or expired watch link can establish relevance, but the
@@ -36,7 +36,9 @@ Each provider request also has a 15-second limit. Each HTTP body is limited to 2
 are no cache timers and no background repository discovery.
 
 The extraction bounds are 5,000 recent messages, 5,000 channel tasks, 200,000
-characters per source text and 200 unique PR references. `referencesLimited` marks
+characters per source text, four million scanned characters in total and 200 unique
+PR references. Source rows stream as bounded SQL snippets; message ordering keeps
+only IDs in the sort. `referencesLimited` marks
 any bound reached. It does not claim that a partial set contains all open PRs or
 the three most recent merges in the full history.
 
