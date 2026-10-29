@@ -22,6 +22,8 @@ import {
   SIDEBAR_FOLDERS_ROUTES,
 } from "@openbot/contracts/team-protocol/sidebar-folders-v1";
 import { SIDEBAR_PINS_CAPABILITY, SIDEBAR_PINS_ROUTES } from "@openbot/contracts/team-protocol/sidebar-pins-v1";
+import { WATCH_REGISTRY_CAPABILITY, WATCH_REGISTRY_ROUTES } from "@openbot/contracts/team-protocol/watch-registry-v1";
+import { decodeWatchingSnapshotFromHost } from "../remote-agent-decoding";
 // An agent's core surface: status, agents, conversations, the queue and the prompts
 // a turn can raise. Memories, routines and attachments are their own registrars.
 // Every one of these routes to the local service or to a remote server by the
@@ -312,6 +314,15 @@ export function agentIpcHandlers({
         local: () => service.getStatus(),
         remote: (serverId) =>
           runCauseEffect(remoteServers.request(serverId, TEAM_API_ROUTES.agents.status, decodeAgentStatusFromHost)),
+      }),
+      getWatchingSnapshot: scopedQueryHandler({
+        local: () => service.getWatchingSnapshot(),
+        remote: (serverId) =>
+          remoteServers.supportsCapability(serverId, WATCH_REGISTRY_CAPABILITY)
+            ? runCauseEffect(
+                remoteServers.request(serverId, WATCH_REGISTRY_ROUTES.snapshot, decodeWatchingSnapshotFromHost),
+              )
+            : { registry: null, waits: [] },
       }),
       getRuntimeSnapshot: scopedQueryHandler({
         local: () => service.getRuntimeSnapshot(),
