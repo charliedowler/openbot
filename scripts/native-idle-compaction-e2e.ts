@@ -27,6 +27,8 @@ process.env.OPENBOT_FAKE_CODEX_CONTROL = controlPath;
 mkdirSync(home, { recursive: true });
 
 const { AgentService } = await import("../src/backend/agent-service");
+const { ContextCompaction } = await import("../src/backend/agent/context-compaction");
+const { CodexAppServerClient } = await import("../src/backend/app-server-client");
 const { AgentStore } = await import("../src/backend/agent-store");
 const { runCauseEffect } = await import("../src/backend/effect-boundary");
 const { MailboxStore } = await import("../src/backend/mailbox-store");
@@ -88,7 +90,11 @@ const answer = (message) => {
           const item = { type: "contextCompaction", id: nativeId };
           log({ method: "fixture/native-compaction-running", threadId: params.threadId });
           write({ method: "item/started", params: { threadId: params.threadId, turnId: nativeId, item } });
-          setTimeout(() => {
+          if (input.includes("NATIVE-HIDDEN-COMPACTION-EXIT")) setTimeout(() => {
+            log({ method: "fixture/native-compaction-provider-exit", threadId: params.threadId });
+            process.exit(1);
+          }, 500);
+          else setTimeout(() => {
             write({ method: "item/completed", params: { threadId: params.threadId, turnId: nativeId, item } });
             log({ method: "fixture/native-compaction-completed", threadId: params.threadId });
           }, 1000);
@@ -423,6 +429,65 @@ try {
   assert.equal(unknown.nativeWork, "unavailable");
   report.checks.push(
     "The private control socket reports hidden work, blocks pending provider and server sign-in, and returns unknown when native capability is absent.",
+  );
+  const isolated = new ContextCompaction({
+    store,
+    providers: { isReady: () => false, clientFor: () => null, clientForAgent: () => null, listModels: () => [] },
+    emitError: () => {
+      throw new Error("No compaction request is permitted.");
+    },
+    scheduleDrain: () => {},
+    rotateSession: () => Effect.succeed(null),
+    rotatesSession: () => false,
+  });
+  const firstClient = new CodexAppServerClient(fakeCodex, 1000, {});
+  const secondClient = new CodexAppServerClient(fakeCodex, 1000, {});
+  const unrelatedClient = new CodexAppServerClient(fakeCodex, 1000, {});
+  isolated.observeCompaction("owned-first", "running", "context", firstClient);
+  isolated.observeCompaction("owned-second", "running", "none", secondClient);
+  assert.equal(isolated.activeThreadCount(), 2);
+  isolated.clientEnded(unrelatedClient);
+  assert.equal(isolated.activeThreadCount(), 2);
+  isolated.clientEnded(firstClient);
+  assert.equal(isolated.activeThreadCount(), 1);
+  isolated.observeCompaction("owned-second", "completed", "none", secondClient);
+  assert.equal(isolated.activeThreadCount(), 0);
+  isolated.dispose();
+  report.checks.push("Ending one native client preserves compaction owned by another client.");
+  const compactionsBeforeExit = protocol().filter(
+    (entry) => entry.method === "fixture/native-compaction-running",
+  ).length;
+  await runCauseEffect(
+    agents.createAgent({
+      name: "Native exit",
+      description: "Checks ended native work.",
+      avatarSeed: "native-exit",
+      avatarHue: null,
+      initialMessage: "NATIVE-HIDDEN-COMPACTION-EXIT",
+    }),
+  );
+  await waitFor(
+    "native compaction before provider exit",
+    () =>
+      protocol().filter((entry) => entry.method === "fixture/native-compaction-running").length > compactionsBeforeExit,
+  );
+  assert.equal(agents.nativeWorkSnapshot().compactions, 1);
+  assert.equal(
+    database.connection.prepare("SELECT COUNT(*) count FROM projection_threads WHERE active_turn_id IS NOT NULL").get()
+      ?.count,
+    0,
+  );
+  await waitFor("provider exit during native compaction", () =>
+    protocol().find((entry) => entry.method === "fixture/native-compaction-provider-exit"),
+  );
+  await waitFor(
+    "native compaction released after provider exit",
+    () => agents.nativeWorkSnapshot().compactions === 0,
+    3000,
+  );
+  assert.ok(!agents.hasActiveWork().includes("context-compaction"));
+  report.checks.push(
+    "A provider that exits during native compaction releases only its native idle blocker without a SQL turn.",
   );
   report.passed = true;
 } catch (error) {
