@@ -1,0 +1,8 @@
+{
+  "method": "POST",
+  "path": "/v1/shared-directory",
+  "capability": "shared-directory-v1",
+  "body": {
+    "path": "Shared/evidence"
+  }
+}
