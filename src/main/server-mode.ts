@@ -74,6 +74,7 @@ export interface ServerModeOptions {
   host: Pick<HostService, "getStatus" | "configure" | "start" | "updateIdentity" | "getMobileConnectHost">;
   /** The memory guard, so that `status` shows the memory ceiling and the turn limit. */
   memory: Pick<ServerMemory, "level" | "sample" | "turnLimit"> | null;
+  nativeWork?: () => { idle: boolean; compactions: number; providerOperations: number; reasons: string[] };
   onError: (message: string, error: unknown) => void;
   /** Tests only. */
   uid?: number;
@@ -228,10 +229,22 @@ export class ServerMode {
   #status(): Answer {
     const account = this.#options.centralAuth.getState();
     const host = this.#options.host.getStatus();
+    const work = this.#options.nativeWork?.();
+    const authPending =
+      account.status === "loading" || account.status === "signing_in" || account.status === "code_sent";
+    const reasons = [
+      ...(work?.reasons ?? []),
+      ...(authPending ? ["server-auth"] : []),
+      ...(this.#publishing ? ["server-publish"] : []),
+    ];
+    const native = work ? { ...work, idle: work.idle && reasons.length === 0, reasons } : null;
     return {
       status: 200,
       lines: {
         version: this.#options.version,
+        nativeWorkVersion: native ? 1 : null,
+        nativeIdle: native ? String(native.idle) : "unknown",
+        nativeWork: native ? JSON.stringify(native) : "unavailable",
         account: account.status,
         email: account.status === "signed_in" ? account.user.email : null,
         account_message: account.status === "error" ? account.issue.message : null,

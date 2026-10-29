@@ -358,6 +358,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: bun run test:agent-waits-tools
 
+      - name: Run the native idle and compaction E2E test
+        if: ${{ !cancelled() }}
+        run: node --import tsx scripts/native-idle-compaction-e2e.ts
+
       - name: Run the channel event-wait E2E test
         if: ${{ !cancelled() }}
         run: node --import tsx scripts/channel-event-waits-e2e.ts
@@ -541,6 +545,7 @@ jobs:
             .openbot-build/routine-timezone-move-e2e/
             .openbot-build/routine-overnight-window-e2e/
             .openbot-build/agent-waits-tools-e2e/
+            .openbot-build/native-idle-compaction-e2e/
             .openbot-build/channel-event-waits-e2e/
             .openbot-build/agent-hide-restore-e2e/
             .openbot-build/messaging-pause-resume-e2e/
