@@ -39,6 +39,7 @@ import type { AgentStore } from "../agent-store";
 import type { AgentTasks } from "../agent-tasks/agent-tasks";
 import type { AgentWaits } from "../agent-waits/agent-waits";
 import { OPENBOT_BROWSER_NAMESPACE } from "../browser-tools";
+import { ChannelToolInputError } from "../channel-effects";
 import type { ChannelService } from "../channel-service";
 import type { ProviderSession } from "../database/provider-sessions";
 import type { MailboxStore } from "../mailbox-store";
@@ -499,10 +500,15 @@ export class OpenBotToolRouter {
                 if (!(error instanceof z.ZodError)) logger.warn("An OpenBot tool failed.", { tool, error: message });
                 return openBotToolFailure(message);
               });
-            const correctable = PROFILE_TOOL_NAMES.has(tool) || tool === "attach_files_to_response";
+            const correctable = (error: unknown) =>
+              PROFILE_TOOL_NAMES.has(tool) ||
+              tool === "attach_files_to_response" ||
+              error instanceof ChannelToolInputError;
             const response = this.#handleOpenBotTool(toolRequest.params).pipe(
-              Effect.catch((failure) => (correctable ? correctableFailure(failure.cause) : Effect.fail(failure))),
-              Effect.catchDefect((defect) => (correctable ? correctableFailure(defect) : Effect.die(defect))),
+              Effect.catch((failure) =>
+                correctable(failure.cause) ? correctableFailure(failure.cause) : Effect.fail(failure),
+              ),
+              Effect.catchDefect((defect) => (correctable(defect) ? correctableFailure(defect) : Effect.die(defect))),
               Effect.tap((result) => Effect.sync(() => client.respond(toolRequest.id, result))),
             );
             // Both store a file and then add the message that names it.
