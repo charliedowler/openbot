@@ -86,6 +86,7 @@ import { ROUTINE_FLOWS_CODECS } from "./routine-flows-v1";
 import { ROUTINE_RECOVERY_CODECS } from "./routine-recovery-v1";
 import { ROUTINE_RESULTS_CODECS } from "./routine-results-v1";
 import { SERVER_AUDIT_CODECS } from "./server-audit-v1";
+import { SHARED_DIRECTORY_CODECS } from "./shared-directory-v1";
 import { SHARED_TABLES_CODECS } from "./shared-tables-v1";
 import { SIDE_QUESTION_CODECS } from "./side-question-v1";
 import { SIDEBAR_FOLDERS_CODECS } from "./sidebar-folders-v1";
@@ -145,6 +146,7 @@ const CODECS: ReadonlyMap<string, OptionalRouteCodec> = new Map([
   ...PUSH_NOTIFICATIONS_CODECS,
   ...ANDROID_PUSH_NOTIFICATIONS_CODECS,
   ...HOSTED_SITES_CODECS,
+  ...SHARED_DIRECTORY_CODECS,
   ...WORKSPACE_DIRECTORY_CODECS,
   ...AGENT_HOST_SETTINGS_CODECS,
   ...AGENT_BACKUP_MODELS_CODECS,
