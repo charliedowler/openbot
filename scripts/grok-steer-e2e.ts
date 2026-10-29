@@ -203,3 +203,5 @@ try {
   await rm(root, { recursive: true, force: true });
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 }
+
+if (report.passed) await import("./grok-usage-metering-e2e");
