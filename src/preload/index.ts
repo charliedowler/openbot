@@ -1138,6 +1138,7 @@ const openbotApi: OpenBotDesktopApi = {
       previewSharedFile: decodeFilePreview,
       previewWorkspaceFile: decodeFilePreview,
       releaseFilePreview: decodeVoid,
+      listSharedDirectory: decodeWorkspaceDirectory,
       listWorkspaceDirectory: decodeWorkspaceDirectory,
     }),
     onAttachmentImport: (listener) => {
