@@ -35,6 +35,7 @@ export interface OpenAgentWaitInput {
   requestText: string;
   note: string;
   routineId: string | null;
+  channel?: boolean;
 }
 
 export class AgentWaitStore {
@@ -67,7 +68,7 @@ export class AgentWaitStore {
 
   /** One statement, so two tool calls at once cannot both pass the limit. */
   open(input: OpenAgentWaitInput): AgentWait {
-    const waitId = this.#createId();
+    const waitId = `${input.channel ? "channel:" : ""}${this.#createId()}`;
     const inserted = this.#database.connection
       .prepare(
         `INSERT INTO agent_waits (wait_id, agent_id, request_delivery_id, request_text, note, routine_id, created_at)
