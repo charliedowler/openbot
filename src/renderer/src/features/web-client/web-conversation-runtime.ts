@@ -228,6 +228,7 @@ export function createWebConversationRuntime(
           ? runTeamEffect(listMcpServers(adminRequest()).pipe(Effect.mapError((error) => error.cause)))
           : [];
       },
+      listSharedDirectory: ({ path }) => remote.sharedDirectory(path),
       listWorkspaceDirectory: ({ agentId, path }) => remote.workspaceDirectory(agentId, path),
       onAttachmentImport(listener) {
         listeners.add(listener);

@@ -294,43 +294,52 @@ export function createPanelsStore(deps: PanelsStoreDeps) {
       .catch((error) => deps.setComposerError(errorMessage(error, t("attachment.error.open")), target));
   }
 
-  function openSharedFile(path: string) {
+  function openSharedFile(path: string, folder?: string) {
     const ownerAgentId = conversationOwnerId(deps.props);
     if (!ownerAgentId) return;
     const serverId = deps.props.server?.id ?? "local";
     const target = { agentId: ownerAgentId, serverId };
     const generation = deps.nextFilePreviewGeneration();
+    const current = () =>
+      scopeActive() &&
+      generation === deps.currentFilePreviewGeneration() &&
+      conversationOwnerId(deps.props) === ownerAgentId;
+    const agent = conversationRuntime(deps.props).agent;
     deps.setComposerError(null, target);
-    void conversationRuntime(deps.props)
-      .agent.previewSharedFile({ path })
-      .then(
+    const previewFile = () => {
+      if (!current()) return;
+      void agent.previewSharedFile({ path }).then(
         (preview) => {
-          if (
-            !scopeActive() ||
-            generation !== deps.currentFilePreviewGeneration() ||
-            conversationOwnerId(deps.props) !== ownerAgentId
-          ) {
+          if (!current()) {
             releaseFilePreviewPage(preview.pageUrl);
             return;
           }
-          deps.setSidebarFilePreview({ ownerAgentId, source: { kind: "shared", path }, preview });
+          deps.setSidebarFilePreview({ ownerAgentId, source: { kind: "shared", path, folder }, preview });
           setActiveRightPanel("file-preview", ownerAgentId);
         },
         (error) => {
-          if (!scopeActive() || generation !== deps.currentFilePreviewGeneration()) return;
+          if (!current()) return;
           const showError = () => {
-            if (!scopeActive() || generation !== deps.currentFilePreviewGeneration()) return;
-            deps.setComposerError(filePreviewError(error, path), target);
+            if (current()) deps.setComposerError(filePreviewError(error, path), target);
           };
-          // A link can name a folder. A local one is shown in the file manager; when that fails too,
-          // the preview error stays. A remote or web host cannot show a folder on this computer.
           if (serverId !== "local" || deps.props.runtime) {
             showError();
             return;
           }
-          void conversationRuntime(deps.props).agent.openSharedFile({ path, action: "reveal" }).catch(showError);
+          void agent.openSharedFile({ path, action: "reveal" }).catch(showError);
         },
       );
+    };
+    void agent.listSharedDirectory({ path }).then((directory) => {
+      if (!current()) return;
+      deps.setSidebarFilePreview({
+        ownerAgentId,
+        source: { kind: "shared-folder", path: directory.path },
+        preview: null,
+        directory,
+      });
+      setActiveRightPanel("file-preview", ownerAgentId);
+    }, previewFile);
   }
 
   /**
@@ -461,8 +470,12 @@ export function createPanelsStore(deps: PanelsStoreDeps) {
       generation === deps.currentFilePreviewGeneration() &&
       deps.sidebarFilePreview()?.source === source;
     const agent = conversationRuntime(deps.props).agent;
-    if (source.kind === "workspace-folder") {
-      void agent.listWorkspaceDirectory({ agentId: source.agentId, path: source.path }).then(
+    if (source.kind === "workspace-folder" || source.kind === "shared-folder") {
+      const listed =
+        source.kind === "shared-folder"
+          ? agent.listSharedDirectory({ path: source.path })
+          : agent.listWorkspaceDirectory({ agentId: source.agentId, path: source.path });
+      void listed.then(
         (directory) => {
           if (!current() || JSON.stringify(directory) === JSON.stringify(file.directory)) return;
           deps.setSidebarFilePreview({ ownerAgentId, source, preview: null, directory });
@@ -501,8 +514,18 @@ export function createPanelsStore(deps: PanelsStoreDeps) {
     const source = deps.sidebarFilePreview()?.source;
     if (!source) return undefined;
     if (source.kind === "attachment") return `attachment\u0000${source.attachment.id}`;
-    if (source.kind === "shared") return `shared\u0000${source.path}`;
+    if (source.kind === "shared" || source.kind === "shared-folder") return `${source.kind}\u0000${source.path}`;
     return `${source.kind}\u0000${source.agentId}\u0000${source.path}`;
+  }
+
+  function openSidebarDirectoryEntry(entry: { path: string; kind: "file" | "directory" }) {
+    const file = deps.sidebarFilePreview();
+    if (file?.source.kind === "shared-folder") {
+      openSharedFile(entry.path, file.source.path);
+      return;
+    }
+    if (entry.kind === "directory") openWorkspaceFolder(entry.path);
+    else openWorkspaceFolderEntry(entry.path);
   }
 
   /** The quote id of the file that the side panel shows. See `filePreviewQuoteId`. */
@@ -520,12 +543,15 @@ export function createPanelsStore(deps: PanelsStoreDeps) {
   function sidebarFileBack(): string | null {
     const file = deps.sidebarFilePreview();
     if (file?.directory) return file.directory.parentPath;
-    return file?.source.kind === "workspace" ? (file.source.folder ?? null) : null;
+    return file?.source.kind === "workspace" || file?.source.kind === "shared" ? (file.source.folder ?? null) : null;
   }
 
   function openSidebarFileBack() {
     const path = sidebarFileBack();
-    if (path !== null) openWorkspaceFolder(path);
+    if (path === null) return;
+    const source = deps.sidebarFilePreview()?.source;
+    if (source?.kind === "shared" || source?.kind === "shared-folder") openSharedFile(path);
+    else openWorkspaceFolder(path);
   }
 
   function openSidebarFileExternally() {
@@ -552,7 +578,7 @@ export function createPanelsStore(deps: PanelsStoreDeps) {
     const target = { agentId: file.ownerAgentId, serverId: deps.props.server?.id ?? "local" };
     const agent = conversationRuntime(deps.props).agent;
     const request =
-      source.kind === "shared"
+      source.kind === "shared" || source.kind === "shared-folder"
         ? agent.openSharedFile({ path: source.path, action })
         : agent.openWorkspaceFile({ agentId: source.agentId, path: source.path, action });
     const fallback = action === "download" ? t("attachment.error.download") : t("attachment.error.openFile");
@@ -609,6 +635,7 @@ export function createPanelsStore(deps: PanelsStoreDeps) {
     openSharedFile,
     openWorkspaceFile,
     openWorkspaceFolder,
+    openSidebarDirectoryEntry,
     openWorkspaceFolderEntry,
     previewQuoteId,
     previewFileKey,
