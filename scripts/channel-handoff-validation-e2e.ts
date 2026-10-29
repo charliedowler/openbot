@@ -15,6 +15,8 @@ const userData = join(root, "user-data");
 const home = join(root, "home");
 const fakeCodex = join(root, "codex");
 const fakeLog = join(root, "codex.jsonl");
+const readyPath = join(root, "ready.json");
+const releasePath = join(root, "release");
 process.env.CODEX_HOME = join(home, ".codex");
 process.env.OPENBOT_CODEX_PATH = fakeCodex;
 mkdirSync(home, { recursive: true });
@@ -29,12 +31,14 @@ const CALL_MARK = "CHANNEL-CALL";
 const PERSON = { id: "local", name: "Alex" };
 
 const FAKE_CODEX = `#!/usr/bin/env node
-const { appendFileSync } = require("node:fs");
+const { appendFileSync, readFileSync, writeFileSync, watchFile, unwatchFile } = require("node:fs");
 if (process.argv.includes("--version")) {
   process.stdout.write("codex-cli 0.160.1\\n");
   process.exit(0);
 }
 const LOG = ${JSON.stringify(fakeLog)};
+const READY = ${JSON.stringify(readyPath)};
+const RELEASE = ${JSON.stringify(releasePath)};
 const config = { config: { mcp_servers: {} }, layers: [{ name: { type: "user", file: "/fake/.codex/config.toml", profile: null }, version: "1", config: { mcp_servers: {} } }] };
 let buffer = "";
 let threads = 0;
@@ -82,9 +86,9 @@ const answer = (message) => {
       seenCalls.add(params.threadId + match[1]);
       const id = "tool-" + turnId;
       waiting.set(id, { threadId: params.threadId, turnId });
-      const { __tool, __retry, ...args } = JSON.parse(match[1].replace(/\\\\"/g, '"'));
-      waiting.set(id, { threadId: params.threadId, turnId, retry: __retry });
-      return write({
+      const { __tool, __retry, __followup, __deferCall, ...args } = JSON.parse(match[1].replace(/\\\\"/g, '"'));
+      waiting.set(id, { threadId: params.threadId, turnId, retry: __retry, followup: __followup, stale: Boolean(__deferCall), ended: Boolean(__deferCall) });
+      const sendCall = () => write({
         id,
         method: "item/tool/call",
         params: {
@@ -96,6 +100,17 @@ const answer = (message) => {
           arguments: { name: "openbot." + __tool, arguments: args },
         },
       });
+      if (__deferCall) {
+        finish(params.threadId, turnId);
+        writeFileSync(READY, JSON.stringify({ token: __deferCall, turnId }));
+        watchFile(RELEASE, { interval: 10 }, () => {
+          try { if (readFileSync(RELEASE, "utf8") !== __deferCall) return; } catch { return; }
+          unwatchFile(RELEASE);
+          sendCall();
+        });
+        return;
+      }
+      return sendCall();
     }
     case "turn/interrupt": {
       write({ id: message.id, result: {} });
@@ -118,13 +133,23 @@ process.stdin.on("data", (chunk) => {
       else if (!message.method && waiting.has(message.id)) {
         const turn = waiting.get(message.id);
         waiting.delete(message.id);
-        if (turn.retry && message.result?.success === false) {
+        if (turn.followup) {
+          log({ turnId: turn.turnId, stage: "transfer", result: message.result ?? null, error: message.error ?? null });
+          const id = "stale-" + turn.turnId;
+          waiting.set(id, { threadId: turn.threadId, turnId: turn.turnId, stale: true });
+          write({ id, method: "item/tool/call", params: { threadId: turn.threadId, turnId: turn.turnId, callId: id, namespace: "openbot", tool: turn.followup.tool, arguments: turn.followup.arguments } });
+        } else if (turn.stale) {
+          log({ turnId: turn.turnId, stage: "stale", result: message.result ?? null, error: message.error ?? null });
+          const id = "recover-" + turn.turnId;
+          waiting.set(id, { threadId: turn.threadId, turnId: turn.turnId, recovered: true, ended: turn.ended });
+          write({ id, method: "item/tool/call", params: { threadId: turn.threadId, turnId: turn.turnId, callId: id, namespace: "openbot", tool: "list_agents", arguments: {} } });
+        } else if (turn.retry && message.result?.success === false) {
           const id = "retry-" + turn.turnId;
           waiting.set(id, { threadId: turn.threadId, turnId: turn.turnId });
           write({ id, method: "item/tool/call", params: { threadId: turn.threadId, turnId: turn.turnId, callId: id, namespace: "openbot", tool: "channel_assign", arguments: turn.retry } });
         } else {
-          log({ turnId: turn.turnId, result: message.result ?? null, error: message.error ?? null });
-          finish(turn.threadId, turn.turnId);
+          log({ turnId: turn.turnId, ...(turn.recovered ? { stage: "recovery" } : {}), result: message.result ?? null, error: message.error ?? null });
+          if (!turn.ended) finish(turn.threadId, turn.turnId);
         }
       }
     }
@@ -139,6 +164,8 @@ interface ChannelToolArgs {
   expectedResult?: string;
   sourceMessageIds?: readonly string[];
   __retry?: { recipientAgentId: string; task: string; expectedResult: string; sourceMessageIds: string[] };
+  __followup?: { tool: "channel_assign"; arguments: NonNullable<ChannelToolArgs["__retry"]> };
+  __deferCall?: string;
   agentId?: string;
   instructions?: string;
   routineId?: string;
@@ -150,6 +177,7 @@ interface ChannelToolArgs {
 
 interface ToolLog {
   turnId: string;
+  stage?: string;
   result: { success: boolean; contentItems: { type: string; text: string }[] } | null;
   error: unknown;
 }
@@ -212,7 +240,7 @@ await writeFile(fakeCodex, FAKE_CODEX, { mode: 0o755 });
 const database = new OpenBotDatabase(userData);
 const store = new AgentStore(userData, home, database);
 const mailbox = new MailboxStore(userData, store.sharedRoot, store.database);
-let failStorageRead = false;
+let failStorageRead: string | null = null;
 const agents = new AgentService({
   store,
   mailbox,
@@ -225,12 +253,13 @@ const agents = new AgentService({
     const client = new CodexAppServerClient(cli.executable);
     client.on("request", (request) => {
       if (!failStorageRead || request.method !== "item/tool/call") return;
-      failStorageRead = false;
+      const failure = failStorageRead;
+      failStorageRead = null;
       const channelStore = agents.channels.store;
       const original = channelStore.message;
       channelStore.message = () => {
         channelStore.message = original;
-        throw new Error("Fixture storage read failure.");
+        throw new Error(failure);
       };
     });
     return client;
@@ -254,6 +283,7 @@ async function callTool(
   tool: string,
   args: ChannelToolArgs,
   person = PERSON,
+  beforeTool?: () => Promise<void>,
 ) {
   const before = toolLogs().length;
   await runCauseEffect(
@@ -270,6 +300,7 @@ async function callTool(
       person,
     ),
   );
+  await beforeTool?.();
   const entry = await waitFor(`${name} tool result`, () => toolLogs()[before]);
   await settled(channelId);
   const text = entry.result?.contentItems.map((item) => item.text).join("\n") ?? JSON.stringify(entry.error);
@@ -374,12 +405,178 @@ try {
     JSON.stringify(errorEvents),
   );
   pass("Every call reaches a terminal result", report.calls.length === count + 1);
-  failStorageRead = true;
-  const fatal = await callTool("unexpected storage failure", channelId, lead.id, "channel_assign", correction);
-  pass(
-    "Unexpected storage failures still reach the global error path",
-    !fatal.success && errorEvents.some((event) => event.code === "server_request_failed"),
+  const providerChoice = () => {
+    const agent = agents.listAgents().find((candidate) => candidate.id === lead.id);
+    assert.ok(agent);
+    return {
+      provider: agent.provider,
+      model: agent.model,
+      account: agent.providerAccountId,
+      backups: agent.backupModels,
+      returnTo: agent.usageLimitReturn,
+      pending: agent.pendingRuntime,
+    };
+  };
+  const originalChoice = providerChoice();
+  let archivedState = "";
+  const archivedId = randomUUID();
+  await runCauseEffect(
+    channels().command(
+      {
+        type: "save",
+        operationId: randomUUID(),
+        channelId: archivedId,
+        draft: {
+          name: "Archived work",
+          title: "",
+          instructions: "Check one request.",
+          members: [{ agentId: lead.id }, { agentId: tester.id }],
+          leadAgentId: lead.id,
+        },
+      },
+      PERSON,
+    ),
   );
+  const deferred = randomUUID();
+  const archivedCallStart = toolLogs().length;
+  const archived = await callTool(
+    "late handoff after archive",
+    archivedId,
+    lead.id,
+    "channel_assign",
+    { ...correction, __deferCall: deferred },
+    PERSON,
+    async () => {
+      await waitFor("the provider to prepare the late call", () => {
+        try {
+          return JSON.parse(readFileSync(readyPath, "utf8")).token === deferred;
+        } catch {
+          return false;
+        }
+      });
+      await settled(archivedId);
+      await runCauseEffect(
+        channels().command({ type: "archive", channelId: archivedId, operationId: randomUUID() }, PERSON),
+      );
+      archivedState = JSON.stringify({
+        tasks: channels().store.tasks(archivedId),
+        assignments: channels().store.assignments(archivedId),
+      });
+      await writeFile(releasePath, deferred);
+    },
+  );
+  pass(
+    "An inactive assignment returns a normal failed tool result",
+    report.calls.at(-1)?.success === false,
+    archived.text,
+  );
+  pass(
+    "Inactive assignment feedback instructs the old turn to end",
+    archived.text.includes("End this turn"),
+    archived.text,
+  );
+  pass(
+    "An inactive assignment does not raise a global provider error",
+    errorEvents.length === 0,
+    JSON.stringify(errorEvents),
+  );
+  await waitFor("the stale turn to finish its correction", () =>
+    toolLogs()
+      .slice(archivedCallStart)
+      .some((entry) => entry.stage === "recovery" && entry.result?.success === true),
+  );
+  pass(
+    "An archived task is not resumed or reassigned",
+    channels().store.get(archivedId).archived &&
+      channels().store.tasks(archivedId).length === 1 &&
+      channels()
+        .store.tasks(archivedId)
+        .every((task) => task.state === "completed" && task.ownerAgentId === lead.id),
+  );
+  pass(
+    "A late tool call leaves the archived task and assignment unchanged",
+    archivedState ===
+      JSON.stringify({
+        tasks: channels().store.tasks(archivedId),
+        assignments: channels().store.assignments(archivedId),
+      }),
+  );
+  const staleStart = toolLogs().length;
+  const originalTasks = new Set(
+    channels()
+      .store.tasks(channelId)
+      .map((task) => task.id),
+  );
+  const beforeStale = channels().store.tasks(channelId).length;
+  await callTool("handoff followed by a stale assignment", channelId, lead.id, "channel_transfer", {
+    ...correction,
+    __followup: { tool: "channel_assign", arguments: correction },
+  });
+  const staleCalls = toolLogs().slice(staleStart);
+  const stale = staleCalls.find((entry) => entry.stage === "stale");
+  const staleText = stale?.result?.contentItems.map((item) => item.text).join("\n") ?? JSON.stringify(stale?.error);
+  report.calls.push({
+    name: "stale assignment",
+    turnId: stale?.turnId ?? "missing",
+    success: stale?.result?.success ?? null,
+    text: staleText,
+  });
+  pass("A superseded task returns a normal failed tool result", stale?.result?.success === false, staleText);
+  pass(
+    "A superseded task tells the old turn to end rather than retry",
+    staleText.includes("End this turn") && staleText.includes("Do not continue the old task"),
+    staleText,
+  );
+  pass(
+    "Stale assignment feedback does not raise a global provider error",
+    errorEvents.length === 0,
+    JSON.stringify(errorEvents),
+  );
+  pass(
+    "The same turn can finish after a stale call",
+    staleCalls.some((entry) => entry.stage === "recovery" && entry.result?.success === true),
+  );
+  pass(
+    "A stale handoff creates no child or replacement task",
+    channels().store.tasks(channelId).length === beforeStale + 1,
+  );
+  const transferred = channels()
+    .store.tasks(channelId)
+    .find((task) => !originalTasks.has(task.id));
+  pass(
+    "A stale call preserves the transferred task's current owner and revision",
+    transferred?.ownerAgentId === tester.id &&
+      transferred.revision === 1 &&
+      transferred.assignmentCount === 1 &&
+      transferred.state === "completed",
+  );
+  const oldAssignment = channels()
+    .store.assignments(channelId)
+    .find((assignment) => assignment.turnId === stale?.turnId);
+  pass("A stale call does not revive the old assignment", oldAssignment?.state === "completed");
+  pass(
+    "Expected stale calls do not switch provider, model, account or fallbacks",
+    JSON.stringify(providerChoice()) === JSON.stringify(originalChoice),
+  );
+  for (const failure of [
+    "Fixture storage read failure.",
+    "The channel assignment is no longer active.",
+    "The channel task has changed.",
+  ]) {
+    const beforeErrors = errorEvents.length;
+    failStorageRead = failure;
+    const fatal = await callTool(`unexpected storage failure: ${failure}`, channelId, lead.id, "channel_assign", {
+      ...correction,
+      task: `Review the synthetic evidence: ${failure}`,
+    });
+    pass(
+      `Unexpected storage failure stays fatal: ${failure}`,
+      !fatal.success &&
+        report.calls.at(-1)?.success === null &&
+        errorEvents.slice(beforeErrors).some((event) => event.code === "server_request_failed"),
+      fatal.text,
+    );
+  }
   report.passed = true;
 } catch (error) {
   report.error = error instanceof Error ? (error.stack ?? error.message) : String(error);
