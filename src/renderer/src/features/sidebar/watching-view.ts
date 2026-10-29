@@ -76,12 +76,23 @@ export function createSidebarWatching(deps: {
   const data = createMemo<SidebarWatchingData | null>(() => {
     const snapshot = state.snapshot;
     if (!snapshot || state.snapshotServerId !== (deps.server()?.id ?? "local")) return null;
-    const owner = (id: string) =>
-      deps.agents().find((agent) => agent.id === id)?.name ?? t("sidebar.watching.unknownOwner");
-    const channel = (id: string | undefined) => (id ? deps.channels().find((item) => item.id === id)?.name : undefined);
+    const owners = new Map(deps.agents().map((agent) => [agent.id, agent]));
+    const channels = new Map(deps.channels().map((channel) => [channel.id, channel]));
+    const visible = (item: { ownerAgentId: string; channelId?: string }) => {
+      if (!owners.has(item.ownerAgentId)) return false;
+      if (item.channelId === undefined) return true;
+      const origin = channels.get(item.channelId);
+      if (!origin) return false;
+      return (
+        origin.members.some((member) => member.agentId === item.ownerAgentId) &&
+        origin.members.every((member) => owners.has(member.agentId))
+      );
+    };
+    const owner = (id: string) => owners.get(id)?.name ?? t("sidebar.watching.unknownOwner");
+    const channel = (id: string | undefined) => (id ? channels.get(id)?.name : undefined);
     return {
       generatedAt: snapshot.registry?.generatedAt ?? null,
-      watches: (snapshot.registry?.watches ?? []).map((watch) => ({
+      watches: (snapshot.registry?.watches ?? []).filter(visible).map((watch) => ({
         id: `${watch.publisherId}:${watch.id}`,
         ownerId: watch.ownerAgentId,
         ownerName: owner(watch.ownerAgentId),
@@ -96,7 +107,7 @@ export function createSidebarWatching(deps: {
         expiresAt: watch.expiresAt,
         error: watch.lastError,
       })),
-      waits: snapshot.waits.map((wait) => ({
+      waits: snapshot.waits.filter(visible).map((wait) => ({
         id: wait.id,
         ownerId: wait.ownerAgentId,
         ownerName: owner(wait.ownerAgentId),
