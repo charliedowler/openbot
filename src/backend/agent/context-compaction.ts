@@ -248,6 +248,14 @@ export class ContextCompaction {
     return [...held];
   }
 
+  activeThreadCount(): number {
+    const threads = new Set([...this.#compacting.keys(), ...this.#refusals.keys()]);
+    for (const [threadId, budget] of this.#budgets) if (budget.phase !== "idle") threads.add(threadId);
+    for (const [threadId, display] of this.#display)
+      if (display.compaction?.status === "running") threads.add(threadId);
+    return threads.size;
+  }
+
   updateBudget(threadId: string, params: unknown): void {
     const usage = getRecord(params, "tokenUsage");
     const last = getRecord(usage, "last");
