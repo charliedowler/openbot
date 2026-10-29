@@ -249,6 +249,10 @@ export class RoutineScheduler implements RoutineDueSource {
     return this.#waits.wokenBy(deliveryId);
   }
 
+  hasForwardedChannelWaits(deliveryId: string): boolean {
+    return this.#waits.hasForwardedChannelWaits(deliveryId);
+  }
+
   /**
    * Whether the run of this delivery may end without a message, when the agent has nothing to
    * report. Not a Test run: the person who started it waits for the result.
@@ -1040,7 +1044,9 @@ export class RoutineScheduler implements RoutineDueSource {
           throw error;
         }
       });
-      yield* routineStep(() => this.#waits.wakeForRun(run, deliveryId, waitId));
+      yield* this.#waits
+        .wakeForRun(run, deliveryId, waitId)
+        .pipe(Effect.mapError((cause) => new RoutineOperationFailed({ cause })));
       const snapshot = yield* routineStep(() => {
         const current = this.#conversation.ensureSnapshot(agent.id, agent.threadId);
         this.#hooks.syncMailboxMessages(current);

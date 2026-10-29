@@ -994,6 +994,7 @@ export class OpenBotToolRouter {
 
     const caller = {
       agentId: senderAgentId,
+      threadId: this.#conversation.publicThreadId(senderAgentId, params.threadId),
       inExecutionThread: this.#conversation.isExecutionThread(
         this.#conversation.publicThreadId(senderAgentId, params.threadId),
       ),
