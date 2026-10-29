@@ -93,6 +93,7 @@ export interface PanelsStoreDeps {
 
 export function createPanelsStore(deps: PanelsStoreDeps) {
   const scopeActive = createScopeGuard();
+  let siblingRequest: { generation: number; path: string } | null = null;
   const [skillSettingsRequest, setSkillSettingsRequest] = createSignal<{ agentId: string; skillId: string } | null>(
     null,
   );
@@ -259,7 +260,7 @@ export function createPanelsStore(deps: PanelsStoreDeps) {
       .catch((error) => deps.setComposerError(errorMessage(error, t("attachment.error.open")), target));
   }
 
-  function openSharedFile(path: string, folder?: string) {
+  function openSharedFile(path: string, folder?: string, siblings?: WorkspaceDirectory) {
     const ownerAgentId = conversationOwnerId(deps.props);
     if (!ownerAgentId) return;
     const serverId = deps.props.server?.id ?? "local";
@@ -279,7 +280,7 @@ export function createPanelsStore(deps: PanelsStoreDeps) {
             releaseFilePreviewPage(preview.pageUrl);
             return;
           }
-          deps.setSidebarFilePreview({ ownerAgentId, source: { kind: "shared", path, folder }, preview });
+          deps.setSidebarFilePreview({ ownerAgentId, source: { kind: "shared", path, folder }, preview, siblings });
           setActiveRightPanel("file-preview", ownerAgentId);
         },
         (error) => {
@@ -312,7 +313,12 @@ export function createPanelsStore(deps: PanelsStoreDeps) {
    * tried; when that fails too, the preview error stays, because it names the path the agent wrote.
    * `agentId` is the agent whose workspace holds the path; in a channel, the agent that wrote it.
    */
-  function openWorkspaceFile(path: string, folder?: string, agentId = deps.props.agent?.id) {
+  function openWorkspaceFile(
+    path: string,
+    folder?: string,
+    agentId = deps.props.agent?.id,
+    siblings?: WorkspaceDirectory,
+  ) {
     const ownerAgentId = conversationOwnerId(deps.props);
     if (!agentId || !ownerAgentId) return;
     const serverId = deps.props.server?.id ?? "local";
@@ -330,7 +336,12 @@ export function createPanelsStore(deps: PanelsStoreDeps) {
           releaseFilePreviewPage(preview.pageUrl);
           return;
         }
-        deps.setSidebarFilePreview({ ownerAgentId, source: { kind: "workspace", agentId, path, folder }, preview });
+        deps.setSidebarFilePreview({
+          ownerAgentId,
+          source: { kind: "workspace", agentId, path, folder },
+          preview,
+          siblings,
+        });
         setActiveRightPanel("file-preview", ownerAgentId);
       },
       (error) =>
@@ -391,13 +402,13 @@ export function createPanelsStore(deps: PanelsStoreDeps) {
    */
   function openWorkspaceFolderEntry(path: string) {
     const file = deps.sidebarFilePreview();
-    openWorkspaceFile(path, file?.directory?.path, previewWorkspaceAgentId());
+    openWorkspaceFile(path, file?.directory?.path, previewWorkspaceAgentId(), file?.directory);
   }
 
   function openSidebarDirectoryEntry(entry: { path: string; kind: "file" | "directory" }) {
     const file = deps.sidebarFilePreview();
     if (file?.source.kind === "shared-folder") {
-      openSharedFile(entry.path, file.source.path);
+      openSharedFile(entry.path, file.source.path, file.directory);
       return;
     }
     if (entry.kind === "directory") openWorkspaceFolder(entry.path);
@@ -428,6 +439,27 @@ export function createPanelsStore(deps: PanelsStoreDeps) {
     const source = deps.sidebarFilePreview()?.source;
     if (source?.kind === "shared" || source?.kind === "shared-folder") openSharedFile(path);
     else openWorkspaceFolder(path);
+  }
+
+  function sidebarFileCanCycle() {
+    const file = deps.sidebarFilePreview();
+    return !!file?.preview && (file.siblings?.entries.filter((entry) => entry.kind === "file").length ?? 0) > 1;
+  }
+
+  function cycleSidebarFile(direction: -1 | 1) {
+    const file = deps.sidebarFilePreview();
+    if (!file?.preview || !file.siblings || file.source.kind === "attachment") return;
+    const source = file.source;
+    const entries = file.siblings.entries.filter((entry) => entry.kind === "file");
+    if (entries.length < 2) return;
+    const path = siblingRequest?.generation === deps.currentFilePreviewGeneration() ? siblingRequest.path : source.path;
+    const index = entries.findIndex((entry) => entry.path === path);
+    if (index < 0) return;
+    const next = entries[(index + direction + entries.length) % entries.length];
+    if (!next) return;
+    if (source.kind === "shared") openSharedFile(next.path, source.folder, file.siblings);
+    else openWorkspaceFile(next.path, source.folder, source.agentId, file.siblings);
+    siblingRequest = { generation: deps.currentFilePreviewGeneration(), path: next.path };
   }
 
   function openSidebarFileExternally() {
@@ -513,6 +545,8 @@ export function createPanelsStore(deps: PanelsStoreDeps) {
     previewWorkspaceAgentId,
     sidebarFileBack,
     openSidebarFileBack,
+    sidebarFileCanCycle,
+    cycleSidebarFile,
     openSidebarFileExternally,
     downloadSidebarFile,
     downloadMessageImageFile,
