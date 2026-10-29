@@ -76,6 +76,7 @@ export interface DeliveryPromptSources {
   routineRun: Pick<RoutineRun, "kind" | "source"> | null;
   /** The open waits that a routine run wakes. The run continues their requests. */
   wokenWaits?: readonly AgentWait[];
+  forwardedChannelWaits?: boolean;
   /** The prompt a channel task or an external message sends in place of the delivery text. */
   executionText?: string | undefined;
 }
@@ -248,6 +249,9 @@ export function deliveryPromptInput(context: DeliveryContext, sources: DeliveryP
     ].join("\n");
     const waits = wokenWaitsPromptText(sources.wokenWaits ?? []);
     if (waits) text += `\n\n${waits}`;
+    if (sources.forwardedChannelWaits)
+      text +=
+        "\n\nThis event also wakes existing channel waits. Their requests continue in their original channel assignments. Handle this event receiver delivery and its exact acknowledgement here. Do not repeat the channel requests in this chat.";
   }
   if (managedAttachments.length) {
     text += `${ATTACHED_FILES_HEADER}${managedAttachments.map((item) => `- ${item.name}: ${item.path}`).join("\n")}`;
