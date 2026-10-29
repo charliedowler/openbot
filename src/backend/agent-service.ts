@@ -132,6 +132,7 @@ import { AGENT_THREAD_READS_LIMIT } from "@openbot/contracts/team-protocol/agent
 import { CLAUDE_API_KEY_ACCOUNT_ID } from "@openbot/contracts/team-protocol/claude-api-key-v1";
 import { ContextResetBusyError } from "@openbot/contracts/team-protocol/context-reset-v1";
 import type { QueueEditRequest } from "@openbot/contracts/team-protocol/queue-edit-v1";
+import type { WatchingSnapshot, WatchingWait } from "@openbot/contracts/watch-registry";
 import { sourceText } from "@openbot/i18n/source";
 import { createOpenBotLogger } from "@openbot/logging";
 import { classifyFailure } from "@openbot/telemetry";
@@ -278,6 +279,7 @@ interface AgentServiceEvents {
 }
 
 export interface AgentServiceOptions {
+  watchRegistry?: () => WatchingSnapshot["registry"];
   store: AgentStore;
   mailbox: MailboxStore;
   browser: AgentBrowserHost;
@@ -464,6 +466,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
   readonly #deltas: DeltaBuffer;
   readonly #turn: TurnLifecycle;
   readonly #compaction: ContextCompaction;
+  readonly #watchRegistry: () => WatchingSnapshot["registry"];
   readonly #duplication: DuplicationGate;
   readonly #removal: AgentRemoval;
   readonly #tools: OpenBotToolRouter;
@@ -484,6 +487,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
 
   constructor(options: AgentServiceOptions) {
     super();
+    this.#watchRegistry = options.watchRegistry ?? (() => null);
     const {
       store,
       mailbox,
@@ -1648,6 +1652,60 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     const ids = new Set(this.channels.store.ids());
     for (const agent of this.listAgents()) ids.add(agent.id);
     return ids;
+  }
+
+  getWatchingSnapshot(visibleAgents?: ReadonlySet<string>): WatchingSnapshot {
+    const visible =
+      visibleAgents ??
+      new Set(
+        this.listAgents()
+          .filter((agent) => agent.hiddenAt === undefined)
+          .map((agent) => agent.id),
+      );
+    const registry = this.#watchRegistry();
+    const channelVisible = (channelId: string, ownerAgentId: string) => {
+      try {
+        return (
+          this.channels.store.get(channelId).members.some((member) => member.agentId === ownerAgentId) &&
+          this.channels.store.get(channelId).members.every((member) => visible.has(member.agentId))
+        );
+      } catch {
+        return false;
+      }
+    };
+    const watches =
+      registry?.watches.filter(
+        (watch) =>
+          visible.has(watch.ownerAgentId) &&
+          (watch.channelId === undefined || channelVisible(watch.channelId, watch.ownerAgentId)),
+      ) ?? [];
+    const waits: WatchingWait[] = this.listAgents()
+      .filter((agent) => visible.has(agent.id))
+      .flatMap((agent) =>
+        this.listWaits(agent.id).waits.map((wait) => {
+          const assignment = wait.id.startsWith("channel:")
+            ? this.channels.store.assignmentForDelivery(wait.requestMessageId)
+            : null;
+          const channelId =
+            assignment?.agentId === agent.id && channelVisible(assignment.channelId, agent.id)
+              ? assignment.channelId
+              : undefined;
+          return {
+            id: wait.id,
+            ownerAgentId: agent.id,
+            note: wait.note,
+            routineId: wait.routineId,
+            createdAt: wait.createdAt,
+            wokenAt: wait.wokenAt,
+            ...(channelId === undefined ? {} : { channelId }),
+          };
+        }),
+      );
+    return { registry: registry ? { ...registry, watches } : null, waits };
+  }
+
+  notifyWatchingChanged(): void {
+    this.#emit({ type: "watching-changed" });
   }
 
   getRuntimeSnapshot(): AgentRuntimeSnapshot {
@@ -5049,6 +5107,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     recordAgentRestartActivity(event);
     if (this.channels?.event(event) || this.messaging?.event(event, this.#scope) || this.#tasks?.event(event)) return;
     this.emit("event", event);
+    if (event.type === "waits-changed") this.emit("event", { type: "watching-changed" });
   }
 
   /** Removes live provider state for an execution thread before its durable rows are deleted. */

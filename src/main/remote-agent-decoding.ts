@@ -16,6 +16,7 @@ import {
   isConversationSnapshot,
   isHiddenAgentsSnapshot,
 } from "@openbot/contracts/ipc";
+import { isWatchingSnapshot, type WatchingSnapshot } from "@openbot/contracts/watch-registry";
 // Agent-shaped wire payloads: summaries, status, models, skills, memories, routines, queue.
 // See `remote-host-decoding.ts` for why the `FromHost` suffix exists and must not be merged away.
 
@@ -242,5 +243,10 @@ export function decodeHostAnalyticsFromHost(value: unknown) {
 
 export function decodeAgentSessionSettingsFromHost(value: unknown): AgentSessionSettings {
   if (!isAgentSessionSettings(value)) throw new Error("Invalid session settings response.");
+  return value;
+}
+
+export function decodeWatchingSnapshotFromHost(value: unknown): WatchingSnapshot {
+  if (!isWatchingSnapshot(value)) throw new Error("Invalid watching snapshot.");
   return value;
 }

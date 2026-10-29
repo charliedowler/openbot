@@ -87,3 +87,5 @@ export * from "./mcp-sign-in-events";
 export * from "./mobile-connect";
 export * from "./skill-conversation-events";
 export * from "./ui-blocks";
+
+export * from "./watch-registry";

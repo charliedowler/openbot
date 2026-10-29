@@ -40,6 +40,7 @@ import { MAC_PERMISSION_URLS } from "./mac-permission-urls";
 import { PushNotificationStore } from "./push-notification-store";
 import { DESKTOP_USE_MS } from "./push-notifications";
 import { RemoteWorkflowError, toRemoteWorkflowError } from "./remote-service-effects";
+import { WATCH_REGISTRY_PREFERENCE_FILE, WatchRegistryStore } from "./watch-registry-store";
 /**
  * The composition root. Every long-lived service the desktop app owns is built here, in one
  * function, in dependency order, and handed back as a single record.
@@ -1659,7 +1660,13 @@ export async function createApplicationServices({
   await Effect.runPromise(agentApiKeys.syncVault().pipe(Effect.ignore));
   // The schedule triggers of workflows share the routine timer; built after the workflows below.
   let workflowTriggers: WorkflowTriggers | null = null;
+  const watchRegistry = new WatchRegistryStore(join(app.getPath("userData"), WATCH_REGISTRY_PREFERENCE_FILE), {
+    knownAgents: () => new Set(service.listAgents().map((agent) => agent.id)),
+    changed: () => service.notifyWatchingChanged(),
+  });
+  await runCauseEffect(watchRegistry.load());
   const service: AgentService = new AgentService({
+    watchRegistry: () => watchRegistry.snapshot(),
     store,
     mailbox,
     browser,
@@ -2114,6 +2121,7 @@ export async function createApplicationServices({
     hostId: () => teamStore.getIdentity()?.serverId ?? null,
   });
   const events = new HostEventsService({
+    watchRegistry,
     routines: service.routineRecords,
     workflows: {
       receive: (delivery) => workflowRuntime.receiveWebhook(delivery),
