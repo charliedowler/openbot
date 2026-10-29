@@ -104,8 +104,9 @@ export function messageFileReferences(body: string, attachments: AttachmentSumma
   return references.sort((left, right) => left.start - right.start || left.end - right.end);
 }
 
-function isSharedFilePath(value: string): boolean {
+export function isSharedFilePath(value: string): boolean {
   const normalized = value.replaceAll("\\", "/");
+  if (!/^(?:~?\/|[A-Za-z]:\/|(?:OpenBot\/)?Shared\/)/u.test(normalized)) return false;
   const segments = normalized.split("/").filter(Boolean);
   if (segments[0] === "Shared" && segments.length > 1) return true;
   return segments.some((segment, index) => segment === "OpenBot" && segments[index + 1] === "Shared");
