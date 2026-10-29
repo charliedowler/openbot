@@ -102,7 +102,7 @@ const fixture = createServer(async (request, response) => {
           payloadMode === "contradiction"
             ? "2026-10-10T12:00:00Z"
             : payloadMode === "invalid-date"
-              ? "yesterday"
+              ? "2026-02-31T12:00:00Z"
               : payloadMode === "closed"
                 ? null
                 : number >= 10

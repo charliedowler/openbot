@@ -50,6 +50,7 @@ export function decodeContextPr(raw: unknown, identity: PrIdentity, checkedAt: s
       (typeof mergedAt !== "string" ||
         !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(mergedAt) ||
         !Number.isFinite(Date.parse(mergedAt)) ||
+        new Date(mergedAt).toISOString().slice(0, 19) !== mergedAt.slice(0, 19) ||
         Date.parse(mergedAt) > Date.now() + 300_000)) ||
     (state === "open" && mergedAt !== null) ||
     (typeof raw.merged === "boolean" && raw.merged !== (mergedAt !== null))
