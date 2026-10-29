@@ -38,6 +38,7 @@ function isAgentTurnOrigin(value: unknown): value is AgentTurnOrigin {
 }
 
 export type AgentEvent =
+  | { type: "watching-changed" }
   | { type: "channels-changed"; channelId: string; revision: number }
   | { type: "status"; status: AgentStatus }
   | { type: "usage-changed"; usage: AccountUsage }
@@ -169,6 +170,8 @@ export type AgentEvent =
 export function isAgentEvent(value: unknown): value is AgentEvent {
   if (!isDynamicRecord(value) || !isString(value.type)) return false;
   switch (value.type) {
+    case "watching-changed":
+      return Object.keys(value).every((key) => key === "type");
     case "channels-changed":
       return (
         isIdentifier(value.channelId) &&
