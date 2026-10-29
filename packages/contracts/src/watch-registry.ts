@@ -59,7 +59,8 @@ function timestamp(value: unknown): value is string {
   return (
     typeof value === "string" &&
     /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value) &&
-    !Number.isNaN(Date.parse(value))
+    !Number.isNaN(Date.parse(value)) &&
+    new Date(value).toISOString() === value
   );
 }
 function targetUrl(value: unknown): value is string {
@@ -151,6 +152,7 @@ export function isWatchingSnapshot(value: unknown): value is WatchingSnapshot {
       typeof wait.note === "string" &&
       wait.note.length > 0 &&
       wait.note.length <= 500 &&
+      !wait.note.includes("\0") &&
       (wait.routineId === null || text(wait.routineId, 160)) &&
       timestamp(wait.createdAt) &&
       (wait.wokenAt === null || timestamp(wait.wokenAt)) &&
