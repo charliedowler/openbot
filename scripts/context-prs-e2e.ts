@@ -145,7 +145,9 @@ try {
   const owner = await create("Owner"),
     other = await create("Other");
   const scope = { kind: "agent" as const, id: owner.id };
+  let messageTime = Date.now();
   const insertMessage = (text: string, agent = owner) => {
+    const createdAt = new Date(++messageTime).toISOString();
     const id = `message-${Math.random()}`;
     database.connection
       .prepare(
@@ -154,8 +156,8 @@ try {
       .run(
         store.ensureThreadIdNow(agent.id),
         id,
-        new Date().toISOString(),
-        JSON.stringify({ id, text, author: "assistant", status: "completed", createdAt: new Date().toISOString() }),
+        createdAt,
+        JSON.stringify({ id, text, author: "assistant", status: "completed", createdAt }),
       );
   };
   insertMessage("Work https://github.com/example/repo/pull/1 and https://github.com/example/repo/pull/2");
