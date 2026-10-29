@@ -359,7 +359,7 @@ export interface ComposerDraft {
  * `previewUrl` and "open externally" goes through the attachment handler instead of a path.
  */
 type SidebarFilePreviewSource =
-  | { kind: "shared"; path: string }
+  | { kind: "shared"; path: string; folder?: string | undefined }
   /**
    * `agentId` is the agent whose workspace holds the path. In a channel it is the agent that wrote
    * the link, not the channel. `folder` is the folder view the file was opened from, so the panel
@@ -372,7 +372,7 @@ export type SidebarFilePreview =
   | { ownerAgentId: string; source: SidebarFilePreviewSource; preview: FilePreview; directory?: undefined }
   | {
       ownerAgentId: string;
-      source: { kind: "workspace-folder"; agentId: string; path: string };
+      source: { kind: "workspace-folder"; agentId: string; path: string } | { kind: "shared-folder"; path: string };
       preview: null;
       directory: WorkspaceDirectory;
     };

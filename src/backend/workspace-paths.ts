@@ -248,6 +248,25 @@ export const listWorkspaceDirectory = Effect.fn("Workspace.listWorkspaceDirector
     const inside = relative(workspaceRoot, path);
     return inside ? `./${encode(inside)}` : ".";
   };
+  const listing = yield* listDirectoryEntries(workspaceRoot, resolvedPath, options.allowOutside === true, pathFor);
+  const parent = dirname(resolvedPath);
+  return {
+    name: resolvedPath === workspaceRoot ? basename(agent.workspacePath) : basename(resolvedPath),
+    path: pathFor(resolvedPath),
+    root: agent.workspacePath,
+    // A folder outside the workspace is listed only for a caller that may go outside, so its parent is too.
+    parentPath: resolvedPath === workspaceRoot || parent === resolvedPath ? null : pathFor(parent),
+    // An encoded path can pass the limit that the routes accept again; that entry is left out.
+    ...listing,
+  };
+});
+
+const listDirectoryEntries = Effect.fn("Workspace.listDirectoryEntries")(function* (
+  root: string,
+  resolvedPath: string,
+  allowOutside: boolean,
+  pathFor: (path: string) => string,
+) {
   const dirents = yield* attachmentCall(() => readdir(resolvedPath, { withFileTypes: true }));
   const candidates: { name: string; target: string; kind: WorkspaceDirectoryEntry["kind"] }[] = [];
   for (const dirent of dirents) {
@@ -261,7 +280,7 @@ export const listWorkspaceDirectory = Effect.fn("Workspace.listWorkspaceDirector
     if (!dirent.isSymbolicLink()) continue;
     // A link is followed for its kind; its target must pass the same containment check as a path.
     const target = yield* attachmentCall(() => realpath(entryPath)).pipe(Effect.orElseSucceed(() => null));
-    if (target === null || (!options.allowOutside && !isWithin(workspaceRoot, target))) continue;
+    if (target === null || (!allowOutside && !isWithin(root, target))) continue;
     const linked = yield* attachmentCall(() => stat(target)).pipe(Effect.orElseSucceed(() => null));
     if (linked?.isDirectory() || linked?.isFile())
       candidates.push({ name: dirent.name, target, kind: linked.isDirectory() ? "directory" : "file" });
@@ -287,18 +306,45 @@ export const listWorkspaceDirectory = Effect.fn("Workspace.listWorkspaceDirector
       ),
     { concurrency: 16 },
   );
-  const parent = dirname(resolvedPath);
   return {
-    name: resolvedPath === workspaceRoot ? basename(agent.workspacePath) : basename(resolvedPath),
-    path: pathFor(resolvedPath),
-    root: agent.workspacePath,
-    // A folder outside the workspace is listed only for a caller that may go outside, so its parent is too.
-    parentPath: resolvedPath === workspaceRoot || parent === resolvedPath ? null : pathFor(parent),
-    // An encoded path can pass the limit that the routes accept again; that entry is left out.
     entries: shown.filter(
       (entry): entry is WorkspaceDirectoryEntry => entry !== null && entry.path.length <= INPUT_LIMITS.path,
     ),
     truncated: candidates.length > WORKSPACE_DIRECTORY_LIMIT,
+  };
+});
+
+export class SharedPathRefused extends Error {
+  constructor(readonly reason: "missing" | "outside" | "not-directory") {
+    super(
+      sourceText(
+        reason === "not-directory" ? "error.backend.sharedPathNotDirectory" : "error.backend.sharedPathUnavailable",
+      ),
+    );
+  }
+}
+
+export const listSharedDirectory = Effect.fn("Workspace.listSharedDirectory")(function* (
+  sharedRootPath: string,
+  inputPath: string,
+): Effect.fn.Return<WorkspaceDirectory, AttachmentOperationError> {
+  const root = yield* attachmentCall(() => realpath(sharedRootPath));
+  const path = yield* attachmentCall(() => realpath(sharedPathFromInput(sharedRootPath, inputPath))).pipe(
+    Effect.catch((failure) =>
+      isMissing(failure) ? Effect.fail(attachmentFailure(new SharedPathRefused("missing"))) : Effect.fail(failure),
+    ),
+  );
+  if (path !== root && !isWithin(root, path)) return yield* attachmentFailure(new SharedPathRefused("outside"));
+  const metadata = yield* attachmentCall(() => stat(path));
+  if (!metadata.isDirectory()) return yield* attachmentFailure(new SharedPathRefused("not-directory"));
+  const pathFor = (entry: string) => `Shared/${relative(root, entry).split(sep).join("/")}`;
+  const listing = yield* listDirectoryEntries(root, path, false, pathFor);
+  return {
+    name: basename(path),
+    path: pathFor(path),
+    root: "Shared/",
+    parentPath: path === root ? null : pathFor(dirname(path)),
+    ...listing,
   };
 });
 
