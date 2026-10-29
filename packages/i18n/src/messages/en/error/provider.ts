@@ -128,6 +128,10 @@ export const messages = defineMessages("error.provider", {
     one: "Codex ignored {count} setting in its configuration. Correct or remove it, or update Codex.",
     other: "Codex ignored {count} settings in its configuration. Correct or remove them, or update Codex.",
   },
+  "error.provider.codexConfigUntrusted":
+    "{folders}: Codex skips project-local config, hooks, and command policies until you trust these folders. Skills still load. Review these folders before changing Codex project trust.",
+  "error.provider.codexConfigUntrustedUnnamed":
+    "Codex skips project-local config, hooks, and command policies in untrusted folders. Skills still load. Review the folders in the Codex configuration warning before changing project trust.",
   "error.provider.claudeOutdated": "Claude Code {version} is too old. OpenBot requires 2.1.232 or newer.",
   "error.provider.claudeNotStarted": "Claude CLI was found but could not be started.",
   "error.provider.claudeNotStartedHint":

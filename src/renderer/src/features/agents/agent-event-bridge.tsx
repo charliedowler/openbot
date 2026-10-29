@@ -365,7 +365,7 @@ export function AgentEventBridge() {
         if (claimErrorToast(toastKey)) {
           // Codex ignored a setting and runs without it. The provider works, so this is a warning
           // about the user's file, not a provider error.
-          if (event.code === "codex_config_ignored") {
+          if (event.code === "codex_config_ignored" || event.code === "codex_config_untrusted") {
             toast.warning(currentText().t("agent.error.codexConfigIgnored"), {
               ...{ description: toastKey },
               report: { operation: "provider", source: "provider", cause_code: classifyFailure(event.message) },
