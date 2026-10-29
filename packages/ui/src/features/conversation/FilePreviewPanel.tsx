@@ -2,6 +2,8 @@ import type { FilePreview, WorkspaceDirectory, WorkspaceDirectoryEntry } from "@
 import {
   ArrowLeft,
   Button,
+  ChevronLeft,
+  ChevronRight,
   Code,
   CopyButton,
   Download,
@@ -62,6 +64,7 @@ interface FilePreviewPanelProps {
   onOpenWorkspaceFolder?: (path: string) => void;
   /** Goes to the folder the file came from, or to the parent of the folder. */
   onBack?: (() => void) | undefined;
+  onNavigateFile?: ((direction: -1 | 1) => void) | undefined;
   /** Set when the file already has a URL the panel can point at, as an attachment does. */
   sourceUrl?: string | null;
   /**
@@ -97,6 +100,7 @@ export default function FilePreviewPanel(props: FilePreviewPanelProps) {
   const [wrapLines, setWrapLines] = createSignal(untrack(() => props.readWrapLines()));
   let currentPreviewUrl: string | null = null;
   let revealFrame: number | undefined;
+  let panel: HTMLElement | undefined;
   const file = () => (props.directory ? null : props.preview);
   const previewKind = () => file()?.previewKind;
   const pageUrl = () => (previewKind() === "text" ? props.pageUrl : null) ?? null;
@@ -127,8 +131,11 @@ export default function FilePreviewPanel(props: FilePreviewPanelProps) {
       props.onWidthChange(width);
     },
   );
-  createEffect(file, () => {
+  createEffect(file, (preview) => {
     setRawSource(false);
+    if (preview && (document.activeElement === document.body || panel?.contains(document.activeElement))) {
+      panel?.focus({ preventScroll: true });
+    }
   });
   createEffect(
     () => ({ preview: file(), sourceUrl: props.sourceUrl }),
@@ -193,11 +200,44 @@ export default function FilePreviewPanel(props: FilePreviewPanelProps) {
 
   return (
     <aside
-      ref={revealPanel}
+      ref={(element) => {
+        panel = element;
+        revealPanel();
+      }}
       id="file-preview-panel"
       class="browser-panel file-preview-panel t-panel-slide"
       data-open={revealed() ? "true" : "false"}
       aria-label={t("preview.panel.label")}
+      tabindex={-1}
+      onPointerDown={(event) => {
+        if (
+          event.target instanceof Element &&
+          !event.target.closest("button,a,input,textarea,select,[contenteditable=true],[role=separator],audio,video")
+        )
+          event.currentTarget.focus({ preventScroll: true });
+      }}
+      onKeyDown={(event) => {
+        if (
+          !props.onNavigateFile ||
+          event.defaultPrevented ||
+          event.altKey ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.shiftKey
+        )
+          return;
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+        if (
+          event.target instanceof Element &&
+          event.target.closest(
+            "input,textarea,select,[contenteditable=true],[role=textbox],[role=slider],[role=separator],audio,video",
+          )
+        )
+          return;
+        event.preventDefault();
+        event.stopPropagation();
+        props.onNavigateFile(event.key === "ArrowLeft" ? -1 : 1);
+      }}
     >
       <PanelResizer
         class="right-panel-resizer"
@@ -222,6 +262,34 @@ export default function FilePreviewPanel(props: FilePreviewPanelProps) {
             <HeaderButton label={t("preview.panel.back")} onClick={() => back()()}>
               <ArrowLeft class="browser-toolbar-icon" />
             </HeaderButton>
+          )}
+        </Show>
+        <Show when={props.onNavigateFile}>
+          {(navigate) => (
+            <>
+              <Button
+                variant="ghost"
+                type="button"
+                class="browser-toolbar-button"
+                aria-label={t("preview.panel.previousFile")}
+                title={t("preview.panel.previousFile")}
+                aria-keyshortcuts="ArrowLeft"
+                onClick={() => navigate()(-1)}
+              >
+                <ChevronLeft class="browser-toolbar-icon" />
+              </Button>
+              <Button
+                variant="ghost"
+                type="button"
+                class="browser-toolbar-button"
+                aria-label={t("preview.panel.nextFile")}
+                title={t("preview.panel.nextFile")}
+                aria-keyshortcuts="ArrowRight"
+                onClick={() => navigate()(1)}
+              >
+                <ChevronRight class="browser-toolbar-icon" />
+              </Button>
+            </>
           )}
         </Show>
         <Show when={props.directory} fallback={<File class="file-preview-file-icon" />}>

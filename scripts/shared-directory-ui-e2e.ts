@@ -17,6 +17,14 @@ const svg =
 await mkdir(join(fixture, "nested"), { recursive: true });
 await mkdir(output, { recursive: true });
 await writeFile(join(fixture, "dashboard.svg"), svg);
+await writeFile(
+  join(fixture, "landscape.svg"),
+  '<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="600"><rect width="2200" height="600" fill="#e0f2fe"/><text x="40" y="100" font-size="60">LEFT EDGE</text><text x="1740" y="540" font-size="60">RIGHT EDGE</text></svg>',
+);
+await writeFile(
+  join(fixture, "portrait.svg"),
+  '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="2200"><rect width="600" height="2200" fill="#dcfce7"/><text x="40" y="100" font-size="50">TOP EDGE</text><text x="40" y="2140" font-size="50">BOTTOM EDGE</text></svg>',
+);
 await writeFile(join(fixture, "README.md"), "# Shared evidence\n\nThis file opens inside OpenBot.\n");
 await writeFile(join(fixture, "nested", "notes.txt"), "Nested Shared folder navigation.\n");
 const errors: string[] = [];
@@ -73,6 +81,37 @@ try {
   );
   await dismissNotifications();
   await panel.screenshot({ path: join(output, "image.png") });
+  await page.keyboard.press("ArrowRight");
+  await panel.getByRole("heading", { name: "landscape.svg", exact: true }).waitFor();
+  await panel.getByRole("img", { name: "landscape.svg", exact: true }).evaluate(async (element) => {
+    if (!(element instanceof HTMLImageElement)) throw new Error("Image renderer is missing");
+    await element.decode();
+  });
+  await panel.screenshot({ path: join(output, "image-fit-landscape.png") });
+  await page.keyboard.press("ArrowRight");
+  await panel.getByRole("heading", { name: "portrait.svg", exact: true }).waitFor();
+  await panel.getByRole("img", { name: "portrait.svg", exact: true }).evaluate(async (element) => {
+    if (!(element instanceof HTMLImageElement)) throw new Error("Image renderer is missing");
+    await element.decode();
+  });
+  await panel.screenshot({ path: join(output, "image-fit-portrait.png") });
+  await page.keyboard.press("ArrowRight");
+  await panel.getByRole("heading", { name: "README.md", exact: true }).waitFor();
+  await page.keyboard.press("ArrowRight");
+  await panel.getByRole("heading", { name: "dashboard.svg", exact: true }).waitFor();
+  await page.keyboard.press("ArrowLeft");
+  await panel.getByRole("heading", { name: "README.md", exact: true }).waitFor();
+  const composer = page.getByRole("textbox", { name: "Message to channel", exact: true });
+  await composer.fill("Navigation stays in this draft");
+  await composer.press("ArrowLeft");
+  assert.equal(await panel.getByRole("heading", { level: 2 }).innerText(), "README.md");
+  await composer.fill("");
+  await panel.getByRole("button", { name: "Next file", exact: true }).click();
+  await panel.getByRole("heading", { name: "dashboard.svg", exact: true }).waitFor();
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowRight");
+  await panel.getByRole("heading", { name: "portrait.svg", exact: true }).waitFor();
+
   await panel.getByRole("button", { name: "Back", exact: true }).click();
   await panel.getByRole("heading", { name: folderName, exact: true }).waitFor();
   await panel
@@ -113,13 +152,18 @@ try {
           "real Shared folder link",
           "native folder list",
           "rendered image bytes",
+          "Left and Right file navigation",
+          "forward and reverse wraparound excluding folders",
+          "rapid navigation keeps the latest request",
+          "chat typing does not navigate the preview",
+          "Next file toolbar action",
           "Markdown preview",
           "nested file preview",
           "Back to containing folder",
           "parent navigation",
           "close and reopen",
         ],
-        screenshots: ["folder.png", "image.png"],
+        screenshots: ["folder.png", "image.png", "image-fit-landscape.png", "image-fit-portrait.png"],
       },
       null,
       2,
