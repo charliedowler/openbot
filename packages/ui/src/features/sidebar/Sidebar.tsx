@@ -7,6 +7,10 @@ import { SidebarTopbar } from "./SidebarTopbar";
 import { SidebarViewSwitch } from "./SidebarViewSwitch";
 import { createSidebarScope, SidebarScopeContext } from "./sidebar-scope";
 import type { SidebarProps } from "./sidebar-types";
+import "./sidebar-watching.css";
+
+export type { SidebarWatchingData, SidebarWatchingItem } from "./SidebarWatching";
+export { SidebarWatchingDialog } from "./SidebarWatching";
 
 export function Sidebar(props: SidebarProps) {
   const scope = createSidebarScope(props);

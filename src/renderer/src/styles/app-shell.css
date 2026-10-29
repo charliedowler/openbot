@@ -1452,7 +1452,7 @@ textarea {
   flex-direction: column;
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 4px 12px 0;
+  padding: var(--openbot-space-2) var(--openbot-space-3) 0;
   scrollbar-width: none;
 }
 
@@ -1470,7 +1470,7 @@ textarea {
 }
 
 .sidebar-chat-group + .sidebar-chat-group {
-  margin-top: 6px;
+  margin-top: var(--openbot-space-4);
   transition: margin-top var(--panel-resize-duration, var(--openbot-duration-overlay)) cubic-bezier(0.32, 0.72, 0, 1);
 }
 
@@ -1614,12 +1614,12 @@ textarea {
   display: flex;
   width: 100%;
   min-width: 0;
-  height: 32px;
+  height: calc(var(--openbot-space-8) + var(--openbot-space-2));
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   border-radius: var(--openbot-radius-md);
-  padding: 0 7px;
+  padding: 0 var(--openbot-space-3);
   background: transparent;
   color: var(--openbot-text-readable);
   transition-property: color;
@@ -1644,7 +1644,7 @@ textarea {
 .sidebar-section-name {
   min-width: 0;
   overflow: hidden;
-  font-size: var(--openbot-text-sm);
+  font-size: var(--openbot-text-md);
   font-weight: 400;
   line-height: 16px;
   text-overflow: ellipsis;
@@ -1929,7 +1929,7 @@ textarea {
 }
 
 .sidebar-pinned-group {
-  padding: 4px 0 2px;
+  padding: var(--openbot-space-3) 0 var(--openbot-space-2);
 }
 
 .sidebar-pinned-list {
@@ -1962,8 +1962,8 @@ textarea {
   min-height: 102px;
   flex-direction: column;
   justify-content: flex-start;
-  gap: 4px;
-  padding: 4px 2px;
+  gap: var(--openbot-space-2);
+  padding: var(--openbot-space-2) var(--openbot-space-1);
   cursor: grab;
   text-align: center;
 }
@@ -1987,7 +1987,7 @@ textarea {
 .sidebar-pinned-copy {
   display: flex;
   width: 100%;
-  min-height: 34px;
+  min-height: calc(var(--openbot-space-4) + var(--openbot-space-1));
   min-width: 0;
   flex-direction: column;
   align-items: center;
@@ -2001,33 +2001,12 @@ textarea {
   min-width: 0;
   overflow: hidden;
   color: var(--openbot-text-primary);
-  font-size: var(--openbot-text-sm);
+  font-size: var(--openbot-text-md);
   font-weight: 450;
-  line-height: 16px;
+  line-height: 20px;
   text-align: center;
   text-overflow: ellipsis;
   text-wrap: pretty;
-  white-space: nowrap;
-}
-
-.sidebar-pinned-title {
-  box-sizing: border-box;
-  max-width: 100%;
-  height: 18px;
-  min-height: 18px;
-  flex: 0 0 16px;
-  border-color: var(--openbot-border);
-  border-radius: var(--openbot-radius-xs);
-  background: var(--openbot-hover);
-  padding: 0 var(--openbot-space-1);
-  color: var(--openbot-text-readable);
-  font-weight: 400;
-}
-
-.sidebar-pinned-title > span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -2095,24 +2074,6 @@ textarea {
   height: 34px;
 }
 
-.person-unread-badge {
-  position: absolute;
-  z-index: 2;
-  right: -4px;
-  bottom: -3px;
-  display: grid;
-  min-width: 17px;
-  height: 17px;
-  place-items: center;
-  border: 2px solid var(--openbot-bg-sidebar);
-  border-radius: var(--openbot-radius-pill);
-  background: var(--openbot-text-primary);
-  padding: 0 3px;
-  color: var(--openbot-bg-sidebar);
-  font-size: var(--openbot-text-sm);
-  font-weight: 680;
-}
-
 .agent-row {
   --agent-row-avatar-size: 46px;
 
@@ -2121,11 +2082,11 @@ textarea {
   height: 62px;
   min-height: 62px;
   align-items: center;
-  gap: 8px;
+  gap: var(--openbot-space-3);
   border: 0;
   border-radius: var(--openbot-radius-md);
   background: transparent;
-  padding: 8px;
+  padding: var(--openbot-space-2) var(--openbot-space-3);
   color: inherit;
   text-align: left;
   transition:
@@ -2233,18 +2194,6 @@ textarea {
   stroke-width: var(--openbot-icon-stroke);
   stroke-linecap: round;
   stroke-linejoin: round;
-}
-
-.agent-row-agent-status-unread {
-  min-width: 16px;
-  height: 16px;
-  border-radius: var(--openbot-radius-pill);
-  background: var(--openbot-text-primary);
-  padding: 0 3px;
-  color: var(--openbot-bg-sidebar);
-  font-size: var(--openbot-text-sm);
-  font-weight: 650;
-  line-height: 12px;
 }
 
 .agent-row-agent-status-routine,
@@ -2806,15 +2755,6 @@ textarea {
   overflow: hidden;
 }
 
-.agent-row-title:has(.agent-role-badge) {
-  --agent-role-badge-collapsed-width: calc(2ch + 9px);
-
-  display: grid;
-  grid-template-columns:
-    fit-content(calc(100% - var(--agent-role-badge-collapsed-width) - 5px))
-    minmax(var(--agent-role-badge-collapsed-width), 1fr);
-}
-
 .agent-row-name {
   display: flex;
   min-width: 0;
@@ -2843,32 +2783,6 @@ textarea {
   font-size: var(--openbot-text-lg);
   line-height: 20px;
   font-weight: 500;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-role-badge {
-  min-width: 0;
-  max-width: 100%;
-  height: 18px;
-  min-height: 18px;
-  overflow: hidden;
-  flex: 0 1 auto;
-  justify-self: start;
-  border: 0.5px solid var(--openbot-border);
-  border-radius: var(--openbot-radius-xs);
-  background: var(--openbot-hover);
-  padding: 2px 4px;
-  color: var(--openbot-text-readable);
-  font-size: var(--openbot-text-sm);
-  font-weight: 400;
-  line-height: 16px;
-  white-space: nowrap;
-}
-
-.agent-role-badge > span {
-  min-width: 0;
-  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2909,7 +2823,7 @@ textarea {
 
 .agent-row-preview {
   display: block;
-  margin-top: 0;
+  margin-top: var(--openbot-space-1);
   overflow: hidden;
   color: var(--openbot-text-muted);
   font-size: var(--openbot-text-md);

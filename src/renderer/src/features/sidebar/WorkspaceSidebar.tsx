@@ -1,7 +1,7 @@
 import { type ChatWindowTarget, canAdministerServer } from "@openbot/contracts/ipc";
 import { AGENT_HIDDEN_CAPABILITY } from "@openbot/contracts/team-protocol/current";
 import { computeAgentAvatarMoods } from "@openbot/ui/features/agents/agent-avatar-mood";
-import { Sidebar } from "@openbot/ui/features/sidebar/Sidebar";
+import { Sidebar, SidebarWatchingDialog } from "@openbot/ui/features/sidebar/Sidebar";
 import { SidebarCommunityCard } from "@openbot/ui/features/sidebar/SidebarCommunityCard";
 import { SidebarMachineCard } from "@openbot/ui/features/sidebar/SidebarMachineCard";
 import { SidebarMobileAppCard } from "@openbot/ui/features/sidebar/SidebarMobileAppCard";
@@ -38,6 +38,7 @@ import { createCommunityCardVisibility } from "./community-card";
 import { createMachineCard } from "./machine-card";
 import { useSidebar } from "./sidebar-context";
 import { createStorageCard } from "./storage-card";
+import { createSidebarWatching } from "./watching-view";
 
 /** Dismissing the mobile app card is a choice of this computer, like the sidebar width. The key is
  * new with the Android release, so a computer that dismissed the iPhone-only card sees it once more. */
@@ -96,6 +97,13 @@ export function WorkspaceSidebar(props: { peopleEnabled: boolean }) {
   const { directPeople, teamPresence } = usePresence();
   const { activeDirectMember, activeDirectMemberId, directThreads } = useDirectMessages();
   const { selectAgent, selectDirectMember, setGlobalSearchVisibility, chatHistory } = useNavigation();
+  const sidebar = useSidebar();
+  const watching = createSidebarWatching({
+    server: activeServer,
+    revision: sidebar.watchingRevision,
+    agents: agentList,
+    channels: () => channels.state.channels,
+  });
   const agentTasks = useAgentTasks();
   const agentThreads = useAgentThreads();
   /**
@@ -240,173 +248,191 @@ export function WorkspaceSidebar(props: { peopleEnabled: boolean }) {
   );
 
   return (
-    <Sidebar
-      channels={visibleChannels()}
-      deletedChannels={channelsListed() ? channels.state.channels.filter((channel) => channel.archived) : []}
-      activeChannelId={channels.state.selectedId}
-      onSelectChannel={(id) => void channels.open(id)}
-      onEditChannel={(id) => void channels.editChannel(id)}
-      onDeleteChannel={channels.deletionSupported() ? channels.remove : undefined}
-      onRestoreChannel={channels.deletionSupported() ? channels.restore : undefined}
-      showingArchivedChannels={channelsListed() && channels.state.archived}
-      onToggleArchivedChannels={channelsListed() ? channels.toggleArchived : undefined}
-      onCreateChannel={channelsListed() ? channels.create : undefined}
-      onMarkAllRead={() => {
-        void markAllAgentMessagesRead();
-        void channels.markAllRead();
-      }}
-      hasUnread={
-        agentList().some((agent) => !userHiddenAgentIds().has(agent.id) && (unreadReplies()[agent.id] ?? 0) > 0) ||
-        channels.hasUnread()
-      }
-      view={layout.sidebarView()}
-      serverName={activeServer()?.name ?? t("sidebar.topbar.localServer")}
-      onOpenServerSettings={(trigger) => {
-        const server = activeServer();
-        if (server) openServerSettings(server.id, trigger);
-      }}
-      chatHistory={{
-        back: chatName(chatHistory.previous()),
-        forward: chatName(chatHistory.next()),
-        keys: chatHistoryKeys(platform.appInfo()?.platform === "darwin"),
-        onBack: chatHistory.goBack,
-        onForward: chatHistory.goForward,
-      }}
-      serverUpdate={(() => {
-        const server = activeServer();
-        const badge = server ? serverUpdateBadge(server.id) : null;
-        return server && badge ? { ...badge, onOpen: () => void showServerUpdate(server.id) } : undefined;
-      })()}
-      serverMenu={
-        platform.appInfo()
-          ? {
-              servers: serverActions.orderedServers(),
-              view: layout.serverView(),
-              onViewChange: layout.setServerView,
-              onSelect: serverActions.select,
-              onAdd: serverActions.add,
-              onCreateLocal: serverActions.addMenuCreateLocal(),
-              addCreatesServer: serverActions.addCreatesServer(),
-              hiddenLocal: serverActions.hiddenLocal(),
-              ...serverActions.callbacks,
-            }
-          : undefined
-      }
-      agents={agentList()}
-      activeAgentId={activeDirectMember() || channels.state.selectedId ? "" : (activeAgent()?.id ?? "")}
-      showPeople={props.peopleEnabled}
-      people={directPeople()}
-      directThreads={directThreads()}
-      activeDirectMemberId={activeDirectMemberId()}
-      agentStates={sidebarAgentStates()}
-      channelWaits={channelWaits()}
-      agentMoods={agentMoods()}
-      layout={sidebarLayout()}
-      layoutMutable={activeServerSupportsCapability("sidebar-layout")}
-      collapsedSectionIds={collapsedSidebarSectionIds()}
-      onMutateLayout={mutateSidebarLayout}
-      sectionDuplicateSupported={
-        activeServerSupportsCapability("agent-duplication") && activeServerSupportsCapability("sidebar-layout")
-      }
-      duplicatingSectionIds={duplicatingSectionIds()}
-      onDuplicateSection={duplicateSection}
-      onToggleSection={toggleSidebarSection}
-      pinnedItems={pinnedSidebarItems()}
-      peopleOrder={sidebarPeopleOrder()}
-      onPin={pinSidebarItem}
-      onUnpin={unpinSidebarItem}
-      onReorderPinned={reorderPinnedSidebarItems}
-      onReorderPeople={reorderSidebarPeople}
-      onSelectAgent={selectAgent}
-      onSelectPerson={(memberId) => void selectDirectMember(memberId)}
-      onPreloadDirectConversation={props.peopleEnabled ? () => void DirectConversation.preload() : undefined}
-      onCreateAgent={() => {
-        channels.close();
-        openAgentSetup();
-      }}
-      onEditAgent={editAgent}
-      duplicateSupported={activeServerSupportsCapability("agent-duplication")}
-      duplicatingAgentIds={duplicatingAgentIds()}
-      onDuplicateAgent={duplicateAgent}
-      onDeleteAgent={deleteAgent}
-      userHiddenAgents={userHiddenAgents()}
-      onHideAgent={hideAllowed() ? (agentId) => void setAgentHiddenByUser(agentId, true) : undefined}
-      onRestoreAgent={hideAllowed() ? (agentId) => void setAgentHiddenByUser(agentId, false) : undefined}
-      onNewAgentThread={newAgentThread()}
-      onOpenAgentWindow={
-        platform.landingPreview
-          ? undefined
-          : (agentId) => void appPort().openChatWindow({ serverId: activeServerId(), agentId })
-      }
-      windowAgentIds={windowAgentIds()}
-      compact={layout.leftPanelCompact()}
-      onExpand={layout.expandSidebar}
-      onOpenSearch={() => setGlobalSearchVisibility(true)}
-      footer={
-        <>
-          {/* One card at a time. A machine over its alert level comes first, then a disk that is
-           * almost full; the community card waits until the mobile app card is dismissed. */}
-          <Show when={shownMachineCard()}>
-            {(card) => (
-              <SidebarMachineCard
-                serverName={activeServer()?.name ?? ""}
-                metric={card().metric}
-                percent={card().percent}
-                level={card().level}
-                freeBytes={card().freeBytes}
-                critical={card().critical}
-                recipientName={machineRecipient(card().responsibleMemberId)}
-                onOpenDetails={() => openServerSettings(card().serverId, null, "storage")}
-                onDismiss={() => machineCard.dismiss(card().serverId, card())}
+    <>
+      <Sidebar
+        onOpenWatching={watching.open}
+        channels={visibleChannels()}
+        deletedChannels={channelsListed() ? channels.state.channels.filter((channel) => channel.archived) : []}
+        activeChannelId={channels.state.selectedId}
+        onSelectChannel={(id) => void channels.open(id)}
+        onEditChannel={(id) => void channels.editChannel(id)}
+        onDeleteChannel={channels.deletionSupported() ? channels.remove : undefined}
+        onRestoreChannel={channels.deletionSupported() ? channels.restore : undefined}
+        showingArchivedChannels={channelsListed() && channels.state.archived}
+        onToggleArchivedChannels={channelsListed() ? channels.toggleArchived : undefined}
+        onCreateChannel={channelsListed() ? channels.create : undefined}
+        onMarkAllRead={() => {
+          void markAllAgentMessagesRead();
+          void channels.markAllRead();
+        }}
+        hasUnread={
+          agentList().some((agent) => !userHiddenAgentIds().has(agent.id) && (unreadReplies()[agent.id] ?? 0) > 0) ||
+          channels.hasUnread()
+        }
+        view={layout.sidebarView()}
+        serverName={activeServer()?.name ?? t("sidebar.topbar.localServer")}
+        onOpenServerSettings={(trigger) => {
+          const server = activeServer();
+          if (server) openServerSettings(server.id, trigger);
+        }}
+        chatHistory={{
+          back: chatName(chatHistory.previous()),
+          forward: chatName(chatHistory.next()),
+          keys: chatHistoryKeys(platform.appInfo()?.platform === "darwin"),
+          onBack: chatHistory.goBack,
+          onForward: chatHistory.goForward,
+        }}
+        serverUpdate={(() => {
+          const server = activeServer();
+          const badge = server ? serverUpdateBadge(server.id) : null;
+          return server && badge ? { ...badge, onOpen: () => void showServerUpdate(server.id) } : undefined;
+        })()}
+        serverMenu={
+          platform.appInfo()
+            ? {
+                servers: serverActions.orderedServers(),
+                view: layout.serverView(),
+                onViewChange: layout.setServerView,
+                onSelect: serverActions.select,
+                onAdd: serverActions.add,
+                onCreateLocal: serverActions.addMenuCreateLocal(),
+                addCreatesServer: serverActions.addCreatesServer(),
+                hiddenLocal: serverActions.hiddenLocal(),
+                ...serverActions.callbacks,
+              }
+            : undefined
+        }
+        agents={agentList()}
+        activeAgentId={activeDirectMember() || channels.state.selectedId ? "" : (activeAgent()?.id ?? "")}
+        showPeople={props.peopleEnabled}
+        people={directPeople()}
+        directThreads={directThreads()}
+        activeDirectMemberId={activeDirectMemberId()}
+        agentStates={sidebarAgentStates()}
+        channelWaits={channelWaits()}
+        agentMoods={agentMoods()}
+        layout={sidebarLayout()}
+        layoutMutable={activeServerSupportsCapability("sidebar-layout")}
+        collapsedSectionIds={collapsedSidebarSectionIds()}
+        onMutateLayout={mutateSidebarLayout}
+        sectionDuplicateSupported={
+          activeServerSupportsCapability("agent-duplication") && activeServerSupportsCapability("sidebar-layout")
+        }
+        duplicatingSectionIds={duplicatingSectionIds()}
+        onDuplicateSection={duplicateSection}
+        onToggleSection={toggleSidebarSection}
+        pinnedItems={pinnedSidebarItems()}
+        peopleOrder={sidebarPeopleOrder()}
+        onPin={pinSidebarItem}
+        onUnpin={unpinSidebarItem}
+        onReorderPinned={reorderPinnedSidebarItems}
+        onReorderPeople={reorderSidebarPeople}
+        onSelectAgent={selectAgent}
+        onSelectPerson={(memberId) => void selectDirectMember(memberId)}
+        onPreloadDirectConversation={props.peopleEnabled ? () => void DirectConversation.preload() : undefined}
+        onCreateAgent={() => {
+          channels.close();
+          openAgentSetup();
+        }}
+        onEditAgent={editAgent}
+        duplicateSupported={activeServerSupportsCapability("agent-duplication")}
+        duplicatingAgentIds={duplicatingAgentIds()}
+        onDuplicateAgent={duplicateAgent}
+        onDeleteAgent={deleteAgent}
+        userHiddenAgents={userHiddenAgents()}
+        onHideAgent={hideAllowed() ? (agentId) => void setAgentHiddenByUser(agentId, true) : undefined}
+        onRestoreAgent={hideAllowed() ? (agentId) => void setAgentHiddenByUser(agentId, false) : undefined}
+        onNewAgentThread={newAgentThread()}
+        onOpenAgentWindow={
+          platform.landingPreview
+            ? undefined
+            : (agentId) => void appPort().openChatWindow({ serverId: activeServerId(), agentId })
+        }
+        windowAgentIds={windowAgentIds()}
+        compact={layout.leftPanelCompact()}
+        onExpand={layout.expandSidebar}
+        onOpenSearch={() => setGlobalSearchVisibility(true)}
+        footer={
+          <>
+            {/* One card at a time. A machine over its alert level comes first, then a disk that is
+             * almost full; the community card waits until the mobile app card is dismissed. */}
+            <Show when={shownMachineCard()}>
+              {(card) => (
+                <SidebarMachineCard
+                  serverName={activeServer()?.name ?? ""}
+                  metric={card().metric}
+                  percent={card().percent}
+                  level={card().level}
+                  freeBytes={card().freeBytes}
+                  critical={card().critical}
+                  recipientName={machineRecipient(card().responsibleMemberId)}
+                  onOpenDetails={() => openServerSettings(card().serverId, null, "storage")}
+                  onDismiss={() => machineCard.dismiss(card().serverId, card())}
+                />
+              )}
+            </Show>
+            <Show when={shownStorageCard()}>
+              {(card) => (
+                <SidebarStorageCard
+                  level={card().level}
+                  serverName={activeServer()?.name ?? ""}
+                  freeBytes={card().freeBytes}
+                  totalBytes={card().totalBytes}
+                  onFreeUpSpace={() => openServerSettings(card().serverId, null, "storage")}
+                  onDismiss={() => storageCard.dismiss(card().serverId)}
+                />
+              )}
+            </Show>
+            <Show when={!platform.landingPreview && !footerCard() && !mobileAppDismissed()}>
+              <SidebarMobileAppCard
+                onOpenInstall={() => openAppSettings(null, "mobile-connect")}
+                onDismiss={() => {
+                  window.localStorage.setItem(MOBILE_APP_DISMISSED_STORAGE_KEY, "true");
+                  setMobileAppDismissed(true);
+                }}
               />
-            )}
-          </Show>
-          <Show when={shownStorageCard()}>
-            {(card) => (
-              <SidebarStorageCard
-                level={card().level}
-                serverName={activeServer()?.name ?? ""}
-                freeBytes={card().freeBytes}
-                totalBytes={card().totalBytes}
-                onFreeUpSpace={() => openServerSettings(card().serverId, null, "storage")}
-                onDismiss={() => storageCard.dismiss(card().serverId)}
+            </Show>
+            <Show when={!platform.landingPreview && !footerCard() && mobileAppDismissed() && !communityCard.dismissed()}>
+              <SidebarCommunityCard
+                onJoinDiscord={() => void appPort().openExternal("discord")}
+                onFollowX={() => void appPort().openExternal("x")}
+                onDismiss={communityCard.dismiss}
               />
-            )}
-          </Show>
-          <Show when={!platform.landingPreview && !footerCard() && !mobileAppDismissed()}>
-            <SidebarMobileAppCard
-              onOpenInstall={() => openAppSettings(null, "mobile-connect")}
-              onDismiss={() => {
-                window.localStorage.setItem(MOBILE_APP_DISMISSED_STORAGE_KEY, "true");
-                setMobileAppDismissed(true);
-              }}
-            />
-          </Show>
-          <Show when={!platform.landingPreview && !footerCard() && mobileAppDismissed() && !communityCard.dismissed()}>
-            <SidebarCommunityCard
-              onJoinDiscord={() => void appPort().openExternal("discord")}
-              onFollowX={() => void appPort().openExternal("x")}
-              onDismiss={communityCard.dismiss}
-            />
-          </Show>
-          <SidebarUpdateIsland />
-        </>
-      }
-      onOpenMarketplace={() => setSkillsMarketplaceOpen(true)}
-      agentsConnecting={agentListConnecting()}
-      emptyAction={
-        agentList().length === 0 && agentListSettled()
-          ? {
-              label: t("sidebar.empty.firstAgent"),
-              avatarSeed: agentSetupDraft().avatarSeed,
-              avatarHue: agentSetupDraft().avatarHue,
-              onSelect: () => {
-                channels.close();
-                openAgentSetup();
-              },
-            }
-          : undefined
-      }
-    />
+            </Show>
+            <SidebarUpdateIsland />
+          </>
+        }
+        onOpenMarketplace={() => setSkillsMarketplaceOpen(true)}
+        agentsConnecting={agentListConnecting()}
+        emptyAction={
+          agentList().length === 0 && agentListSettled()
+            ? {
+                label: t("sidebar.empty.firstAgent"),
+                avatarSeed: agentSetupDraft().avatarSeed,
+                avatarHue: agentSetupDraft().avatarHue,
+                onSelect: () => {
+                  channels.close();
+                  openAgentSetup();
+                },
+              }
+            : undefined
+        }
+      />
+      <SidebarWatchingDialog
+        open={watching.state.open}
+        loading={watching.state.loading}
+        supported={watching.supported()}
+        error={watching.state.error}
+        data={watching.data()}
+        onClose={watching.close}
+        onRefresh={watching.refresh}
+        onOpenChat={(ownerId, channelId) => {
+          watching.close();
+          if (channelId) void channels.open(channelId);
+          else selectAgent(ownerId);
+        }}
+        onOpenSource={(url) => void appPort().openUrl(url)}
+      />
+    </>
   );
 }
