@@ -342,12 +342,22 @@ const replay = Effect.fn("SignInRelayHost.replay")(function* (query: URLSearchPa
   const answer = yield* load(address, REPLAY_TIMEOUT);
   if (!answer?.delivered) return false;
   // `codex login` answers its callback with a redirect to its own success page, and ends only when
-  // that page loads, as in a browser on this host. Only that one redirect, to the same address and
-  // port, is followed. The callback has its sign-in already, so this load does not change the result.
-  if (answer.next?.origin === address.origin) {
-    const token = answer.next.searchParams.get("id_token");
+  // that page loads, as in a browser on this host. Only a redirect from `/auth/callback` to `/success`
+  // on the same address and port is followed, and without its query, so the token is not sent again.
+  // A refused sign-in does not complete. The callback has its sign-in already, so this load does not
+  // change the result.
+  const next = answer.next;
+  if (
+    !query.has("error") &&
+    address.pathname === "/auth/callback" &&
+    next?.origin === address.origin &&
+    next.pathname === "/success" &&
+    !next.username &&
+    !next.password
+  ) {
+    const token = next.searchParams.get("id_token");
     if (token) registerSecretValue(token);
-    yield* load(answer.next, SUCCESS_PAGE_TIMEOUT);
+    yield* load(new URL("/success", address), SUCCESS_PAGE_TIMEOUT);
   }
   return true;
 });
