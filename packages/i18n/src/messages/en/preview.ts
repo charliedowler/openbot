@@ -9,6 +9,8 @@ export const messages = defineMessages("preview", {
   "preview.panel.reveal": "Show file in Finder",
   "preview.panel.close": "Close file preview",
   "preview.panel.back": "Back",
+  "preview.panel.previousFile": "Previous file",
+  "preview.panel.nextFile": "Next file",
   "preview.panel.rawMarkdown": "Show Markdown source",
   "preview.panel.rawHtml": "Show HTML source",
   "preview.panel.wrapLines": "Wrap long lines",

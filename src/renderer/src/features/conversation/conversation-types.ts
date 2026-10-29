@@ -369,7 +369,13 @@ type SidebarFilePreviewSource =
   | { kind: "attachment"; attachment: AttachmentSummary };
 
 export type SidebarFilePreview =
-  | { ownerAgentId: string; source: SidebarFilePreviewSource; preview: FilePreview; directory?: undefined }
+  | {
+      ownerAgentId: string;
+      source: SidebarFilePreviewSource;
+      preview: FilePreview;
+      directory?: undefined;
+      siblings?: WorkspaceDirectory | undefined;
+    }
   | {
       ownerAgentId: string;
       source: { kind: "workspace-folder"; agentId: string; path: string } | { kind: "shared-folder"; path: string };
