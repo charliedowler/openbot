@@ -54,6 +54,7 @@ const SIDE_PANEL_EMPTY: SidePanelState = { panes: [], selected: null, maximized:
 export const SIDE_PANEL_MODES = {
   browser: "browser",
   files: "files",
+  "pull-requests": "pull-requests",
   settings: "settings",
   question: "question",
   voice: "voice",

@@ -432,6 +432,7 @@ try {
   );
   const isolated = new ContextCompaction({
     store,
+    isStopping: () => false,
     providers: { isReady: () => false, clientFor: () => null, clientForAgent: () => null, listModels: () => [] },
     emitError: () => {
       throw new Error("No compaction request is permitted.");
