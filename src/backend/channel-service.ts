@@ -30,7 +30,13 @@ import { type DynamicRecord, isDynamicRecord, isString } from "@openbot/contract
 import { isFixedSourceText, matchingSourceKeys, sourceText } from "@openbot/i18n/source";
 import { createOpenBotLogger } from "@openbot/logging";
 import { Deferred, Effect, Exit, Fiber, Result, Schema, Scope } from "effect";
-import { type ChannelOperationError, channelFailure, channelResult, channelSync } from "./channel-effects";
+import {
+  type ChannelOperationError,
+  ChannelToolInputError,
+  channelFailure,
+  channelResult,
+  channelSync,
+} from "./channel-effects";
 import {
   assignmentText,
   boundedHistoryPage,
@@ -3138,7 +3144,7 @@ export class ChannelService {
     // failed tool request with "dynamic tool request failed" (#4728). The log keeps a fixed reason.
     const refuse = (reason: string, logReason = reason) => {
       logger.warn("A channel handoff was refused.", { channelId, agentId, tool, reason: logReason });
-      return { accepted: false, reason };
+      return channelFailure(new ChannelToolInputError(reason));
     };
     if (
       !isString(args.recipientAgentId) ||
@@ -3152,30 +3158,30 @@ export class ChannelService {
       !args.sourceMessageIds.length ||
       !args.sourceMessageIds.every(isString)
     )
-      return refuse(
+      return yield* refuse(
         "A handoff needs recipientAgentId, task, expectedResult, and sourceMessageIds: the ids of one or more shared channel messages that the task comes from.",
       );
     const recipientAgentId = args.recipientAgentId;
     const recipient = yield* Effect.result(channelSync(() => this.requireAvailableMember(channel, recipientAgentId)));
     if (Result.isFailure(recipient)) {
       if (this.hooks.hidden?.(recipientAgentId))
-        return refuse("This member is hidden and takes no new work. Choose another channel member.");
+        return yield* refuse("This member is hidden and takes no new work. Choose another channel member.");
       if (!this.hooks.agents().some((agent) => agent.id === recipientAgentId))
-        return refuse("Set recipientAgentId to the agent id of an available channel member.");
+        return yield* refuse("Set recipientAgentId to the agent id of an available channel member.");
       // The agent exists but is not a member. Only a person can add it, so the agent must not retry.
       const name = this.memberName(recipientAgentId);
       const others = this.eligibleMembers(channel).filter((id) => id !== agentId);
       const available = others.slice(0, 20).map((id) => `${this.memberName(id)} (${id})`);
       if (others.length > available.length) available.push(`${others.length - available.length} more`);
-      return refuse(
+      return yield* refuse(
         `${name} (${recipientAgentId}) is not a member of this channel. Available members: ${available.join(", ") || "none"}. If the task needs ${name}, ask a person in this channel to add it, then end your turn.`,
         "The recipient is not a member of this channel.",
       );
     }
-    if (args.recipientAgentId === agentId) return refuse("Choose another channel member.");
+    if (args.recipientAgentId === agentId) return yield* refuse("Choose another channel member.");
     const sourceMessageIds = args.sourceMessageIds;
     if (sourceMessageIds.some((id) => !this.store.message(channelId, id)))
-      return refuse("A source message is unavailable. Use the ids of shared channel messages.");
+      return yield* refuse("A source message is unavailable. Use the ids of shared channel messages.");
     const root = tasks.find((item) => item.id === task.rootTaskId);
     if (!root) return yield* channelFailure(new Error("The root task is unavailable."));
     if (root.assignmentCount >= CHANNEL_ASSIGNMENT_LIMIT) {
@@ -3200,20 +3206,20 @@ export class ChannelService {
     const resources = Array.isArray(args.resources) && args.resources.every(isString) ? args.resources : [];
     // Reject an oversized list before the loop. The loop runs a blocking `realpathSync` per
     // workspace entry on the Electron main thread.
-    if (resources.length > 64) return refuse("Give at most 64 task resources.");
+    if (resources.length > 64) return yield* refuse("Give at most 64 task resources.");
     for (let i = 0; i < resources.length; i++) {
       const resource = resources[i] ?? "none";
       if (resource.startsWith("workspace:") && isAbsolute(resource.slice(10)))
         resources[i] = `workspace:${canonicalWorkspace(resource.slice(10))}`;
       else if (resource !== "host" && resource !== "browser" && resource !== "none")
-        return refuse("Use browser, none, or workspace:<absolute path> for task resources.");
+        return yield* refuse("Use browser, none, or workspace:<absolute path> for task resources.");
     }
     // Measure each resource after canonicalization.
     if (resources.some((resource) => resource.length > 4096))
-      return refuse("A task resource path is longer than 4096 characters.");
+      return yield* refuse("A task resource path is longer than 4096 characters.");
     const dependencies = Array.isArray(args.dependencies) && args.dependencies.every(isString) ? args.dependencies : [];
     if (dependencies.some((id) => dependsOn(tasks, id, task.id) || !tasks.some((item) => item.id === id)))
-      return refuse(
+      return yield* refuse(
         "Each dependency must be the id of another task in this channel that does not depend on this task.",
       );
     const next =
