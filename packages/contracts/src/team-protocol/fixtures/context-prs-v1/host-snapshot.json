@@ -1,0 +1,22 @@
+{
+  "scope": { "kind": "agent", "id": "agent-synthetic" },
+  "status": "ready",
+  "checkedAt": "2026-10-29T12:00:00.000Z",
+  "open": [
+    {
+      "url": "https://github.com/example/repo/pull/1",
+      "repo": "example/repo",
+      "number": 1,
+      "title": "Synthetic change",
+      "state": "open",
+      "draft": false,
+      "mergedAt": null,
+      "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "checks": "passed",
+      "checkedAt": "2026-10-29T12:00:00.000Z"
+    }
+  ],
+  "merged": [],
+  "failures": [],
+  "referencesLimited": false
+}
