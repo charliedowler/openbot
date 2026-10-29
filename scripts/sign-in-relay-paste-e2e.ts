@@ -129,3 +129,5 @@ try {
   await writeFile(join(OUT, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 }
+
+if (report.passed) await import("./sign-in-relay-completion-e2e");
