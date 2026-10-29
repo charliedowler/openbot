@@ -25,7 +25,7 @@ const wait = fields(
   {
     id: string(160),
     ownerAgentId: string(160),
-    note: string(2000),
+    note: string(500),
     routineId: nullable(string(160)),
     createdAt: string(160),
     wokenAt: nullable(string(160)),

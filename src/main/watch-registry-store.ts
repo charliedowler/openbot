@@ -124,7 +124,16 @@ export class WatchRegistryStore {
           (previous.ownerAgentId !== publisher.ownerAgentId || snapshot.sequence < previous.snapshot.sequence)
         )
           return 400 as const;
+        if (
+          snapshot.watches.some((watch) =>
+            [watch.id, watch.ownerAgentId, watch.sourceKind, watch.targetUrl, watch.channelId].some(
+              (value) => value !== undefined && redactText(value) !== value,
+            ),
+          )
+        )
+          return 400 as const;
         const clean = cleanPublication(snapshot);
+        if (!isWatchRegistryPublication(clean)) return 400 as const;
         if (previous && snapshot.sequence === previous.snapshot.sequence)
           return JSON.stringify(clean) === JSON.stringify(previous.snapshot) ? (200 as const) : (400 as const);
         const publishers = [
