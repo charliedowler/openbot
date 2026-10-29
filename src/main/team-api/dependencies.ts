@@ -137,6 +137,7 @@ type TeamApiAgentMethods = Pick<
   | "discardDraftAttachment"
   | "resolveSharedFile"
   | "resolveWorkspaceFile"
+  | "listSharedDirectory"
   | "listWorkspaceDirectory"
   | "sendMessage"
   | "listQueue"

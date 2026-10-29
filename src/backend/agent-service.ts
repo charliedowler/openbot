@@ -104,6 +104,7 @@ import type {
   UpdateChannelRoutineInput,
   UpdateQueuedMessageInput,
   UpdateRoutineInput,
+  WorkspaceDirectory,
 } from "@openbot/contracts/ipc";
 import {
   type AgentDefaults,
@@ -247,6 +248,7 @@ import type { SidebarLayoutStore } from "./sidebar-layout-store";
 import type { VaultItems } from "./vault-items";
 import type { WorkflowRunEnd } from "./workflows/workflows";
 import {
+  listSharedDirectory,
   listWorkspaceDirectory,
   type ResolvedSharedFile,
   resolveSharedFile,
@@ -3359,6 +3361,14 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
 
   resolveAvatar(agentId: string): { path: string; mimeType: AvatarImageInput["mimeType"]; version: string } | null {
     return this.#store.resolveAvatar(agentId);
+  }
+
+  listSharedDirectory(inputPath: string): Effect.Effect<WorkspaceDirectory, AgentLifecycleFailed> {
+    return listSharedDirectory(this.#store.sharedRoot, inputPath).pipe(
+      Effect.mapError(
+        (failure) => new AgentLifecycleFailed({ operation: "list shared directory", cause: failure.cause }),
+      ),
+    );
   }
 
   resolveSharedFile(
