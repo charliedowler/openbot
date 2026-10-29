@@ -152,7 +152,7 @@ export function collectProviderUsage(
       model,
       counterId: `${session.id}:grok:${getString(params, "promptId") ?? turnId}`,
       baseline: false,
-      tokens: acpTokens({ ...value, cachedWriteTokens: value.cacheCreationTokens }),
+      tokens: acpTokens({ ...value, cachedWriteTokens: value.cacheCreationTokens ?? value.cachedWriteTokens }),
       reportedCost: ticks === null ? null : ticks / GROK_USD_TICKS,
     });
     return;
@@ -188,6 +188,21 @@ export function workflowUsageObserver(
       collectProviderUsage(usage, { id: WORKFLOWS_USAGE_ID, model }, session, method, params);
     } catch (error) {
       logger.warn("Could not save the usage of a workflow step.", { provider, error });
+    }
+  };
+}
+
+export function channelUsageObserver(
+  usage: AgentUsage,
+  agent: Pick<AgentSummary, "id" | "provider" | "model">,
+  purpose: "channel-routing" | "channel-summary" = "channel-routing",
+): (notification: { method: string; params?: unknown }) => void {
+  const session = { id: `${purpose}:${randomUUID()}`, provider: agent.provider, createdAt: new Date().toISOString() };
+  return ({ method, params }) => {
+    try {
+      collectProviderUsage(usage, agent, session, method, params);
+    } catch (error) {
+      logger.warn("Could not save channel helper usage.", { provider: agent.provider, purpose, error });
     }
   };
 }

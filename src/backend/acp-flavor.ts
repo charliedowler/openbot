@@ -2,6 +2,7 @@ import { win32 } from "node:path";
 import type { LoadSessionResponse, NewSessionRequest, PromptResponse, RequestError } from "@agentclientprotocol/sdk";
 import type { DynamicRecord } from "@openbot/contracts/runtime-values";
 import type { CauseCode } from "@openbot/telemetry";
+import { Result, Schema } from "effect";
 import { enableCursorMcpServers } from "./cursor-mcp-disabled";
 import { isRecord } from "./protocol";
 
@@ -160,12 +161,30 @@ export const DEFAULT_ACP_FLAVOR: AcpFlavor = {};
 /** Cline CLI 3.0.68 runs a subagent with its `spawn_agent` tool: `{ systemPrompt, task }`, result `{ text }`. */
 export const CLINE_ACP_FLAVOR: AcpFlavor = { subagentTools: ["spawn_agent"] };
 
+const grokTokenCount = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+const decodeGrokPromptUsage = Schema.decodeUnknownResult(
+  Schema.Struct({
+    inputTokens: grokTokenCount,
+    outputTokens: grokTokenCount,
+    cachedReadTokens: grokTokenCount,
+    cacheCreationTokens: grokTokenCount,
+    totalTokens: grokTokenCount,
+    usageIsIncomplete: Schema.optional(Schema.Boolean),
+  }),
+);
+
 /**
  * Grok CLI 1.0.22 and 1.0.70 send no `usage` in the `session/prompt` result and no `usage_update`.
  * The result's `_meta.usage` holds the tokens and the cost of this prompt's model calls (#4827).
  */
 export const GROK_ACP_FLAVOR: AcpFlavor = {
-  promptUsage: (response) => (isRecord(response._meta) && isRecord(response._meta.usage) ? response._meta.usage : null),
+  promptUsage: (response) => {
+    const usage = isRecord(response._meta) && isRecord(response._meta.usage) ? response._meta.usage : null;
+    const decoded = decodeGrokPromptUsage(usage);
+    if (!usage || Result.isFailure(decoded) || decoded.success.usageIsIncomplete) return null;
+    const { inputTokens, cachedReadTokens, cacheCreationTokens } = decoded.success;
+    return cachedReadTokens + cacheCreationTokens > inputTokens ? null : usage;
+  },
 };
 
 /**
