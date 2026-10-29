@@ -3141,6 +3141,11 @@ export async function createApplicationServices({
         centralAuth,
         host,
         memory: hostMemory,
+        nativeWork: () => {
+          const work = service.nativeWorkSnapshot();
+          const readiness = describeRestartReadiness();
+          return { ...work, idle: readiness.safeToRestart, reasons: readiness.reasons };
+        },
         onError: (message, error) => logger.warn(message, toLogValue(error)),
       })
     : null;

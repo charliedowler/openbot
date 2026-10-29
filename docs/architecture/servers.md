@@ -903,6 +903,13 @@ A self-hosted server uses the same Linux build, scripts and units on the owner's
 a Unix socket in the 0700 runtime directory of the service user. Main publishes the host after each
 sign-in. See [self-hosted servers](../self-hosted-server.md).
 
+The private control socket includes `nativeWorkVersion=1`, `nativeIdle`, and a `nativeWork` JSON
+summary. The summary contains counts and restart reasons. It includes provider-native compaction
+for all contexts, provider operations, sign-in, initialization, and the existing restart blockers.
+It contains no thread text or IDs. A missing native-work callback reports `nativeIdle=unknown`;
+operators must not read an absent or unknown field as idle. SQL active-turn rows do not cover
+provider-native compaction.
+
 ### Remote release checks
 
 `host-release-v1` adds release status and check routes for all signed-in server members. It does not change
