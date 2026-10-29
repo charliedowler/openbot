@@ -26,7 +26,13 @@ import {
 import { type DynamicRecord, isDynamicRecord, isString } from "@openbot/contracts/runtime-values";
 import { isFixedSourceText, matchingSourceKeys, sourceText } from "@openbot/i18n/source";
 import { Deferred, Effect, Exit, Fiber, Result, Schema, Scope } from "effect";
-import { type ChannelOperationError, channelFailure, channelResult, channelSync } from "./channel-effects";
+import {
+  type ChannelOperationError,
+  ChannelToolInputError,
+  channelFailure,
+  channelResult,
+  channelSync,
+} from "./channel-effects";
 import {
   ChannelHistory,
   type ChannelTextModel,
@@ -2334,14 +2340,21 @@ export class ChannelService {
       !args.sourceMessageIds.every(isString)
     )
       return yield* channelFailure(
-        new Error("A handoff needs a recipient, task, expected result, and source messages."),
+        new ChannelToolInputError(
+          "A handoff needs a recipient, task, expected result, and source messages. Supply recipientAgentId, task, expectedResult, and a non-empty sourceMessageIds array. Use message IDs from the current channel context or channel_history, then retry the handoff.",
+        ),
       );
     const recipientAgentId = args.recipientAgentId;
     yield* channelSync(() => this.requireAvailableMember(channel, recipientAgentId));
-    if (args.recipientAgentId === agentId) return yield* channelFailure(new Error("Choose another channel member."));
+    if (args.recipientAgentId === agentId)
+      return yield* channelFailure(new ChannelToolInputError("Choose another channel member."));
     const sourceMessageIds = args.sourceMessageIds;
     if (sourceMessageIds.some((id) => !this.store.message(channelId, id)))
-      return yield* channelFailure(new Error("A source message is unavailable."));
+      return yield* channelFailure(
+        new ChannelToolInputError(
+          "A source message is unavailable. Read channel_history and retry with message IDs from this channel.",
+        ),
+      );
     const root = tasks.find((item) => item.id === task.rootTaskId);
     if (!root) return yield* channelFailure(new Error("The root task is unavailable."));
     if (root.assignmentCount >= CHANNEL_ASSIGNMENT_LIMIT) {
