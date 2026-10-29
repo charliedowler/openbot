@@ -8,10 +8,19 @@ import {
 } from "./routine-tool-schema";
 
 const handoff = {
-  recipientAgentId: z.string(),
-  task: z.string().min(1).max(INPUT_LIMITS.messageText),
-  expectedResult: z.string().min(1).max(INPUT_LIMITS.messageText),
-  sourceMessageIds: z.array(z.string()).min(1),
+  recipientAgentId: z.string().describe("The agent ID of another member of this channel."),
+  task: z.string().min(1).max(INPUT_LIMITS.messageText).describe("The specific work the recipient must do."),
+  expectedResult: z
+    .string()
+    .min(1)
+    .max(INPUT_LIMITS.messageText)
+    .describe("What the recipient must return when the work is complete."),
+  sourceMessageIds: z
+    .array(z.string())
+    .min(1)
+    .describe(
+      "Existing message IDs from the current channel context or channel_history that explain this handoff. Do not use task IDs, turn IDs, or message text.",
+    ),
   resources: z
     .array(z.string())
     .describe(
