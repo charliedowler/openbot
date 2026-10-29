@@ -6,6 +6,7 @@ import type { OpenBotDatabase } from "./openbot-database";
 const rowLimit = 5000;
 const referenceLimit = 200;
 const textLimit = 200_000;
+const scanLimit = 4_000_000;
 export class ContextPrReferences {
   constructor(
     readonly database: OpenBotDatabase,
@@ -18,20 +19,9 @@ export class ContextPrReferences {
         ? sql.prepare("SELECT 1 FROM projection_agents WHERE agent_id=?").get(scope.id)
         : sql.prepare("SELECT 1 FROM projection_channels WHERE channel_id=?").get(scope.id);
     if (!exists) throw new Error("Unknown context PR scope.");
-    const rows =
-      scope.kind === "agent"
-        ? sql
-            .prepare(
-              "SELECT json_extract(m.message_json,'$.text') AS text FROM projection_thread_messages m WHERE m.thread_id IN (SELECT thread_id FROM projection_agents WHERE agent_id=?1 UNION SELECT thread_id FROM projection_agent_threads WHERE agent_id=?1) ORDER BY m.created_at DESC,m.message_id DESC LIMIT ?2",
-            )
-            .all(scope.id, rowLimit + 1)
-        : sql
-            .prepare(
-              "SELECT json_extract(message_json,'$.message.text') AS text FROM projection_channel_messages WHERE channel_id=? ORDER BY sequence DESC LIMIT ?",
-            )
-            .all(scope.id, rowLimit + 1);
     const urls = new Map<string, string>();
-    let limited = rows.length > rowLimit;
+    let limited = false,
+      scannedText = 0;
     const add = (candidate: string) => {
       const identity = contextPullRequestIdentity(candidate);
       if (!identity) return;
@@ -45,30 +35,68 @@ export class ContextPrReferences {
     };
     const scan = (value: unknown) => {
       if (!isString(value)) return;
-      if (value.length > textLimit) limited = true;
-      for (const match of value
-        .slice(0, textLimit)
-        .matchAll(
-          /https:\/\/github\.com\/[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}\/pull\/[1-9][0-9]{0,9}(?![A-Za-z0-9_/?#.-])/g,
-        ))
-        add(match[0]);
+      const remaining = Math.min(textLimit, scanLimit - scannedText);
+      const truncated = value.length > remaining;
+      if (truncated) limited = true;
+      const part = value.slice(0, remaining);
+      scannedText += part.length;
+      for (const match of part.matchAll(
+        /https:\/\/github\.com\/[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}\/pull\/[1-9][0-9]{0,9}(?![A-Za-z0-9_/?#.-])/g,
+      ))
+        if (!truncated || match.index + match[0].length < part.length) add(match[0]);
     };
     if (scope.kind === "agent") {
       for (const watch of this.watches()?.watches ?? [])
-        if (watch.ownerAgentId === scope.id && watch.targetUrl) add(watch.targetUrl);
-    }
-    for (const row of rows.slice(0, rowLimit)) if (isDynamicRecord(row)) scan(row.text);
-    if (scope.kind === "channel") {
+        if (watch.ownerAgentId === scope.id && !watch.channelId && watch.targetUrl) add(watch.targetUrl);
+      const text = sql.prepare(
+        "SELECT substr(json_extract(message_json,'$.text'),1,?) AS text FROM projection_thread_messages WHERE thread_id=? AND message_id=?",
+      );
+      const rows = sql
+        .prepare(
+          "SELECT thread_id,message_id FROM projection_thread_messages WHERE thread_id IN (SELECT thread_id FROM projection_agents WHERE agent_id=?1 UNION SELECT thread_id FROM projection_agent_threads WHERE agent_id=?1) ORDER BY created_at DESC,message_id DESC LIMIT ?2",
+        )
+        .iterate(scope.id, rowLimit + 1);
+      let count = 0;
+      for (const row of rows) {
+        if (count++ >= rowLimit || scannedText >= scanLimit) {
+          limited = true;
+          break;
+        }
+        if (!isDynamicRecord(row) || !isString(row.thread_id) || !isString(row.message_id)) continue;
+        const value = text.get(textLimit + 1, row.thread_id, row.message_id);
+        if (isDynamicRecord(value)) scan(value.text);
+      }
+    } else {
+      const text = sql.prepare(
+        "SELECT substr(json_extract(message_json,'$.message.text'),1,?) AS text FROM projection_channel_messages WHERE channel_id=? AND message_id=?",
+      );
+      const rows = sql
+        .prepare("SELECT message_id FROM projection_channel_messages WHERE channel_id=? ORDER BY sequence DESC LIMIT ?")
+        .iterate(scope.id, rowLimit + 1);
+      let count = 0;
+      for (const row of rows) {
+        if (count++ >= rowLimit || scannedText >= scanLimit) {
+          limited = true;
+          break;
+        }
+        if (!isDynamicRecord(row) || !isString(row.message_id)) continue;
+        const value = text.get(textLimit + 1, scope.id, row.message_id);
+        if (isDynamicRecord(value)) scan(value.text);
+      }
       const tasks = sql
-        .prepare("SELECT task_json FROM projection_channel_tasks WHERE channel_id=? LIMIT ?")
-        .all(scope.id, rowLimit + 1);
-      if (tasks.length > rowLimit) limited = true;
-      for (const row of tasks.slice(0, rowLimit)) {
-        if (!isDynamicRecord(row) || !isString(row.task_json)) continue;
-        const task = JSON.parse(row.task_json);
-        if (isDynamicRecord(task)) {
-          scan(task.instruction);
-          scan(task.expectedResult);
+        .prepare(
+          "SELECT substr(json_extract(task_json,'$.instruction'),1,?1) AS instruction,substr(json_extract(task_json,'$.expectedResult'),1,?1) AS expected FROM projection_channel_tasks WHERE channel_id=?2 LIMIT ?3",
+        )
+        .iterate(textLimit + 1, scope.id, rowLimit + 1);
+      count = 0;
+      for (const row of tasks) {
+        if (count++ >= rowLimit || scannedText >= scanLimit) {
+          limited = true;
+          break;
+        }
+        if (isDynamicRecord(row)) {
+          scan(row.instruction);
+          scan(row.expected);
         }
       }
     }
