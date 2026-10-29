@@ -34,6 +34,7 @@ const loadAgentSettingsPanel = () => import("./AgentSettingsPanel");
 import { Portal } from "@solidjs/web";
 import { createEffect, createMemo, Loading, lazy, onSettled, Show, untrack } from "solid-js";
 import { agentFolderCalls } from "./agent-folders-port";
+import { ContextPullRequestsPanel } from "./ContextPullRequestsPanel";
 import { conversationPort } from "./conversation-port";
 
 /** The voice conversation with the agent that is open when the pane opens. */
@@ -195,6 +196,7 @@ export function ConversationPanels(panelProps: { onOpenUsage?: ((trigger: HTMLBu
     ...(props.browserEnabled !== false && !channel ? (["browser"] as const) : []),
     ...(!props.runtime && props.agent?.threadId && serverHasStorage(props.server) ? (["files"] as const) : []),
     ...(props.agent || channel ? (["settings"] as const) : []),
+    ...(props.agent || channel ? (["pull-requests"] as const) : []),
     ...(props.agent && voiceConversationAvailable() ? (["voice"] as const) : []),
   ]);
   /** The subagent in the Subagent pane, from the newest turn that has it. */
@@ -302,6 +304,10 @@ export function ConversationPanels(panelProps: { onOpenUsage?: ((trigger: HTMLBu
             onOpen={openSidePanelPane}
           />
         </aside>
+      </Show>
+
+      <Show when={activeRightPanel() === "pull-requests"}>
+        <ContextPullRequestsPanel />
       </Show>
 
       <Show when={filePreviewOpen() && sidebarFilePreview()}>

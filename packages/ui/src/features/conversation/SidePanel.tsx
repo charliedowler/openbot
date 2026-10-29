@@ -5,6 +5,7 @@ import {
   buttonVariants,
   DropdownMenu,
   Folder,
+  GitPullRequest,
   Maximize2,
   MessageCircleQuestionMark,
   Minimize2,
@@ -23,6 +24,9 @@ import { For, flush, onSettled, Show } from "solid-js";
 import { ThreadStatusText, ThreadTabIcon, threadAttention } from "./threads/ThreadStatusMark";
 import { ThreadTabGhost } from "./threads/ThreadTabGhost";
 import { carriedThreadTab, setCarriedThreadTab, swallowNextClick } from "./threads/thread-tab-drag";
+import "./styles/pull-requests.css";
+
+export { PullRequestList } from "./PullRequestList";
 
 /** A tab starts to move after the pointer moves this far, so a click stays a click. */
 const DRAG_START = 4;
@@ -34,7 +38,7 @@ const THREAD_VALUE = "thread:";
  * from the composer only, and a subagent from its row in the chat, so the launcher and Add do not
  * list them.
  */
-export type SidePanelPane = "browser" | "files" | "settings" | "question" | "voice" | "subagent";
+export type SidePanelPane = "browser" | "files" | "settings" | "question" | "voice" | "subagent" | "pull-requests";
 
 const PANE_LABELS: Record<SidePanelPane, AppTextKey> = {
   browser: "conversation.sidePanel.pane.browser",
@@ -43,6 +47,7 @@ const PANE_LABELS: Record<SidePanelPane, AppTextKey> = {
   question: "conversation.sidePanel.pane.question",
   voice: "conversation.sidePanel.pane.voice",
   subagent: "conversation.sidePanel.pane.subagent",
+  "pull-requests": "conversation.sidePanel.pane.pullRequests",
 };
 
 /** The same glyphs as the rest of the app: the browser is the computer. */
@@ -52,6 +57,8 @@ function PaneIcon(props: { pane: SidePanelPane }): JSX.Element {
       return <ComputerIcon />;
     case "files":
       return <Folder aria-hidden="true" />;
+    case "pull-requests":
+      return <GitPullRequest aria-hidden="true" />;
     case "settings":
       return <Settings aria-hidden="true" />;
     case "question":
