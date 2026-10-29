@@ -768,6 +768,8 @@ export class DrainScheduler {
               routineRun:
                 item.delivery.sender.kind === "routine" ? this.#routines.runForDelivery(item.delivery.id) : null,
               wokenWaits: item.delivery.sender.kind === "routine" ? this.#routines.wokenWaits(item.delivery.id) : [],
+              forwardedChannelWaits:
+                item.delivery.sender.kind === "routine" && this.#routines.hasForwardedChannelWaits(item.delivery.id),
               ...(executionText === undefined ? {} : { executionText }),
             });
           }),

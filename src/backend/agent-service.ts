@@ -219,10 +219,10 @@ import type { AgentTables } from "./agent-data/agent-tables";
 import type { AgentStore } from "./agent-store";
 import { AgentTasks } from "./agent-tasks/agent-tasks";
 import { type AgentThreadRecord, AgentThreadStore } from "./agent-threads/agent-thread-store";
-import { AgentWaitStore } from "./agent-waits/agent-wait-store";
+import { AgentWaitError, AgentWaitStore } from "./agent-waits/agent-wait-store";
 import { AgentWaits } from "./agent-waits/agent-waits";
 import { automationRunCommand } from "./automation-command";
-import { toChannelOperationError } from "./channel-effects";
+import { channelFailure, toChannelOperationError } from "./channel-effects";
 import { ChannelRoutineScheduler } from "./channel-routine-scheduler";
 import { ChannelService } from "./channel-service";
 import type { BundledProviderExecutables } from "./cli";
@@ -634,6 +634,24 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
       mailbox,
       hooks: {
         emit: (event) => this.#emit(event),
+        channelEventDispatched: (deliveryId) => this.channels.hasEventWaitDispatch(deliveryId),
+        channelWaitDeliveryMatches: (wait, deliveryId) => this.channels.channelWaitDeliveryMatches(wait, deliveryId),
+        channelWaitRequestText: (deliveryId) => this.channels.channelWaitRequestText(deliveryId),
+        channelWaitAllowed: (deliveryId, agentId, turnId, threadId) =>
+          this.channels.channelWaitAllowed(deliveryId, agentId, turnId, threadId),
+        cancelChannelWait: (wait) => this.channels.cancelEventWait(wait),
+        channelWaitEventHandled: (wait, deliveryId) => this.channels.eventWaitHandled(wait, deliveryId),
+        channelWaitState: (wait) => this.channels.channelWaitState(wait),
+        resumeChannelWait: (wait, deliveryId) =>
+          this.channels
+            .resumeEventWait(wait, deliveryId)
+            .pipe(
+              Effect.mapError(
+                (failure) =>
+                  new AgentWaitError(failure.cause instanceof Error ? failure.cause.message : String(failure.cause)),
+              ),
+            ),
+        channelWaitMatches: (wait, assignment) => this.channels.channelWaitMatches(wait, assignment),
         ownsRoutine: (agentId, routineId) => this.#routines.getRecord(agentId, routineId) !== null,
         hasRoutine: (agentId) => this.#routines.listRecordsFor(agentId).length > 0,
         requireKnownAgent: (agentId) => {
@@ -725,6 +743,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
                 ),
               );
             yield* this.channels.recover();
+            yield* this.#waits.recoverChannelWaits().pipe(Effect.mapError(channelFailure));
             this.#channelRoutines.reconcileAll();
             yield* this.#boot.backfillProviderHistory().pipe(Effect.forkIn(this.#scope));
           }).pipe(
@@ -1101,6 +1120,12 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
               ),
             );
         }).pipe(toChannelOperationError),
+      eventWaitInput: (assignment) => this.#waits.channelWakeInput(assignment),
+      eventWaitQueued: (agentId, waitIds, deliveryId) => this.#waits.channelWakeQueued(agentId, waitIds, deliveryId),
+      waitingForEvent: (deliveryId) => this.#waits.hasWaitForDelivery(deliveryId),
+      eventWaitPrompt: (deliveryId) => this.#waits.channelWaitsPrompt(deliveryId),
+      resumeEventWaits: (deliveryId) =>
+        this.#waits.resumePendingChannelWaits(deliveryId).pipe(Effect.mapError(channelFailure)),
       schedule: (agentId) => this.#drain.scheduleDrain(agentId),
       awaitDrain: (agentId) => this.#drain.taskFor(agentId)?.pipe(toChannelOperationError),
       contextCharacters: (agentId, threadId) => {
