@@ -2479,6 +2479,16 @@ export function createMockOpenBot(options: MockOpenBotOptions = {}): MockOpenBot
         if (!/\.[^/]+$/u.test(input.path)) throw new Error("Workspace path is not a file.");
         return mockFilePreview(input.path, "workspace-file");
       },
+      listSharedDirectory: async ({ path }) => {
+        if (/\.[^/]+$/u.test(path)) throw new Error("The shared path is not a folder.");
+        const folder = path.replace(/\/+$/u, "") || "Shared";
+        const directory = mockWorkspaceDirectory(folder);
+        return {
+          ...directory,
+          root: "Shared/",
+          parentPath: folder === "Shared" ? null : folder.split("/").slice(0, -1).join("/") || "Shared/",
+        };
+      },
       listWorkspaceDirectory: async (input: OpenWorkspaceFileInput) => mockWorkspaceDirectory(input.path),
       sendMessage: async (input: SendMessageInput) => {
         if (agents.some((agent) => agent.id === input.agentId && agent.hiddenAt !== undefined))

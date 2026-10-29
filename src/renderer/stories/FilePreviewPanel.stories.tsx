@@ -181,3 +181,42 @@ export const Folder: Story = {
     onBack: fn(),
   },
 };
+
+export const SharedFolder: Story = {
+  args: {
+    preview: null,
+    directory: {
+      name: "evidence",
+      path: "Shared/evidence",
+      root: "Shared/",
+      parentPath: "Shared/",
+      entries: [
+        {
+          name: "screenshots",
+          path: "Shared/evidence/screenshots",
+          kind: "directory",
+          size: 0,
+          modifiedAt: 1_790_000_000_000,
+        },
+        {
+          name: "dashboard.png",
+          path: "Shared/evidence/dashboard.png",
+          kind: "file",
+          size: 48_120,
+          modifiedAt: 1_790_000_000_000,
+        },
+        {
+          name: "README.md",
+          path: "Shared/evidence/README.md",
+          kind: "file",
+          size: 1_204,
+          modifiedAt: 1_790_000_000_000,
+        },
+      ],
+      truncated: false,
+    },
+    onOpenDirectoryEntry: fn(),
+    onDownloadDirectory: fn(),
+    onBack: fn(),
+  },
+};

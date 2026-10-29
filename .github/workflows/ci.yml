@@ -286,6 +286,9 @@ jobs:
       - name: Run the Team API routes E2E test
         run: bun run test:team-api-routes
 
+      - name: Run the Shared directory E2E test
+        run: bun scripts/shared-directory-e2e.ts
+
       - name: Run the Shared folder download E2E test
         run: bun scripts/shared-folder-download-e2e.ts
 
@@ -297,6 +300,7 @@ jobs:
           path: |
             .openbot-build/team-api-routes-e2e/
             .openbot-build/shared-folder-download-e2e/
+            .openbot-build/shared-directory-e2e/
           if-no-files-found: ignore
 
   reverse-actions-e2e:

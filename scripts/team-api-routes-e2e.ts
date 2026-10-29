@@ -77,6 +77,10 @@ import {
   ROUTINE_RESULTS_CAPABILITY,
   ROUTINE_RESULTS_ROUTES,
 } from "@openbot/contracts/team-protocol/routine-results-v1";
+import {
+  SHARED_DIRECTORY_CAPABILITY,
+  SHARED_DIRECTORY_ROUTES,
+} from "@openbot/contracts/team-protocol/shared-directory-v1";
 import { SIDE_QUESTION_CAPABILITY, SIDE_QUESTION_ROUTES } from "@openbot/contracts/team-protocol/side-question-v1";
 import { STORAGE_DISK_CAPABILITY, STORAGE_DISK_ROUTES } from "@openbot/contracts/team-protocol/storage-disk-v1";
 import {
@@ -98,6 +102,7 @@ import { runCauseEffect } from "../src/backend/effect-boundary";
 import { OpenBotDatabase } from "../src/backend/openbot-database";
 import { RoutineResultError } from "../src/backend/routine-results/routine-results";
 import { TeamChatStore } from "../src/backend/team-chat-store";
+import { listSharedDirectory } from "../src/backend/workspace-paths";
 import { createAgentHostSettings } from "../src/main/agent-host-settings";
 import { type BitwardenCliRunner, BitwardenConnectorService } from "../src/main/bitwarden-connector-service";
 import { BitwardenConnectorStore } from "../src/main/bitwarden-connector-store";
@@ -419,6 +424,11 @@ const fakeAgents: TeamApiAgents = {
   searchConversationFiles: unused("searchConversationFiles"),
   markConversationRead: unused("markConversationRead"),
   markConversationUnread: unused("markConversationUnread"),
+  listSharedDirectory: (path) =>
+    Effect.promise(async () => {
+      record("listSharedDirectory", path);
+      return runCauseEffect(listSharedDirectory(files, path));
+    }),
   listWorkspaceDirectory: unused("listWorkspaceDirectory"),
   sendMessage: unused("sendMessage"),
   setMessageReaction: unused("setMessageReaction"),
@@ -3128,6 +3138,45 @@ try {
         workspace.text === "# workspace notes\n" &&
         errorIs(workspaceBig, 413, sourceText("error.team.workspaceFileTooLarge")),
       [summary(workspaceMissing), summary(workspace), summary(workspaceBig)],
+    );
+  }
+
+  {
+    const caps = [SHARED_DIRECTORY_CAPABILITY];
+    const response = await call("POST", SHARED_DIRECTORY_ROUTES.list, {
+      token: bobToken,
+      capabilities: caps,
+      json: { path: "Shared/" },
+    });
+    const noCapability = await call("POST", SHARED_DIRECTORY_ROUTES.list, {
+      token: bobToken,
+      json: { path: "Shared/" },
+    });
+    const noAuth = await call("POST", SHARED_DIRECTORY_ROUTES.list, { capabilities: caps, json: { path: "Shared/" } });
+    const missing = await call("POST", SHARED_DIRECTORY_ROUTES.list, {
+      token: bobToken,
+      capabilities: caps,
+      json: { path: "Shared/missing" },
+    });
+    const outside = await call("POST", SHARED_DIRECTORY_ROUTES.list, {
+      token: bobToken,
+      capabilities: caps,
+      json: { path: "../" },
+    });
+    check(
+      "Shared folders are available to a member with the capability",
+      response.status === 200 && response.text.includes("shared.txt"),
+      summary(response),
+    );
+    check(
+      "Shared directory keeps authentication and capability gates",
+      noAuth.status === 401 && noCapability.status === 400,
+      [summary(noAuth), summary(noCapability)],
+    );
+    check(
+      "Shared directory hides host paths outside its root",
+      missing.status === 404 && outside.status === 404 && missing.text === outside.text,
+      [summary(missing), summary(outside)],
     );
   }
 
