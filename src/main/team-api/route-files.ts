@@ -15,7 +15,7 @@
 // hold 1 GB in main. An upload must be in memory, because `prepareImportedAttachments` takes bytes,
 // so `attachmentUploads` lets only a small number of them read a body at the same time.
 
-import { open } from "node:fs/promises";
+import { open, stat } from "node:fs/promises";
 import type { OutgoingHttpHeaders, ServerResponse } from "node:http";
 import { basename } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -30,6 +30,7 @@ import { HttpError } from "./http-error";
 import type { RouteOutcome, TeamApiRequestContext } from "./request-context";
 import { pathIdentifier, readBinary } from "./request-helpers";
 import { rethrowWorkspacePathError } from "./route-workspace-directory";
+import { withSharedFolderArchive } from "./shared-folder-archive";
 
 // Each upload holds its body, up to 100 MB, until the attachment is on disk. Two at a time keep that
 // below 200 MB on a 4 GB hosted server. A third upload waits for a slot. Node's request timeout
@@ -76,6 +77,7 @@ class UploadSlots {
 }
 
 const attachmentUploads = new UploadSlots(ATTACHMENT_UPLOAD_SLOTS);
+const sharedFolderDownloads = new UploadSlots(2);
 
 export interface FileRouteDependencies {
   agents: Pick<
@@ -133,7 +135,29 @@ export async function routeFiles(
     if (!sharedPath || sharedPath.length > INPUT_LIMITS.path) {
       throw new HttpError(400, "A valid shared file path is required.");
     }
-    const sharedFile = await runCauseEffect(agents.resolveSharedFile(sharedPath));
+    const sharedFile = await runCauseEffect(agents.resolveSharedFile(sharedPath, { allowDirectory: true }));
+    if ((await stat(sharedFile.path)).isDirectory()) {
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      response.once("close", abort);
+      if (response.destroyed) controller.abort();
+      try {
+        return await runCauseEffect(
+          sharedFolderDownloads.use(
+            withSharedFolderArchive(sharedFile.path, controller.signal, (path, name) =>
+              sendFile(response, path, sourceText("error.team.sharedFileTooLarge"), (size) => ({
+                "Content-Type": "application/zip",
+                "Content-Length": String(size),
+                "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(name)}`,
+                "X-Content-Type-Options": "nosniff",
+              })),
+            ),
+          ),
+        );
+      } finally {
+        response.off("close", abort);
+      }
+    }
     if (sharedFile.size > ATTACHMENT_LIMITS.fileBytes) {
       throw new HttpError(413, sourceText("error.team.sharedFileTooLarge"));
     }
