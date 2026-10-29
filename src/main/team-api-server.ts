@@ -193,6 +193,7 @@ import { encodeTeamProtocolV7BaseCurrentEvent } from "@openbot/contracts/team-pr
 import { TEAM_OPEN_PROVIDERS_CAPABILITY } from "@openbot/contracts/team-protocol/v8";
 import { encodeTeamProtocolV8BaseCurrentEvent } from "@openbot/contracts/team-protocol/v8-base-adapter";
 import { TEAM_PROTOCOL_V9 } from "@openbot/contracts/team-protocol/v9";
+import { WATCH_REGISTRY_CAPABILITY } from "@openbot/contracts/team-protocol/watch-registry-v1";
 import { isFixedSourceText, sourceText } from "@openbot/i18n/source";
 import { createOpenBotLogger, toLogValue } from "@openbot/logging";
 import { Deferred, Effect, Exit, Scope } from "effect";
@@ -318,6 +319,7 @@ import { routeStorage } from "./team-api/route-storage";
 import { routeTeam } from "./team-api/route-team";
 import { routeVault } from "./team-api/route-vault";
 import { routeVaultImport } from "./team-api/route-vault-import";
+import { routeWatchRegistry } from "./team-api/route-watch-registry";
 import { routeWhatsAppConnector } from "./team-api/route-whatsapp-connector";
 import { routeWorkflows } from "./team-api/route-workflows";
 import { routeWorkspaceDirectory } from "./team-api/route-workspace-directory";
@@ -1118,6 +1120,7 @@ export class TeamApiServer {
         return;
       if ((await routeConversationUnreadFrom(context, this.#options.agents, hidden)) === "handled") return;
       if ((await routeAgentMemoryPage(context, this.#options.agents, hidden)) === "handled") return;
+      if ((await routeWatchRegistry(context, this.#options.agents, hidden)) === "handled") return;
       if ((await routeSharedDirectory(context, this.#options.agents)) === "handled") return;
       if ((await routeWorkspaceDirectory(context, this.#options.agents, hidden)) === "handled") return;
       if ((await routeConversationFiles(context, this.#options.agents)) === "handled") return;
@@ -2511,6 +2514,7 @@ function optionalEventAgentId(event: OptionalTeamEvent): string | null {
 }
 
 function eventCapability(event: AgentEvent): TeamCurrentCapability | null {
+  if (event.type === "watching-changed") return WATCH_REGISTRY_CAPABILITY;
   if (
     event.type === "channels-changed" ||
     event.type === "channel-memories-changed" ||

@@ -128,6 +128,7 @@ import {
   decodeSidebarPinsFromMain,
   decodeSideQuestionAnswer,
   decodeTables,
+  decodeWatchingSnapshotFromMain,
 } from "./agent-decoding";
 import { decodeScopedAgentEvent } from "./agent-event-decoding";
 import {
@@ -581,6 +582,7 @@ window.addEventListener("change", (event) => {
 const agentGroup = bridgeGroup(IPC_ENDPOINTS.agent, {
   getStatus: decodeAgentStatusFromMain,
   getRuntimeSnapshot: decodeAgentRuntimeSnapshot,
+  getWatchingSnapshot: decodeWatchingSnapshotFromMain,
   getHostAnalytics: decodeHostAnalyticsFromMain,
   getAnalytics: decodeAgentAnalyticsFromMain,
   getUsage: decodeAccountUsageFromMain,
