@@ -4,6 +4,7 @@ import {
   isAgentSessionSettings,
   isHiddenAgentsSnapshot,
 } from "@openbot/contracts/ipc";
+import { isWatchingSnapshot, type WatchingSnapshot } from "@openbot/contracts/watch-registry";
 // What main answers for agents: provider status, models, the agents themselves, memories, routines,
 // shared tables and the sidebar layout.
 //
@@ -227,5 +228,10 @@ export function decodeAgentSessionSettingsFromMain(value: unknown): AgentSession
 
 export function decodeHiddenAgentsFromMain(value: unknown): HiddenAgentsSnapshot {
   if (!isHiddenAgentsSnapshot(value)) throw new Error("Invalid hidden agents response.");
+  return value;
+}
+
+export function decodeWatchingSnapshotFromMain(value: unknown): WatchingSnapshot {
+  if (!isWatchingSnapshot(value)) throw new Error("Invalid watching snapshot.");
   return value;
 }

@@ -20,6 +20,11 @@ import {
   type WebhookDeliveryStatus,
 } from "@openbot/contracts/signal-protocol/messages";
 import { WEBHOOK_ROUTES_LIMIT } from "@openbot/contracts/signal-protocol/webhook-route";
+import {
+  isWatchRegistryPublication,
+  WATCH_REGISTRY_EVENT_TYPE,
+  WATCH_REGISTRY_ROUTINE_EVENT_TYPE,
+} from "@openbot/contracts/watch-registry";
 import { sourceText } from "@openbot/i18n/source";
 import { createOpenBotLogger, registerSecretValue } from "@openbot/logging";
 import { RoutineInputError } from "@openbot/team-client/routine-schedule";
@@ -40,6 +45,7 @@ import {
 } from "./host-events-api";
 import type { SecretCipher } from "./provider-credential-store";
 import type { WebhookIngressDelivery } from "./signal-ingress";
+import type { WatchRegistryStore } from "./watch-registry-store";
 import { signWebhookBody, verifyWebhookSignature } from "./webhook-security";
 
 const logger = createOpenBotLogger("host-events");
@@ -69,6 +75,7 @@ interface HostWorkflowWebhooks {
 
 export interface HostEventsServiceOptions {
   routines: RoutineRecords;
+  watchRegistry?: Pick<WatchRegistryStore, "accept">;
   workflows?: HostWorkflowWebhooks;
   cipher: SecretCipher;
   relay: HostWebhookRelay;
@@ -470,6 +477,18 @@ export class HostEventsService implements HostEventsApi {
     if (authenticated._tag === "Failure") return { status: 401, received: null };
     const body = decodeWebhookBody(input.body);
     if (!body) return { status: 400, received: null };
+    if (body.type === WATCH_REGISTRY_EVENT_TYPE) {
+      const { owner } = route;
+      if (owner.kind !== "agent" || !this.#options.watchRegistry) return { status: 400, received: null };
+      const routine = yield* eventStep(() => this.#options.routines.get(owner, route.routineId));
+      if (!routine?.active || routine.trigger.kind !== "webhook") return { status: 404, received: null };
+      if (routine.trigger.eventType !== WATCH_REGISTRY_ROUTINE_EVENT_TYPE) return { status: 400, received: null };
+      if (!isWatchRegistryPublication(body.data)) return { status: 400, received: null };
+      const status = yield* toHostEventsFailure(
+        this.#options.watchRegistry.accept({ publisherId: route.routeId, ownerAgentId: owner.id }, body.data),
+      );
+      return { status, received: null };
+    }
     const receivedAt = new Date().toISOString();
     const event = {
       deliveryId: input.deliveryId,
