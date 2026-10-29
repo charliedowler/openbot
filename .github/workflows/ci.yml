@@ -469,6 +469,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: bun run test:provider-session-reuse
 
+      - name: Run the Codex configuration warning E2E test
+        if: ${{ !cancelled() }}
+        run: bun scripts/codex-config-warning-e2e.ts
+
       - name: Run the backup model failover E2E test
         if: ${{ !cancelled() }}
         run: bun run test:backup-model-failover
@@ -578,6 +582,7 @@ jobs:
             .openbot-build/claude-usage-resume-e2e/
             .openbot-build/claude-late-steer-e2e/
             .openbot-build/provider-session-reuse-e2e/
+            .openbot-build/codex-config-warning-e2e/
             .openbot-build/backup-model-failover-e2e/
             .openbot-build/zip-attachment-e2e/
             .openbot-build/mp4-attachment-e2e/
