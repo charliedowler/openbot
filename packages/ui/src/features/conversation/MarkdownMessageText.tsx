@@ -11,6 +11,7 @@ import { AttachmentReferenceVisual, attachmentReferenceTone } from "./Attachment
 import { CodeBlock } from "./CodeBlock";
 import { CodePreview } from "./CodePreview";
 import type { MessageCodeBlock } from "./DataTable";
+import { isSharedFilePath } from "./FileReference";
 import { MathFormula } from "./MathFormula";
 import { linkTitle, MessageLink, RichMessageText, type RichMessageTextProps, safeBrowserUrl } from "./RichMessageText";
 import {
@@ -1022,12 +1023,7 @@ function LocalFileLink(props: {
 function sharedFileTarget(value: string): string | null {
   const path = value.trim();
   if (!path || /[\0\r\n]/u.test(path)) return null;
-  const normalized = path.replaceAll("\\", "/");
-  return normalized.startsWith("~/OpenBot/Shared/") ||
-    normalized.startsWith("OpenBot/Shared/") ||
-    normalized.includes("/OpenBot/Shared/")
-    ? path
-    : null;
+  return isSharedFilePath(path) ? path : null;
 }
 
 function repairEscapedLocalFileLinkTokens(tokens: Token[]): Token[] {
@@ -1179,7 +1175,7 @@ function mentionedFileTarget(value: string, directory: FileDirectoryContext | nu
     const workspace = workspaceFileTarget(path);
     return workspace ? { path: workspace, kind: "workspace" } : null;
   }
-  if (!directory) return { path, kind: "workspace" };
+  if (!directory) return null;
   const separator = directory.path.includes("\\") && !directory.path.includes("/") ? "\\" : "/";
   return {
     path: `${directory.path.replace(/[/\\]+$/u, "")}${separator}${path}`,
