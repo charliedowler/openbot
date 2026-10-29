@@ -1640,7 +1640,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     const waits: WatchingWait[] = this.listAgents()
       .filter((agent) => visible.has(agent.id))
       .flatMap((agent) =>
-        this.listWaits(agent.id).waits.map((wait) => {
+        this.listWaits(agent.id).waits.flatMap((wait) => {
           const assignment = wait.id.startsWith("channel:")
             ? this.channels.store.assignmentForDelivery(wait.requestMessageId)
             : null;
@@ -1648,15 +1648,18 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
             assignment?.agentId === agent.id && channelVisible(assignment.channelId, agent.id)
               ? assignment.channelId
               : undefined;
-          return {
-            id: wait.id,
-            ownerAgentId: agent.id,
-            note: wait.note,
-            routineId: wait.routineId,
-            createdAt: wait.createdAt,
-            wokenAt: wait.wokenAt,
-            ...(channelId === undefined ? {} : { channelId }),
-          };
+          if (wait.id.startsWith("channel:") && channelId === undefined) return [];
+          return [
+            {
+              id: wait.id,
+              ownerAgentId: agent.id,
+              note: wait.note.replaceAll("\0", "\uFFFD"),
+              routineId: wait.routineId,
+              createdAt: wait.createdAt,
+              wokenAt: wait.wokenAt,
+              ...(channelId === undefined ? {} : { channelId }),
+            },
+          ];
         }),
       );
     return { registry: registry ? { ...registry, watches } : null, waits };
