@@ -95,6 +95,19 @@ export function collectProviderUsage(
   if (!value) return;
   // A model chosen while the turn runs applies from the next turn, so the turn keeps its own.
   const model = usage.turnModel(agent.id, session.id, turnId) ?? agent.model;
+  if (session.provider === "grok" && getString(params, "usageScope") === "prompt") {
+    usage.record({
+      agentId: agent.id,
+      sessionId: session.id,
+      turnId,
+      provider: session.provider,
+      model,
+      counterId: `${session.id}:grok:prompt:${getString(params, "promptId") ?? turnId}`,
+      baseline: false,
+      tokens: acpTokens(value),
+    });
+    return;
+  }
   if (session.provider === "antigravity") {
     // Antigravity 1.4.3 sends the tokens of this prompt only: `_extract_turn_usage` subtracts the
     // session's total at the turn's start, and a restored session starts from its saved total. So
@@ -170,6 +183,21 @@ export function workflowUsageObserver(
       collectProviderUsage(usage, { id: WORKFLOWS_USAGE_ID, model }, session, method, params);
     } catch (error) {
       logger.warn("Could not save the usage of a workflow step.", { provider, error });
+    }
+  };
+}
+
+export function channelUsageObserver(
+  usage: AgentUsage,
+  agent: Pick<AgentSummary, "id" | "provider" | "model">,
+  purpose: "channel-routing" | "channel-summary" = "channel-routing",
+): (notification: { method: string; params?: unknown }) => void {
+  const session = { id: `${purpose}:${randomUUID()}`, provider: agent.provider, createdAt: new Date().toISOString() };
+  return ({ method, params }) => {
+    try {
+      collectProviderUsage(usage, agent, session, method, params);
+    } catch (error) {
+      logger.warn("Could not save channel helper usage.", { provider: agent.provider, purpose, error });
     }
   };
 }
