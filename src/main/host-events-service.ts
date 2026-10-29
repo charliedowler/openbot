@@ -305,6 +305,8 @@ export class HostEventsService implements HostEventsApi {
     const routine = yield* this.#requireRoutine(input);
     if (routine.trigger.kind !== "webhook")
       return yield* eventFailure(sourceText("error.backend.webhookSettingsInvalid"));
+    if (input.owner.kind === "agent" && routine.trigger.eventType === WATCH_REGISTRY_ROUTINE_EVENT_TYPE)
+      return yield* eventFailure(sourceText("error.backend.watchRegistryCannotRun"));
     const route = yield* eventStep(() =>
       this.#options.routines.routes
         .list()
@@ -477,10 +479,21 @@ export class HostEventsService implements HostEventsApi {
     if (authenticated._tag === "Failure") return { status: 401, received: null };
     const body = decodeWebhookBody(input.body);
     if (!body) return { status: 400, received: null };
+    const receiverOwner = route.owner;
+    const receiver =
+      receiverOwner.kind === "agent"
+        ? yield* eventStep(() => this.#options.routines.get(receiverOwner, route.routineId))
+        : null;
+    if (
+      receiver?.trigger.kind === "webhook" &&
+      receiver.trigger.eventType === WATCH_REGISTRY_ROUTINE_EVENT_TYPE &&
+      body.type !== WATCH_REGISTRY_EVENT_TYPE
+    )
+      return { status: 400, received: null };
     if (body.type === WATCH_REGISTRY_EVENT_TYPE) {
       const { owner } = route;
       if (owner.kind !== "agent" || !this.#options.watchRegistry) return { status: 400, received: null };
-      const routine = yield* eventStep(() => this.#options.routines.get(owner, route.routineId));
+      const routine = receiver;
       if (!routine?.active || routine.trigger.kind !== "webhook") return { status: 404, received: null };
       if (routine.trigger.eventType !== WATCH_REGISTRY_ROUTINE_EVENT_TYPE) return { status: 400, received: null };
       if (!isWatchRegistryPublication(body.data)) return { status: 400, received: null };
