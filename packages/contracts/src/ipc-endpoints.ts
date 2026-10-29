@@ -1550,6 +1550,9 @@ export const IPC_ENDPOINTS = {
     previewWorkspaceFile: scopedRequest<PreviewWorkspaceFileInput, FilePreview>()("agent:preview-workspace-file"),
     /** Releases only this client's temporary HTML bytes, never a file on a host. */
     releaseFilePreview: request<string, void>()("agent:release-file-preview"),
+    listSharedDirectory: scopedRequest<Pick<OpenSharedFileInput, "path">, WorkspaceDirectory>()(
+      "agent:list-shared-directory",
+    ),
     listWorkspaceDirectory: scopedRequest<OpenWorkspaceFileInput, WorkspaceDirectory>()(
       "agent:list-workspace-directory",
     ),
