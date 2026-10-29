@@ -40,6 +40,7 @@ import { CHAT_COLORS_CODECS } from "./chat-colors-v1";
 import { COMPUTER_ACTIVITY_CODECS } from "./computer-activity-v1";
 import { CONNECTORS_CODECS } from "./connectors-v1";
 import { CONTEXT_COMPACT_CODECS } from "./context-compact-v1";
+import { CONTEXT_PRS_CODECS } from "./context-prs-v1";
 import { CONTEXT_RESET_CODECS } from "./context-reset-v1";
 import { CONVERSATION_FILE_SEARCH_CODECS } from "./conversation-file-search-v1";
 import { CONVERSATION_UNREAD_FROM_CODECS } from "./conversation-unread-from-v1";
@@ -148,6 +149,7 @@ const CODECS: ReadonlyMap<string, OptionalRouteCodec> = new Map([
   ...ANDROID_PUSH_NOTIFICATIONS_CODECS,
   ...HOSTED_SITES_CODECS,
   ...SHARED_DIRECTORY_CODECS,
+  ...CONTEXT_PRS_CODECS,
   ...WATCH_REGISTRY_CODECS,
   ...WORKSPACE_DIRECTORY_CODECS,
   ...AGENT_HOST_SETTINGS_CODECS,

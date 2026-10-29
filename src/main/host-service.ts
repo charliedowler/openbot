@@ -103,6 +103,7 @@ interface MemberAuditActor {
 type ForwardedApiOptions = ConstructorParameters<typeof TeamApiServer>[0];
 
 interface HostServiceOptions {
+  contextPrs?: ForwardedApiOptions["contextPrs"];
   channels?: ChannelService;
   mcpServers?: ForwardedApiOptions["mcpServers"];
   mcpSignIns?: ForwardedApiOptions["mcpSignIns"];
@@ -445,6 +446,7 @@ export class HostService extends EventEmitter<HostEvents> {
       store: options.store,
       agents: options.agents,
       agentsReady: options.agentsReady,
+      ...(options.contextPrs === undefined ? {} : { contextPrs: options.contextPrs }),
       ...(options.channels === undefined ? {} : { channels: options.channels }),
       ...(options.mcpServers === undefined ? {} : { mcpServers: options.mcpServers }),
       ...(options.mcpSignIns === undefined ? {} : { mcpSignIns: options.mcpSignIns }),
