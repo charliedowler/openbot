@@ -98,6 +98,10 @@ export const messages = defineMessages("error.team", {
   "error.team.attachmentNameRequired": "A safe attachment name is required.",
   "error.team.attachmentNotFound": "Attachment not found.",
   "error.team.sharedFileTooLarge": "The shared file exceeds the 100 MB limit.",
+  "error.team.sharedFolderTooManyEntries": "The shared folder has too many entries. Download a smaller folder.",
+  "error.team.sharedFolderUnsupportedEntry":
+    "The shared folder contains a link or a special file. Download regular files instead.",
+  "error.team.sharedFolderChanged": "The shared folder changed during download. Try again.",
   "error.team.workspaceFileTooLarge": "The workspace file exceeds the 100 MB limit.",
   "error.team.browserViewUnavailable": "The live browser view is unavailable.",
   "error.team.browserSessionNotFound": "Browser view session not found.",
