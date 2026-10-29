@@ -24,3 +24,5 @@ create or fetch an archive. Local folders use the same list and preview controls
 the remote ZIP action is absent there. Nothing pulls a path from another machine.
 Files must exist under the host Shared root. No cloud service stores the listing
 or file contents.
+
+Files opened from a directory keep that bounded listing in renderer state. Left and Right arrows and the preview toolbar move through its files, wrap at either end, and skip directories. A pending navigation cursor and the existing preview generation guard prevent rapid key presses from accepting stale results. Keys are scoped to the focused preview and leave editable fields, media controls and panel resizing alone. Images fit the available pane in both dimensions.
