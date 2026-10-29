@@ -30,7 +30,13 @@ import { type DynamicRecord, isDynamicRecord, isString } from "@openbot/contract
 import { isFixedSourceText, matchingSourceKeys, sourceText } from "@openbot/i18n/source";
 import { createOpenBotLogger } from "@openbot/logging";
 import { Deferred, Effect, Exit, Fiber, Result, Schema, Scope } from "effect";
-import { type ChannelOperationError, channelFailure, channelResult, channelSync } from "./channel-effects";
+import {
+  type ChannelOperationError,
+  ChannelToolInputError,
+  channelFailure,
+  channelResult,
+  channelSync,
+} from "./channel-effects";
 import {
   assignmentText,
   boundedHistoryPage,
@@ -2963,11 +2969,19 @@ export class ChannelService {
       (item) => item.agentId === agentId && item.turnId === turnId && activeAssignment(item),
     );
     if (!assignment || channel.archived)
-      return yield* channelFailure(new Error("The channel assignment is no longer active."));
+      return yield* channelFailure(
+        new ChannelToolInputError(
+          "The channel assignment is no longer active. End this turn and wait for a new assignment. Do not retry tools for this assignment.",
+        ),
+      );
     const tasks = yield* channelSync(() => this.store.tasks(channelId));
     const task = tasks.find((item) => item.id === assignment.taskId);
     if (!task || task.revision !== assignment.taskRevision || task.state !== "running")
-      return yield* channelFailure(new Error("The channel task has changed."));
+      return yield* channelFailure(
+        new ChannelToolInputError(
+          "The channel task has changed. End this turn and wait for a new assignment. Do not continue the old task.",
+        ),
+      );
     if (!isDynamicRecord(args)) return yield* channelFailure(new Error("Provide channel tool arguments."));
     // The turn that a member reply started reads another agent's words, so it cannot change the
     // channel, whoever made the request of its run.
