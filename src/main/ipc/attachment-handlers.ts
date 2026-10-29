@@ -33,6 +33,10 @@ import {
   TEAM_ZIP_ATTACHMENTS_CAPABILITY,
 } from "@openbot/contracts/team-protocol/current";
 import {
+  SHARED_DIRECTORY_CAPABILITY,
+  SHARED_DIRECTORY_ROUTES,
+} from "@openbot/contracts/team-protocol/shared-directory-v1";
+import {
   WORKSPACE_DIRECTORY_CAPABILITY,
   WORKSPACE_DIRECTORY_ROUTES,
 } from "@openbot/contracts/team-protocol/workspace-directory-v1";
@@ -76,6 +80,7 @@ export interface AttachmentIpcDependencies {
     | "discardDraftAttachment"
     | "resolveSharedFile"
     | "resolveLocalWorkspaceFile"
+    | "listSharedDirectory"
     | "listLocalWorkspaceDirectory"
   >;
   mailbox: Pick<MailboxStore, "resolveAttachment">;
@@ -263,6 +268,19 @@ export function attachmentIpcHandlers({
           );
           const key = `${serverId}:${parsed.agentId}:${parsed.path}`;
           await deliverRemoteFile("remote-workspace-files", key, downloaded, parsed.action);
+        },
+      }),
+      listSharedDirectory: scopedHandler(parsePreviewSharedFile, {
+        local: (parsed) => runCauseEffect(service.listSharedDirectory(parsed.path)),
+        remote: (parsed, serverId) => {
+          if (!remoteServers.supportsCapability(serverId, SHARED_DIRECTORY_CAPABILITY))
+            throw new Error(sourceText("error.team.sharedDirectoryUnsupported"));
+          return runCauseEffect(
+            remoteServers.request(serverId, SHARED_DIRECTORY_ROUTES.list, decodeWorkspaceDirectory, {
+              method: "POST",
+              body: { path: parsed.path },
+            }),
+          );
         },
       }),
       listWorkspaceDirectory: scopedHandler(parseOpenWorkspaceFile, {

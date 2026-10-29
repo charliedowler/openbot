@@ -78,6 +78,7 @@ export const messages = defineMessages("error.team", {
   "error.team.contextResetUnsupported": "Starting a new chat is not supported by this connection.",
   "error.team.contextCompactUnsupported": "Compacting the context is not supported by this connection.",
   "error.team.messageDeleteUnsupported": "Deleting messages is not supported by this connection.",
+  "error.team.sharedDirectoryUnsupported": "This server does not support Shared folder browsing.",
   "error.team.workspaceDirectoryUnsupported": "Showing folders is not supported by this connection.",
   "error.team.conversationFileSearchUnsupported": "Searching files is not supported by this connection.",
   "error.team.sideQuestionUnsupported": "Side questions are not supported by this connection.",

@@ -110,6 +110,10 @@ import {
 import { PROVIDER_ACCOUNTS_CAPABILITY } from "@openbot/contracts/team-protocol/provider-accounts-v1";
 import { ROUTINE_FLOWS_CAPABILITY } from "@openbot/contracts/team-protocol/routine-flows-v1";
 import {
+  SHARED_DIRECTORY_CAPABILITY,
+  SHARED_DIRECTORY_ROUTES,
+} from "@openbot/contracts/team-protocol/shared-directory-v1";
+import {
   SIDEBAR_FOLDERS_CAPABILITY,
   SIDEBAR_FOLDERS_ROUTES,
 } from "@openbot/contracts/team-protocol/sidebar-folders-v1";
@@ -306,6 +310,7 @@ export interface WebWorkspaceRuntime {
   sharedFile(path: string): Promise<WebFile>;
   /** A file in one agent's workspace on the host. */
   workspaceFile(agentId: string, path: string): Promise<WebFile>;
+  sharedDirectory(path: string): Promise<WorkspaceDirectory>;
   /** A folder in one agent's workspace on the host. */
   workspaceDirectory(agentId: string, path: string): Promise<WorkspaceDirectory>;
   /** The routine canvas routes. Each call refuses while the host does not serve `routine-flows-v1`. */
@@ -1282,6 +1287,11 @@ export function createWebWorkspaceRuntime(
       // The released URL spells the agent `botId`.
       const query = new URLSearchParams({ botId: agentId, path });
       return decodeWebFile(await request("GET", `${TEAM_API_ROUTES.workspaceFiles}?${query}`));
+    },
+    async sharedDirectory(path) {
+      if (!capabilities.includes(SHARED_DIRECTORY_CAPABILITY))
+        throw new Error(currentText().t("error.team.sharedDirectoryUnsupported"));
+      return decodeWorkspaceDirectory(await request("POST", SHARED_DIRECTORY_ROUTES.list, { path }));
     },
     async workspaceDirectory(agentId, path) {
       if (!capabilities.includes(WORKSPACE_DIRECTORY_CAPABILITY))

@@ -1,0 +1,23 @@
+{
+  "name": "evidence",
+  "path": "Shared/evidence",
+  "root": "Shared/",
+  "parentPath": "Shared/",
+  "entries": [
+    {
+      "name": "nested",
+      "path": "Shared/evidence/nested",
+      "kind": "directory",
+      "size": 0,
+      "modifiedAt": 1790000000000
+    },
+    {
+      "name": "dashboard.png",
+      "path": "Shared/evidence/dashboard.png",
+      "kind": "file",
+      "size": 1024,
+      "modifiedAt": 1790000000000
+    }
+  ],
+  "truncated": false
+}
