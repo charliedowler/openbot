@@ -72,7 +72,7 @@ export function isContextPullRequest(value: unknown): value is ContextPullReques
     ["open", "merged"].includes(String(value.state)) &&
     typeof value.draft === "boolean" &&
     (value.mergedAt === null || instant(value.mergedAt)) &&
-    (value.state !== "merged" || instant(value.mergedAt)) &&
+    (value.state === "merged" ? instant(value.mergedAt) : value.mergedAt === null) &&
     typeof value.headSha === "string" &&
     /^[a-f0-9]{40}$/.test(value.headSha) &&
     ["passed", "pending", "failed", "unknown"].includes(String(value.checks)) &&
