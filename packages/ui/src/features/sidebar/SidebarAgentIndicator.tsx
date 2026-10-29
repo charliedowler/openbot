@@ -67,6 +67,10 @@ const SIDEBAR_BADGE_RESIZE: KeyframeAnimationOptions = { duration: 280, easing: 
  */
 export function SidebarAgentIndicator(props: { state: () => SidebarAgentState | undefined }) {
   const { t } = useText();
+  const indicatorState = () => {
+    const state = props.state();
+    return state?.kind === "unread" ? undefined : state;
+  };
   /* The closed felt badge whose shrink animation has ended. */
   const [gone, setGone] = createSignal<SidebarAgentState | undefined>();
   const [phase, setPhase] = createSignal<SidebarBadgePhase>("idle");
@@ -74,7 +78,7 @@ export function SidebarAgentIndicator(props: { state: () => SidebarAgentState | 
   /* A felt badge stays on screen after its state closed, until it has shrunk away. The memo keeps
      it in the same flush, so the badge never leaves the page for a frame before it shrinks. */
   const shown = createMemo<SidebarAgentState | undefined>((previous) => {
-    const state = props.state();
+    const state = indicatorState();
     if (state) return state;
     return isFeltBadge(previous) && previous !== gone() && !prefersReducedMotion() ? previous : undefined;
   });
@@ -99,7 +103,7 @@ export function SidebarAgentIndicator(props: { state: () => SidebarAgentState | 
   const measure = () => (badge?.isConnected ? Number.parseFloat(getComputedStyle(badge).width) : undefined);
 
   createEffect(
-    () => badgeSnapshot(props.state()),
+    () => badgeSnapshot(indicatorState()),
     (next, previous) => {
       const leavingBadge = leaving;
       const current = previous ?? leavingBadge;

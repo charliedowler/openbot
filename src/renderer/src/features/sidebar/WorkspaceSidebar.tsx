@@ -1,7 +1,7 @@
 import { type ChatWindowTarget, canAdministerServer } from "@openbot/contracts/ipc";
 import { AGENT_HIDDEN_CAPABILITY } from "@openbot/contracts/team-protocol/current";
 import { computeAgentAvatarMoods } from "@openbot/ui/features/agents/agent-avatar-mood";
-import { Sidebar } from "@openbot/ui/features/sidebar/Sidebar";
+import { Sidebar, SidebarWatchingDialog } from "@openbot/ui/features/sidebar/Sidebar";
 import { SidebarCommunityCard } from "@openbot/ui/features/sidebar/SidebarCommunityCard";
 import { SidebarMachineCard } from "@openbot/ui/features/sidebar/SidebarMachineCard";
 import { SidebarMobileAppCard } from "@openbot/ui/features/sidebar/SidebarMobileAppCard";
@@ -40,6 +40,7 @@ import { createMachineCard } from "./machine-card";
 import { ServerUpgradeOffer } from "./server-upgrade-offer";
 import { useSidebar } from "./sidebar-context";
 import { createStorageCard } from "./storage-card";
+import { createSidebarWatching } from "./watching-view";
 
 /** Dismissing the mobile app card is a choice of this computer, like the sidebar width. The key is
  * new with the Android release, so a computer that dismissed the iPhone-only card sees it once more. */
@@ -100,6 +101,13 @@ export function WorkspaceSidebar(props: { peopleEnabled: boolean }) {
   const { directPeople, teamPresence } = usePresence();
   const { activeDirectMember, activeDirectMemberId, directThreads } = useDirectMessages();
   const { selectAgent, selectDirectMember, setGlobalSearchVisibility, chatHistory } = useNavigation();
+  const sidebar = useSidebar();
+  const watching = createSidebarWatching({
+    server: activeServer,
+    revision: sidebar.watchingRevision,
+    agents: agentList,
+    channels: () => channels.state.channels,
+  });
   const agentTasks = useAgentTasks();
   const agentThreads = useAgentThreads();
   /**
@@ -262,6 +270,7 @@ export function WorkspaceSidebar(props: { peopleEnabled: boolean }) {
   return (
     <>
       <Sidebar
+        onOpenWatching={watching.open}
         channels={visibleChannels()}
         deletedChannels={sidebarChannels().filter((channel) => channel.archived)}
         activeChannelId={channels.state.selectedId}
@@ -440,6 +449,21 @@ export function WorkspaceSidebar(props: { peopleEnabled: boolean }) {
         server={activeServer()}
         blocked={serverSettingsOpen()}
         onFreeUpSpace={(serverId) => openServerSettings(serverId, null, "storage")}
+      />
+      <SidebarWatchingDialog
+        open={watching.state.open}
+        loading={watching.state.loading}
+        supported={watching.supported()}
+        error={watching.state.error}
+        data={watching.data()}
+        onClose={watching.close}
+        onRefresh={watching.refresh}
+        onOpenChat={(ownerId, channelId) => {
+          watching.close();
+          if (channelId) void channels.open(channelId);
+          else selectAgent(ownerId);
+        }}
+        onOpenSource={(url) => void appPort().openUrl(url)}
       />
     </>
   );

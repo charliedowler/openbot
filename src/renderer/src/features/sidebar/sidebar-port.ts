@@ -8,7 +8,12 @@ import type { OpenBotDesktopApi } from "@openbot/contracts/ipc";
 export interface SidebarPort {
   agent: Pick<
     OpenBotDesktopApi["agent"],
-    "getSidebarLayout" | "mutateSidebarLayout" | "getSidebarPins" | "setSidebarPins" | "seedSidebarPins"
+    | "getSidebarLayout"
+    | "mutateSidebarLayout"
+    | "getSidebarPins"
+    | "setSidebarPins"
+    | "seedSidebarPins"
+    | "getWatchingSnapshot"
   >;
   storage: Pick<OpenBotDesktopApi["storage"], "getDisk" | "getMachineMetrics">;
   hostAdmin: Pick<OpenBotDesktopApi["hostAdmin"], "getMachineAlerts">;

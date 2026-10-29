@@ -8,7 +8,7 @@
  */
 
 import type { ChannelSummary } from "@openbot/contracts/ipc";
-import { Badge, buttonVariants, ContextMenu } from "@openbot/ui";
+import { buttonVariants, ContextMenu } from "@openbot/ui";
 import type { JSX } from "@solidjs/web";
 import { createMemo, createSignal, Show } from "solid-js";
 import { useText } from "../../text";
@@ -92,13 +92,6 @@ export function SidebarChannelRow(rowProps: { channel: ChannelSummary; waiting?:
           <span class="agent-row-heading">
             <span class="agent-row-title">
               <strong dir="auto">{rowProps.channel.name}</strong>
-              <Show when={title()}>
-                {(label) => (
-                  <Badge class="agent-role-badge" title={label()}>
-                    <span dir="auto">{label()}</span>
-                  </Badge>
-                )}
-              </Show>
             </span>
             <Show when={wait()} fallback={<span class="agent-row-time">{time()}</span>}>
               {(current) => <SidebarWaitChip reason={current().reason} />}

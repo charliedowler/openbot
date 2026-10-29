@@ -8,7 +8,7 @@
  * kind they have.
  */
 
-import { Badge, buttonVariants, ContextMenu } from "@openbot/ui";
+import { buttonVariants, ContextMenu } from "@openbot/ui";
 import { createMemo, For, Match, Show, Switch } from "solid-js";
 import { useText } from "../../text";
 import { ChannelAvatar } from "../channels/ChannelAvatar";
@@ -146,13 +146,6 @@ export function SidebarPinnedGroup() {
                                 <strong class="sidebar-pinned-name" title={name()}>
                                   {name()}
                                 </strong>
-                                <Show when={agent().title.trim()}>
-                                  {(label) => (
-                                    <Badge class="sidebar-pinned-title" title={label()}>
-                                      <span>{label()}</span>
-                                    </Badge>
-                                  )}
-                                </Show>
                               </span>
                               <Show when={props.agentStates[agent().id]}>
                                 {(state) => <span class="sr-only">{sidebarAgentStateLabel(state(), t, format)}</span>}
@@ -177,13 +170,6 @@ export function SidebarPinnedGroup() {
                                 <strong class="sidebar-pinned-name" title={name()}>
                                   {name()}
                                 </strong>
-                                <Show when={channel().title.trim()}>
-                                  {(label) => (
-                                    <Badge class="sidebar-pinned-title" title={label()}>
-                                      <span>{label()}</span>
-                                    </Badge>
-                                  )}
-                                </Show>
                               </span>
                               <Show when={channel().unreadCount > 0}>
                                 <span class="sr-only">
