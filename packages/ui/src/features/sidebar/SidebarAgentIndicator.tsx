@@ -15,26 +15,25 @@ const SIDEBAR_WAIT_TOOLTIP_OPEN_DELAY = 350;
 export function SidebarAgentIndicator(props: { state: () => SidebarAgentState | undefined }) {
   const { t } = useText();
   const [entering, setEntering] = createSignal(false);
-  const unreadCount = () => {
+  const indicatorState = () => {
     const state = props.state();
-    return state?.kind === "unread" ? state.count : 0;
+    return state?.kind === "unread" ? undefined : state;
   };
   let mounted = false;
 
   createEffect(
-    () => props.state()?.kind,
+    () => indicatorState()?.kind,
     (nextKind, previousKind) => {
       if (!mounted) {
         mounted = true;
         return;
       }
-      if (nextKind !== previousKind)
-        setEntering(nextKind === "responded" || nextKind === "unread" || nextKind === "waiting");
+      if (nextKind !== previousKind) setEntering(nextKind === "responded" || nextKind === "waiting");
     },
   );
 
   return (
-    <Show when={props.state()}>
+    <Show when={indicatorState()}>
       {(state) => (
         <span
           class={[
@@ -65,9 +64,6 @@ export function SidebarAgentIndicator(props: { state: () => SidebarAgentState | 
               <title>{t("sidebar.state.responded")}</title>
               <path d="m3 6.2 1.8 1.8L9 3.8" />
             </svg>
-          </Show>
-          <Show when={state().kind === "unread"}>
-            <span>{unreadCount()}</span>
           </Show>
         </span>
       )}

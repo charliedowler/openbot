@@ -101,7 +101,7 @@ export function AgentEventBridge() {
     refreshRoutineIds,
   } = useTurns();
   const { setBrowserControlState, applyBrowserChange } = useBrowserTabs();
-  const { setSidebarLayout } = useSidebar();
+  const { setSidebarLayout, invalidateWatching } = useSidebar();
   // As on web, mute and the notification level of the server decide the sounds too. Before the
   // server list arrives, the sounds play as they did.
   const soundLevel = () => {
@@ -117,6 +117,9 @@ export function AgentEventBridge() {
 
   function handleAgentEvent(event: AgentEvent) {
     switch (event.type) {
+      case "watching-changed":
+        invalidateWatching();
+        return;
       case "status":
         applyAgentStatus(event.status);
         if (event.status.phase === "ready" || event.status.phase === "blocked") {
@@ -133,12 +136,14 @@ export function AgentEventBridge() {
         applyAccountUsage(event.usage);
         return;
       case "agents-changed":
+        invalidateWatching();
         applyStoredAgents(event.agents);
         return;
       case "sidebar-layout-changed":
         setSidebarLayout(event.layout);
         return;
       case "hidden-agents-changed":
+        invalidateWatching();
         applyUserHiddenAgents(event.agents);
         return;
       case "conversation":
@@ -193,6 +198,7 @@ export function AgentEventBridge() {
         }));
         return;
       case "waits-changed":
+        invalidateWatching();
         waitSnapshotRequests.set(event.snapshot.agentId, (waitSnapshotRequests.get(event.snapshot.agentId) ?? 0) + 1);
         setWaits((current) => ({ ...current, [event.snapshot.agentId]: event.snapshot }));
         return;
@@ -417,6 +423,7 @@ export function AgentEventBridge() {
   onSettled(() => {
     const unsubscribe = agentsPort().agent.onEvent((event) => {
       if (event.type === "channels-changed") {
+        invalidateWatching();
         void channels.refresh();
         return;
       }
