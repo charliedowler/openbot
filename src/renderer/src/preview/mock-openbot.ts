@@ -1,4 +1,5 @@
 import { AGENT_MEMORY_CONTEXT_BUDGET_BYTES, essentialMemoryBytes } from "@openbot/contracts/agent-memory-context";
+import type { ContextPullRequestsSnapshot } from "@openbot/contracts/context-prs";
 import type {
   AcpRegistryEntry,
   AgentSessionSettings,
@@ -238,6 +239,7 @@ export interface MockOpenBotOptions
   conversationReads?: Record<string, ConversationReadState>;
   /** What `agent.getRuntimeSnapshot` returns when the preview starts. */
   runtimeSnapshot?: AgentRuntimeSnapshot;
+  contextPullRequests?: ContextPullRequestsSnapshot;
   watchingSnapshot?: WatchingSnapshot;
   /** Adds the Storybook agent and provider of another host to `STORY_FOREIGN_SERVER_ID`. Defaults to true. */
   storyForeignAgent?: boolean;
@@ -1290,6 +1292,22 @@ export function createMockOpenBot(options: MockOpenBotOptions = {}): MockOpenBot
       delete: async ({ siteId }) => {
         hostedSites = hostedSites.filter((site) => site.id !== siteId);
       },
+    },
+    contextPrs: {
+      read: async (input) =>
+        clone(
+          options.contextPullRequests
+            ? { ...options.contextPullRequests, scope: input.scope }
+            : {
+                scope: input.scope,
+                status: "ready",
+                checkedAt: new Date().toISOString(),
+                open: [],
+                merged: [],
+                failures: [],
+                referencesLimited: false,
+              },
+        ),
     },
     githubConnector: createMockGitHubConnector(),
     onePasswordConnector: createMockOnePasswordConnector(),

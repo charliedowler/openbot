@@ -1,3 +1,4 @@
+import type { ContextPullRequestsInput, ContextPullRequestsSnapshot } from "./context-prs";
 import type {
   AcpRegistryEntry,
   AcpRegistryInstallation,
@@ -1105,6 +1106,7 @@ export const IPC_ENDPOINTS = {
   // The built-in GitHub connection of this computer. The token stays in main; every answer is the
   // status only. The `host*` endpoints reach the connection of a joined server (`connectors-v1`): the
   // host runs the device flow, and main opens its GitHub pages in this computer's browser.
+  contextPrs: { read: scopedRequest<ContextPullRequestsInput, ContextPullRequestsSnapshot>()("context-prs:read") },
   githubConnector: {
     status: request<undefined, GitHubConnectorStatus>()("github-connector:status"),
     connect: request<undefined, GitHubConnectorStatus>()("github-connector:connect"),
@@ -1799,6 +1801,7 @@ export const IPC_GROUP_PATHS = {
   providerAdmin: "providerAdmin",
   messaging: "messaging",
   hostAdmin: "hostAdmin",
+  contextPrs: "contextPrs",
   githubConnector: "githubConnector",
   onePasswordConnector: "onePasswordConnector",
   bitwardenConnector: "bitwardenConnector",

@@ -8,6 +8,7 @@ import { AgentApiKeys } from "../backend/agent-api-keys";
 import { AgentDatabaseSupervisor } from "../backend/agent-data/agent-database-supervisor";
 import { AgentTables } from "../backend/agent-data/agent-tables";
 import { AgentRoutineStore } from "../backend/agent-routine-store";
+import { ContextPrReferences } from "../backend/context-pr-references";
 import { DiscordConnectFailed, toDiscordConnectFailed } from "../backend/messaging/discord/discord-connect";
 import { SlackConnectFailed, toSlackConnectFailed } from "../backend/messaging/slack/slack-connect";
 import { routineFlowRoutines } from "../backend/routine-flows/routine-flow-routines";
@@ -25,6 +26,8 @@ import { spawnAgentDatabaseHost } from "./agent-database-host-process";
 import { agentDisplayEnvironment, hasSeparateAgentDisplay } from "./agent-display";
 import { type AgentHostSettingsService, createAgentHostSettings } from "./agent-host-settings";
 import { type BrowserProfileService, createBrowserProfileService } from "./browser-profile-service";
+import { contextPrCliWithEnvironment } from "./context-pr-cli";
+import { ContextPrService } from "./context-pr-service";
 import { HostReleaseService, readInstallationMode } from "./host-release-service";
 import {
   CONTAINER_UPDATE_PATHS,
@@ -521,6 +524,7 @@ export interface ApplicationServices {
   signInRelayClient: SignInRelayClient;
   /** The Slack and Discord installs that this computer opened for a joined server. */
   relayedMessagingInstalls: RelayedMessagingInstalls;
+  contextPrs: ContextPrService;
   githubConnector: GitHubConnectorService;
   onePasswordConnector: OnePasswordConnectorService;
   bitwardenConnector: BitwardenConnectorService;
@@ -1903,7 +1907,16 @@ export async function createApplicationServices({
     openLink,
   });
   // A connect, a disconnect or an expiry changes the tools and the `gh` sign-in of every agent.
+  const contextPrs = new ContextPrService(
+    new ContextPrReferences(store.database, () => watchRegistry.snapshot()),
+    githubConnector,
+    contextPrCliWithEnvironment(
+      () => ({ ...process.env, ...githubConnector.agentEnvironment() }),
+      () => providerRuntimes.mcpToolRuntimes().binDirectories,
+    ),
+  );
   githubConnector.onAgentAccessChanged(() => {
+    contextPrs.invalidate();
     void runCauseEffect(service.notifyGitHubConnectorChanged()).catch((error) =>
       logger.warn("Provider tools did not refresh.", toLogValue(error)),
     );
@@ -2292,6 +2305,7 @@ export async function createApplicationServices({
     browser,
     chat: teamChatStore,
     channels: service.channels,
+    contextPrs,
     // Present, so the host advertises `mcp-servers-v1`. The routes are admin-only.
     mcpServers: service,
     // Present, so the host advertises `mcp-sign-in-v1`. The routes are admin-only.
@@ -3073,6 +3087,7 @@ export async function createApplicationServices({
     mcpOAuth,
     signInRelayClient,
     relayedMessagingInstalls: new RelayedMessagingInstalls(remoteServers),
+    contextPrs,
     githubConnector,
     onePasswordConnector,
     bitwardenConnector,
