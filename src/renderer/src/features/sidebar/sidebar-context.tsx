@@ -41,6 +41,8 @@ const Sidebar = createSimpleContext({
       readSidebarPeopleOrder(),
     );
     const preferences = createSidebarPreferences({ scope: activeServerId });
+    const [watchingRevision, setWatchingRevision] = createSignal(0);
+    const invalidateWatching = () => setWatchingRevision((revision) => revision + 1);
 
     const sidebarPeopleOrder = createMemo(() => sidebarPeopleOrderByServer()[activeServerId()] ?? []);
 
@@ -84,6 +86,8 @@ const Sidebar = createSimpleContext({
     return {
       sidebarLayout,
       setSidebarLayout,
+      watchingRevision,
+      invalidateWatching,
       loadLayout,
       mutateSidebarLayout,
       applySidebarLayoutAction,

@@ -5,7 +5,7 @@ import type { OpenBotDesktopApi } from "@openbot/contracts/ipc";
  * disk of a server for the storage card, and its machine use and alert levels for the machine card.
  */
 export interface SidebarPort {
-  agent: Pick<OpenBotDesktopApi["agent"], "getSidebarLayout" | "mutateSidebarLayout">;
+  agent: Pick<OpenBotDesktopApi["agent"], "getSidebarLayout" | "mutateSidebarLayout" | "getWatchingSnapshot">;
   storage: Pick<OpenBotDesktopApi["storage"], "getDisk" | "getMachineMetrics">;
   hostAdmin: Pick<OpenBotDesktopApi["hostAdmin"], "getMachineAlerts">;
 }
