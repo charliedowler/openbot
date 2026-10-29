@@ -42,6 +42,8 @@
     "./speech-text": "./src/speech-text.ts",
     "./agent-memory-context": "./src/agent-memory-context.ts",
     "./ipc": "./src/ipc.ts",
+    "./context-prs": "./src/context-prs.ts",
+    "./team-protocol/context-prs-v1": "./src/team-protocol/context-prs-v1.ts",
     "./watch-registry": "./src/watch-registry.ts",
     "./team-protocol/watch-registry-v1": "./src/team-protocol/watch-registry-v1.ts",
     "./mcp-connect-flows": "./src/mcp-connect-flows.ts",
