@@ -46,6 +46,8 @@ interface FilePreviewPanelProps {
   preview: FilePreview | null;
   /** A workspace folder. The panel lists it instead of a file. */
   directory?: WorkspaceDirectory | null;
+  onOpenDirectoryEntry?: (entry: WorkspaceDirectoryEntry) => void;
+  onDownloadDirectory?: (() => void) | undefined;
   agents: AgentProfile[];
   defaultWidth: () => number;
   maxWidth: () => number;
@@ -108,6 +110,10 @@ export default function FilePreviewPanel(props: FilePreviewPanelProps) {
   });
   const text = createMemo(() => ({ value: source().slice(0, TEXT_LIMIT), truncated: source().length > TEXT_LIMIT }));
   const openEntry = (entry: WorkspaceDirectoryEntry) => {
+    if (props.onOpenDirectoryEntry) {
+      props.onOpenDirectoryEntry(entry);
+      return;
+    }
     if (entry.kind === "directory") props.onOpenWorkspaceFolder?.(entry.path);
     else props.onOpenWorkspaceFile?.(entry.path);
   };
@@ -281,6 +287,19 @@ export default function FilePreviewPanel(props: FilePreviewPanelProps) {
           >
             <ExternalLink class="browser-toolbar-icon" />
           </Button>
+        </Show>
+        <Show when={props.directory && props.onDownloadDirectory}>
+          {(download) => (
+            <Button
+              variant="ghost"
+              type="button"
+              class="browser-toolbar-button"
+              aria-label={t("preview.folder.downloadZip")}
+              onClick={() => download()()}
+            >
+              <Download class="browser-toolbar-icon" />
+            </Button>
+          )}
         </Show>
         <Show when={file() && props.onDownload}>
           {(download) => (

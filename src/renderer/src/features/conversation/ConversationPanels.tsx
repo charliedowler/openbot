@@ -86,6 +86,7 @@ export function ConversationPanels(panelProps: { onOpenUsage?: ((trigger: HTMLBu
     previewAttachment,
     openSidebarFileExternally,
     openWorkspaceFolder,
+    openSidebarDirectoryEntry,
     openWorkspaceFolderEntry,
     previewQuoteId,
     previewWorkspaceAgentId,
@@ -262,6 +263,13 @@ export function ConversationPanels(panelProps: { onOpenUsage?: ((trigger: HTMLBu
                 macWindowControls={props.platform === "darwin"}
                 preview={file().preview}
                 directory={file().directory ?? null}
+                onOpenDirectoryEntry={openSidebarDirectoryEntry}
+                onDownloadDirectory={
+                  file().source.kind === "shared-folder" &&
+                  (props.runtime || (props.server && props.server.id !== "local"))
+                    ? downloadSidebarFile
+                    : undefined
+                }
                 agents={props.agents}
                 defaultWidth={() =>
                   (conversationPanelElement()?.clientWidth || window.innerWidth) * BROWSER_PANEL_DEFAULT_RATIO
