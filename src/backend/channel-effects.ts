@@ -7,6 +7,14 @@ export class ChannelOperationError extends Schema.TaggedError<ChannelOperationEr
   cause: Schema.Defect(),
 }) {}
 
+export class ChannelToolInputError extends Schema.TaggedError<ChannelToolInputError>()("ChannelToolInputError", {
+  message: Schema.String,
+}) {
+  constructor(message: string) {
+    super({ message });
+  }
+}
+
 export const { rewrap: toChannelOperationError } = causeHelpers(ChannelOperationError);
 
 export function channelFailure(cause: unknown): ChannelOperationError {

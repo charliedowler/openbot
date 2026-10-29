@@ -40,6 +40,7 @@ import type { AgentTasks } from "../agent-tasks/agent-tasks";
 import type { AgentWaits } from "../agent-waits/agent-waits";
 import { attachmentCall, attachmentFailure } from "../attachment-effects";
 import { OPENBOT_BROWSER_NAMESPACE } from "../browser-tools";
+import { ChannelToolInputError } from "../channel-effects";
 import type { ChannelService } from "../channel-service";
 import type { ProviderSession } from "../database/provider-sessions";
 import type { MailboxStore } from "../mailbox-store";
@@ -586,7 +587,9 @@ export class OpenBotToolRouter {
               tool === "messaging_post";
             // A workflow tool reports its own correctable failures; only bad arguments reach this point.
             const correctable = (cause: unknown) =>
-              correctableTool || (WORKFLOW_TOOL_NAMES.has(tool) && cause instanceof z.ZodError);
+              correctableTool ||
+              cause instanceof ChannelToolInputError ||
+              (WORKFLOW_TOOL_NAMES.has(tool) && cause instanceof z.ZodError);
             const response = this.#handleOpenBotTool(client, toolRequest, toolRequest.params).pipe(
               Effect.catch((failure) =>
                 correctable(failure.cause) ? correctableFailure(failure.cause) : Effect.fail(failure),
