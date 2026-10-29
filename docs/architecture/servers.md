@@ -836,6 +836,8 @@ for all contexts, provider operations, sign-in, initialization, and the existing
 It contains no thread text or IDs. A missing native-work callback reports `nativeIdle=unknown`;
 operators must not read an absent or unknown field as idle. SQL active-turn rows do not cover
 provider-native compaction.
+Native observations keep their source client. When that client ends, its unfinished compactions
+fail and release the idle blocker. Completed or unrelated clients do not clear another client's work.
 
 ### Remote release checks
 
