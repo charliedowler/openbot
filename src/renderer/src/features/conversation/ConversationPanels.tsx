@@ -95,6 +95,8 @@ export function ConversationPanels(panelProps: { onOpenUsage?: ((trigger: HTMLBu
     previewWorkspaceAgentId,
     sidebarFileBack,
     openSidebarFileBack,
+    sidebarFileCanCycle,
+    cycleSidebarFile,
     props,
     setActiveRightPanel,
     setBrowserPanelWidth,
@@ -350,6 +352,7 @@ export function ConversationPanels(panelProps: { onOpenUsage?: ((trigger: HTMLBu
                 onOpenWorkspaceFile={previewWorkspaceAgentId() ? openWorkspaceFolderEntry : undefined}
                 onOpenWorkspaceFolder={openWorkspaceFolder}
                 onBack={sidebarFileBack() === null ? undefined : openSidebarFileBack}
+                onNavigateFile={sidebarFileCanCycle() ? cycleSidebarFile : undefined}
                 sourceUrl={attached()?.previewUrl ?? null}
                 pageUrl={htmlAttachmentPageUrl(attached()) ?? file().preview?.pageUrl}
                 pageHtml={props.runtime?.visualPage ? htmlAttachmentPageHtml(attached(), file().preview) : undefined}
