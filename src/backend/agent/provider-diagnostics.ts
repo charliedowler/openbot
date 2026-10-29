@@ -247,6 +247,25 @@ export function isAcpHandlerDiagnostic(message: string): boolean {
 }
 
 const IGNORED_CONFIG_SUMMARY = /\bCodex is ignoring (\d+) unrecognized configuration settings?\b/;
+const UNTRUSTED_CONFIG_SUMMARY =
+  "Project-local config, hooks, and exec policies are disabled in the following folders until the project is trusted, but skills still load.";
+
+export function isUntrustedConfigDiagnostic(message: string): boolean {
+  return (
+    message
+      .replace(LOG_TIMESTAMP_PREFIX, "")
+      .replace(/^(?:ERROR|WARN)\s+codex_app_server:\s*/u, "")
+      .split("\n", 1)[0] === UNTRUSTED_CONFIG_SUMMARY
+  );
+}
+
+export function untrustedCodexFolders(summary: string): string[] {
+  return [
+    ...new Set(
+      [...summary.matchAll(/^\s+\d+\.\s+([^\n]+)/gmu)].flatMap((match) => (match[1] ? [match[1].trim()] : [])),
+    ),
+  ].sort();
+}
 
 /**
  * Whether a provider diagnostic is Codex's summary of the settings it ignored in its configuration.
