@@ -15,6 +15,11 @@ const output = resolve(".openbot-build/shared-directory-ui-e2e");
 const svg =
   '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="400" viewBox="0 0 640 400"><rect width="640" height="400" fill="#f8fafc"/><text x="48" y="60" font-family="sans-serif" font-size="26" fill="#172033">Shared evidence preview</text><rect x="70" y="180" width="100" height="160" fill="#6366f1"/><rect x="270" y="120" width="100" height="220" fill="#10b981"/><rect x="470" y="90" width="100" height="250" fill="#38bdf8"/><text x="48" y="380" font-family="sans-serif" font-size="16" fill="#475569">Synthetic fixture. Opened directly in OpenBot.</text></svg>';
 await mkdir(join(fixture, "nested"), { recursive: true });
+await mkdir(join(fixture, "folder with spaces"), { recursive: true });
+await writeFile(
+  join(fixture, "folder with spaces", "note.md"),
+  "# Quoted path with spaces\n\nStill a real Shared file.\n",
+);
 await mkdir(output, { recursive: true });
 await writeFile(join(fixture, "dashboard.svg"), svg);
 await writeFile(
@@ -41,7 +46,11 @@ async function dismissNotifications() {
 try {
   await dismissNotifications();
   const channel = await client.create(`Shared files ${suffix}`, [], null);
-  await client.send(channel.id, `Evidence files: ${fixture}/`, null);
+  await client.send(
+    channel.id,
+    `Scout's evidence lives in ${fixture}/. Here's the report. Code mentions: \`sourceModel.ts\` and \`types/schema.ts\`.`,
+    null,
+  );
   await page
     .getByRole("navigation", { name: "Chat list" })
     .getByRole("button", { name: new RegExp(`^Shared files ${suffix}`) })
@@ -56,6 +65,8 @@ try {
     .first();
   await link.click();
   await panel.getByRole("heading", { name: folderName, exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "Open workspace file sourceModel.ts", exact: true }).count(), 0);
+  assert.equal(await page.getByRole("button", { name: "Open workspace file types/schema.ts", exact: true }).count(), 0);
   const files = panel.getByRole("list", { name: folderName, exact: true });
   await files.getByRole("button", { name: /dashboard.svg/ }).waitFor();
   await dismissNotifications();
@@ -142,6 +153,21 @@ try {
   await panel.waitFor({ state: "detached" });
   await link.click();
   await panel.getByRole("heading", { name: folderName, exact: true }).waitFor();
+  await client.send(
+    channel.id,
+    `Quoted path: "${fixture}/folder with spaces/note.md". File context: \`${fixture}/\` and \`README.md\`.`,
+    null,
+  );
+  await page
+    .getByRole("main", { name: "Conversation" })
+    .getByRole("button", { name: "Open shared file note.md", exact: true })
+    .click();
+  await panel.getByRole("heading", { name: "Quoted path with spaces", exact: true }).waitFor();
+  await page
+    .getByRole("main", { name: "Conversation" })
+    .getByRole("button", { name: "Open shared file README.md", exact: true })
+    .click();
+  await panel.getByRole("heading", { name: "Shared evidence", exact: true }).waitFor();
   assert.deepEqual(errors, []);
   await writeFile(
     join(output, "report.json"),
@@ -149,7 +175,10 @@ try {
       {
         passed: true,
         checks: [
-          "real Shared folder link",
+          "real Shared folder link in ordinary apostrophe prose",
+          "unqualified code mentions stay text",
+          "quoted Shared path with spaces",
+          "explicit folder context resolves a filename",
           "native folder list",
           "rendered image bytes",
           "Left and Right file navigation",
