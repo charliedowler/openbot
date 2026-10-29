@@ -20,6 +20,7 @@ import {
   type SessionConfigOption,
   type SessionNotification,
   type SessionUpdate,
+  type Usage,
 } from "@agentclientprotocol/sdk";
 import { agentProviderName } from "@openbot/contracts/agent-providers";
 import { attachmentMimeTypeForName } from "@openbot/contracts/attachment-files";
@@ -349,6 +350,7 @@ export interface AcpProviderOptions {
    */
   redactValues?: () => readonly string[];
   profileGeneration?: boolean;
+  promptUsage?(response: PromptResponse): Usage | null;
   argv: readonly string[];
   env: Record<string, string>;
   /**
@@ -2092,14 +2094,17 @@ export class AcpAgentClient extends EventEmitter<ClientEvents> {
         response = providerResult(yield* send());
       if (thread.activeTurn !== turn || turn.completing) return;
       // `promptId` names this result: a delivery that runs again keeps its turn ID.
-      if (response.usage)
+      const promptUsage = response.usage ? null : this.options.promptUsage?.(response);
+      const usage = response.usage ?? promptUsage;
+      if (usage)
         this.emit("notification", {
           method: "openbot/usage",
           params: {
             threadId: thread.id,
             turnId: turn.id,
             promptId: randomUUID(),
-            usage: response.usage,
+            usage,
+            ...(promptUsage ? { usageScope: "prompt" } : {}),
             ...(turn.reportedCost === null ? {} : { cost: turn.reportedCost }),
           },
         });

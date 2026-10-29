@@ -2159,7 +2159,7 @@ export class ChannelService {
         !(message.attachments?.length && message.author !== "user")
       )
         continue;
-      const owner = assignments.find((item) => item.turnId === message.turnId);
+      const owner = assignments.find((item) => item.agentId === snapshot.agentId && item.turnId === message.turnId);
       if (!owner && message.turnId !== undefined && this.#providerTurns.has(message.turnId)) continue;
       const original = existing(message.id);
       // The first rows of a turn come before its assignment knows the turn id, so they go to the
