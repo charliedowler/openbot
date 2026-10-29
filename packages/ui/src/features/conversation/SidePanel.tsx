@@ -5,6 +5,7 @@ import {
   buttonVariants,
   DropdownMenu,
   Folder,
+  GitPullRequest,
   Maximize2,
   MessageCircleQuestionMark,
   Minimize2,
@@ -19,13 +20,16 @@ import { ComputerIcon } from "@openbot/ui/features/conversation/ConversationIcon
 import { useText } from "@openbot/ui/text";
 import type { JSX } from "@solidjs/web";
 import { For, flush, onSettled, Show } from "solid-js";
+import "./styles/pull-requests.css";
+
+export { PullRequestList } from "./PullRequestList";
 
 /**
  * A pane of the side panel. Each open pane has a tab at the top of the panel. A side question opens
  * from the composer only, and a subagent from its row in the chat, so the launcher and Add do not
  * list them.
  */
-export type SidePanelPane = "browser" | "files" | "settings" | "question" | "voice" | "subagent";
+export type SidePanelPane = "browser" | "files" | "settings" | "question" | "voice" | "subagent" | "pull-requests";
 
 const PANE_LABELS: Record<SidePanelPane, AppTextKey> = {
   browser: "conversation.sidePanel.pane.browser",
@@ -34,6 +38,7 @@ const PANE_LABELS: Record<SidePanelPane, AppTextKey> = {
   question: "conversation.sidePanel.pane.question",
   voice: "conversation.sidePanel.pane.voice",
   subagent: "conversation.sidePanel.pane.subagent",
+  "pull-requests": "conversation.sidePanel.pane.pullRequests",
 };
 
 /** The same glyphs as the rest of the app: the browser is the computer. */
@@ -43,6 +48,8 @@ function PaneIcon(props: { pane: SidePanelPane }): JSX.Element {
       return <ComputerIcon />;
     case "files":
       return <Folder aria-hidden="true" />;
+    case "pull-requests":
+      return <GitPullRequest aria-hidden="true" />;
     case "settings":
       return <Settings aria-hidden="true" />;
     case "question":
