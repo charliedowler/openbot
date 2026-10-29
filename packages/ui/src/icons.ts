@@ -65,6 +65,8 @@ export { default as FolderOpen } from "lucide-solid/icons/folder-open";
 export { default as FolderPlus } from "lucide-solid/icons/folder-plus";
 export { default as Gauge } from "lucide-solid/icons/gauge";
 export { default as Gift } from "lucide-solid/icons/gift";
+export { default as GitMerge } from "lucide-solid/icons/git-merge";
+export { default as GitPullRequest } from "lucide-solid/icons/git-pull-request";
 export { default as Globe2 } from "lucide-solid/icons/globe-2";
 export { default as GripVertical } from "lucide-solid/icons/grip-vertical";
 export { default as Hand } from "lucide-solid/icons/hand";

@@ -17,6 +17,7 @@ import type { EventRoutinesApi } from "./routine-webhooks-api";
 import type { AgentRoutinesApi } from "./routines-port";
 
 export interface ConversationRuntime {
+  contextPrs?: OpenBotDesktopApi["contextPrs"] | undefined;
   agent: Pick<
     OpenBotDesktopApi["agent"],
     | "discardDraftAttachment"
