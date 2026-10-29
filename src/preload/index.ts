@@ -209,6 +209,7 @@ import {
   decodeComputerUsePermissionApp,
   decodeComputerUseState,
 } from "./computer-use-decoding";
+import { decodeContextPullRequestsFromMain } from "./context-pr-decoding";
 import {
   decodeAgentTask,
   decodeAgentTaskReadState,
@@ -847,6 +848,7 @@ const openbotApi: OpenBotDesktopApi = {
     replace: decodeHostedSite,
     delete: decodeVoid,
   }),
+  contextPrs: bridgeGroup(IPC_ENDPOINTS.contextPrs, { read: decodeContextPullRequestsFromMain }),
   githubConnector: bridgeGroup(IPC_ENDPOINTS.githubConnector, {
     status: decodeGitHubConnectorStatus,
     connect: decodeGitHubConnectorStatus,

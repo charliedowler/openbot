@@ -852,6 +852,11 @@ Network traffic can also occur when:
   reads that vault from 1Password's servers with the token: the vault names, the login titles and
   web addresses, and, when an agent signs in to a site, that login's username and password or code.
   Nothing about the user's agents, conversations or files is sent to 1Password;
+- when the user opens or refreshes the pull request panel, the host reads exact GitHub PR links
+  from the selected agent or channel history and explicitly owned watch links. It sends only the
+  referenced repository, PR number and head SHA to GitHub to read metadata and checks. It uses the
+  existing GitHub connection or, while disconnected, the host's existing `gh` sign-in. Conversation
+  text stays on the host. This feature makes no model calls and starts no recurring check;
 - the user connects GitHub in Server settings. OpenBot asks `github.com` for a sign-in code and a
   token, renews the token, and reads the account name and the repositories of the OpenBot GitHub App
   from `api.github.com`. The GitHub page in Server settings loads the account picture from the

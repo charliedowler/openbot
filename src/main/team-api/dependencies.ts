@@ -8,6 +8,7 @@ import type { AgentMarketplaceService } from "../agent-marketplace-service";
 import type { AgentMemoryLimitSetting } from "../agent-memory-limit-preference-store";
 import type { AgentTemplateService } from "../agent-template-service";
 import type { BrowserProfileService } from "../browser-profile-service";
+import type { ContextPrService } from "../context-pr-service";
 import type { PeerCustomProviderChanges } from "../custom-provider-changes";
 import type { HostEventsApi } from "../host-events-api";
 import type { HostEventsService } from "../host-events-service";
@@ -503,6 +504,7 @@ export type TeamApiVault = VaultService;
 export type TeamApiAgentAccess = Pick<AgentAccessStore, "copyAgent" | "get" | "levels" | "set" | "subscribe">;
 
 export interface TeamApiOptions {
+  contextPrs?: Pick<ContextPrService, "read">;
   /** `events-v1`: admin-only event source and routine management. */
   events?: HostEventsApi | undefined;
   channels?: ChannelService | undefined;
