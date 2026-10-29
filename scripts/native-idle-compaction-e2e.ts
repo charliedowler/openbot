@@ -439,6 +439,7 @@ try {
     scheduleDrain: () => {},
     rotateSession: () => Effect.succeed(null),
     rotatesSession: () => false,
+    isStopping: () => false,
   });
   const firstClient = new CodexAppServerClient(fakeCodex, 1000, {});
   const secondClient = new CodexAppServerClient(fakeCodex, 1000, {});

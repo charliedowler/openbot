@@ -48,6 +48,7 @@ import { BROWSER_PROFILES_EVENTS_CAPABILITY } from "@openbot/contracts/team-prot
 import { BROWSER_PROFILES_CAPABILITY } from "@openbot/contracts/team-protocol/browser-profiles-v1";
 import { BROWSER_USER_CONTROL_CAPABILITY } from "@openbot/contracts/team-protocol/browser-user-control-v1";
 import { CLAUDE_API_KEY_CAPABILITY } from "@openbot/contracts/team-protocol/claude-api-key-v1";
+import { CONTEXT_PRS_CAPABILITY } from "@openbot/contracts/team-protocol/context-prs-v1";
 import {
   AGENT_ADMIN_CAPABILITY,
   AGENT_HOST_SETTINGS_CAPABILITY,
@@ -235,6 +236,7 @@ import { routeBrowser } from "./team-api/route-browser";
 import { routeBrowserProfiles } from "./team-api/route-browser-profiles";
 import { routeChannels } from "./team-api/route-channels";
 import { routeConnectors } from "./team-api/route-connectors";
+import { routeContextPrs } from "./team-api/route-context-prs";
 import { routeContextReset } from "./team-api/route-context-reset";
 import { routeConversationFiles } from "./team-api/route-conversation-files";
 import { routeCustomAgents } from "./team-api/route-custom-agents";
@@ -1023,6 +1025,12 @@ export class TeamApiServer {
         return;
       if ((await routeContextReset(context, this.#options.agents, hidden)) === "handled") return;
       if ((await routeAgentMemoryPage(context, this.#options.agents, hidden)) === "handled") return;
+      if (
+        (await routeContextPrs(context, this.#options.contextPrs, this.#options.channels, this.#options.agents, () =>
+          this.hiddenAgentIds(context.protocol, context.capabilities, context.member),
+        )) === "handled"
+      )
+        return;
       if ((await routeWatchRegistry(context, this.#options.agents, hidden)) === "handled") return;
       if ((await routeSharedDirectory(context, this.#options.agents)) === "handled") return;
       if ((await routeWorkspaceDirectory(context, this.#options.agents, hidden)) === "handled") return;
@@ -2056,6 +2064,7 @@ export class TeamApiServer {
               this.#options.signInRelay !== undefined &&
               this.#options.providerAccounts !== undefined
             );
+          if (capability === CONTEXT_PRS_CAPABILITY) return this.#options.contextPrs !== undefined;
           if (capability === CONNECTORS_CAPABILITY) return this.#options.connectors !== undefined;
           if (capability === DISCORD_ACCESS_CAPABILITY) return this.#options.connectors !== undefined;
           if (capability === ONEPASSWORD_CONNECTOR_CAPABILITY) return this.#options.onePasswordConnector !== undefined;
