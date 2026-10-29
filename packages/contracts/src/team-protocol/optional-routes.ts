@@ -27,6 +27,7 @@ import { BROWSER_SECRET_VAULT_CODECS } from "./browser-secret-vault-v1";
 import { BROWSER_SIGN_IN_CODECS } from "./browser-sign-in-v1";
 import { BROWSER_USER_CONTROL_CODECS } from "./browser-user-control-v1";
 import { CONNECTORS_CODECS } from "./connectors-v1";
+import { CONTEXT_PRS_CODECS } from "./context-prs-v1";
 import { CONTEXT_RESET_CODECS } from "./context-reset-v1";
 import { CONVERSATION_FILE_SEARCH_CODECS } from "./conversation-file-search-v1";
 import { DISCORD_ACCESS_CODECS } from "./discord-access-v1";
@@ -113,6 +114,7 @@ const CODECS: ReadonlyMap<string, OptionalRouteCodec> = new Map([
   ...ANDROID_PUSH_NOTIFICATIONS_CODECS,
   ...HOSTED_SITES_CODECS,
   ...SHARED_DIRECTORY_CODECS,
+  ...CONTEXT_PRS_CODECS,
   ...WATCH_REGISTRY_CODECS,
   ...WORKSPACE_DIRECTORY_CODECS,
   ...AGENT_HOST_SETTINGS_CODECS,
