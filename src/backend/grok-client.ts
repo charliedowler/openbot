@@ -1,8 +1,14 @@
-import type { ClientSideConnection, ContentBlock, InitializeResponse } from "@agentclientprotocol/sdk";
+import type {
+  ClientSideConnection,
+  ContentBlock,
+  InitializeResponse,
+  PromptResponse,
+  Usage,
+} from "@agentclientprotocol/sdk";
 import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
 import { type DynamicRecord, isNumber } from "@openbot/contracts/runtime-values";
 import { sourceText } from "@openbot/i18n/source";
-import { Effect } from "effect";
+import { Effect, Result, Schema } from "effect";
 import { AcpAgentClient, type AcpHistoryPersistence } from "./acp-client";
 import { DEFAULT_ACP_FLAVOR } from "./acp-flavor";
 import type { GrokCliInfo } from "./cli";
@@ -34,6 +40,7 @@ export class GrokAgentClient extends AcpAgentClient {
           }
         : {}),
       profileGeneration,
+      promptUsage: grokPromptUsage,
       // A profile-generation client asks one question and must not act, so it is given none.
       mcpServers: profileGeneration ? () => [] : mcpServers,
       reportMcpDrops,
@@ -151,4 +158,30 @@ function grokCentValue(config: DynamicRecord, key: string): number | null | unde
 
 function nearWeeklyDuration(durationMins: number): boolean {
   return Number.isFinite(durationMins) && Math.abs(durationMins - 10_080) <= 10_080 * 0.05;
+}
+
+const tokenCount = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+const decodePromptUsage = Schema.decodeUnknownResult(
+  Schema.Struct({
+    inputTokens: tokenCount,
+    outputTokens: tokenCount,
+    cachedReadTokens: tokenCount,
+    cacheCreationTokens: tokenCount,
+    totalTokens: tokenCount,
+    usageIsIncomplete: Schema.optional(Schema.Boolean),
+  }),
+);
+
+function grokPromptUsage(response: PromptResponse): Usage | null {
+  const result = decodePromptUsage(getRecord(response._meta, "usage"));
+  if (Result.isFailure(result) || result.success.usageIsIncomplete) return null;
+  const usage = result.success;
+  if (usage.cachedReadTokens + usage.cacheCreationTokens > usage.inputTokens) return null;
+  return {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    cachedReadTokens: usage.cachedReadTokens,
+    cachedWriteTokens: usage.cacheCreationTokens,
+    totalTokens: usage.totalTokens,
+  };
 }

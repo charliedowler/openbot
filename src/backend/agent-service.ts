@@ -205,7 +205,7 @@ import {
 import { ThreadLifecycle } from "./agent/thread-lifecycle";
 import { toToolOperationFailed } from "./agent/tool-operation";
 import { type AgentBrowserHost, TurnLifecycle } from "./agent/turn-lifecycle";
-import { memoryReviewUsageObserver, workflowUsageObserver } from "./agent/usage-collection";
+import { channelUsageObserver, memoryReviewUsageObserver, workflowUsageObserver } from "./agent/usage-collection";
 import { toUsageReadFailed, UsageLimitGate, type UsageLimitKey } from "./agent/usage-limit-gate";
 import { WarmGenerations } from "./agent/warm-generations";
 import type { WebhookRoutineWriter } from "./agent/webhook-routine-tool";
@@ -1040,7 +1040,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     this.channels = new ChannelService(store.database, mailbox, {
       agents: () => this.listAgents(),
       hidden: (agentId) => this.#store.isHidden(agentId),
-      generate: (lead, prompt) =>
+      generate: (lead, prompt, purpose) =>
         Effect.gen({ self: this }, function* () {
           yield* this.#providers.ensureProvider(lead.provider);
           const model = this.#endpoints
@@ -1058,6 +1058,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
                 { ...model, defaultReasoningEffort: lead.reasoningEffort },
                 prompt,
                 cancelled,
+                channelUsageObserver(this.#store.database.usage, lead, purpose),
               ),
             )
             .pipe(
