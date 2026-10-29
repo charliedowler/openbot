@@ -4,7 +4,7 @@
  * the same id the layout used - see `SIDEBAR_DRAG_SELECTORS`.
  */
 
-import { Badge, Button } from "@openbot/ui";
+import { Button } from "@openbot/ui";
 import { For, Show } from "solid-js";
 import { useText } from "../../text";
 import { TeamPersonAvatar, teamMemberName } from "../team/TeamPersonAvatar";
@@ -88,11 +88,6 @@ export function SidebarPeopleSection(sectionProps: { sectionId: string }) {
                     >
                       <span class="agent-row-avatar">
                         <TeamPersonAvatar member={member} motion="hover" />
-                        <Show when={(thread()?.unreadCount ?? 0) > 0}>
-                          <Badge class="person-unread-badge" variant="primary-light" aria-hidden="true">
-                            {Math.min(thread()?.unreadCount ?? 0, 99)}
-                          </Badge>
-                        </Show>
                       </span>
                       <span class="agent-row-copy">
                         <span class="agent-row-heading">
