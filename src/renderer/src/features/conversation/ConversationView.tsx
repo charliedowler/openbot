@@ -84,6 +84,7 @@ export function ConversationView(props: ConversationProps) {
               browserSidebarOpen() ||
               filePreviewOpen() ||
               filesOpen() ||
+              activeRightPanel() === "pull-requests" ||
               activeRightPanel() === "question" ||
               activeRightPanel() === "voice" ||
               activeRightPanel() === "subagent" ||
