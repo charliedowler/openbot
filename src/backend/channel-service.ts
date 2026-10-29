@@ -1917,8 +1917,12 @@ export class ChannelService {
       )
         continue;
       const assignment =
-        assignments.find((item) => item.turnId === message.turnId) ??
-        assignments.find((item) => item.agentId === snapshot.agentId && activeAssignment(item));
+        assignments.find((item) => item.agentId === snapshot.agentId && item.turnId === message.turnId) ??
+        (message.turnId === snapshot.activeTurnId
+          ? assignments.find(
+              (item) => item.agentId === snapshot.agentId && item.turnId === null && activeAssignment(item),
+            )
+          : undefined);
       if (!assignment) continue;
       const task = tasks.get(assignment.taskId);
       const result = existing(`channel-result-${assignment.id}-revision-${assignment.taskRevision}`);
