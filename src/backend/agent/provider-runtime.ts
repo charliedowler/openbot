@@ -99,9 +99,11 @@ import {
   isRustLogBelowErrorDiagnostic,
   isTelemetryExportDiagnostic,
   isToolCallDiagnostic,
+  isUntrustedConfigDiagnostic,
   isUsageLimitDiagnostic,
   isUsageReadDiagnostic,
   LOG_TIMESTAMP_PREFIX,
+  untrustedCodexFolders,
 } from "./provider-diagnostics";
 import {
   isProviderTimeout,
@@ -500,6 +502,11 @@ export class ProviderRuntime implements ProviderPort {
    * Their next connect runs `onProvidersReady`, also when it is a retry after a timeout.
    */
   readonly #exitRecovery = new Set<AgentProvider>();
+  /**
+   * Untrusted-folder warnings already shown. Codex repeats one at each start, and a reconnect does
+   * not change the folders, so the user sees each set of folders once per app run.
+   */
+  readonly #reportedConfigWarnings = new Set<string>();
   /** Counts `dispose()` calls, so a start from before one cannot add its client after it. */
   #disposals = 0;
   readonly #modelCatalog: ModelCatalog;
@@ -3765,10 +3772,27 @@ export class ProviderRuntime implements ProviderPort {
    * keys, and a key can belong to another Codex app that shares the file, such as the desktop app's
    * saved Windows app approvals (#4179), so the user has nothing to correct.
    *
-   * Other configuration warnings are not reported here.
+   * Codex's notice of folders it does not trust is a warning with the folders, once for each set
+   * of folders: the user reviews them before trusting the project. Other configuration warnings are
+   * not reported here.
    */
   #reportConfigWarning(client: AgentClient, params: unknown): void {
     const summary = getString(params, "summary");
+    if (summary && client.provider === "codex" && isUntrustedConfigDiagnostic(summary)) {
+      const details = getString(params, "details");
+      const redacted = shortenDiagnostic(this.#redactMcp([summary, details].filter(Boolean).join("\n")));
+      logger.warn("Codex skipped untrusted project settings.", { provider: client.provider, message: redacted });
+      const folders = untrustedCodexFolders(redacted);
+      const message =
+        folders.length > 0
+          ? sourceText("error.provider.codexConfigUntrusted", { folders: folders.join(", ") })
+          : sourceText("error.provider.codexConfigUntrustedUnnamed");
+      const key = `codex_config_untrusted:${message}`;
+      if (this.#reportedConfigWarnings.has(key)) return;
+      this.#reportedConfigWarnings.add(key);
+      this.#emitError("codex_config_untrusted", message);
+      return;
+    }
     if (!summary || !isIgnoredConfigDiagnostic(summary)) return;
     logger.warn("A provider ignored settings in its configuration.", {
       provider: client.provider,

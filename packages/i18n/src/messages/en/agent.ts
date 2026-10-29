@@ -50,6 +50,7 @@ export const messages = defineMessages("agent", {
   "agent.deleteUndo.action": "Undo",
   "agent.hideUndo.title": "{name} is hidden",
   "agent.hideUndo.action": "Undo",
+  "agent.error.codexConfigUntrusted": "Codex configuration warning",
   "agent.error.createFailed": "Could not create the agent. Try again.",
   "agent.error.duplicateTitle": "Could not duplicate agent",
   "agent.error.duplicateFailed": "Could not duplicate this agent. Try again.",
