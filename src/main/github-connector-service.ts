@@ -1,3 +1,4 @@
+import { ContextPrFailure, type PrIdentity, readConnectedContextPr } from "./context-pr-reader";
 // The built-in GitHub connection of this computer: one sign-in to the GitHub App, shared by every
 // agent as the GitHub MCP server and as the credential that `gh` and `git` read.
 
@@ -396,6 +397,18 @@ export class GitHubConnectorService {
     },
     (operation) => this.#owned(operation),
   ).bind(this);
+
+  readonly readContextPullRequest = Effect.fn("GitHubConnector.readContextPullRequest")(function* (
+    this: GitHubConnectorService,
+    identity: PrIdentity,
+    requestSignal?: AbortSignal,
+  ) {
+    const token = yield* this.accessToken().pipe(
+      Effect.catch(() => Effect.fail(new ContextPrFailure({ reason: "not-connected" }))),
+    );
+    if (!token) return yield* new ContextPrFailure({ reason: "not-connected" });
+    return yield* readConnectedContextPr(identity, token, this.#fetch, requestSignal);
+  }).bind(this);
 
   /**
    * The user token, refreshed first when it has less than ten minutes left. Null while the
