@@ -1332,9 +1332,12 @@ export class MailboxStore {
   nextQueued(agentId: string, taskId: string | null = null): DeliveryContext | null {
     if (this.laneActive(agentId, taskId)) return null;
     const messages = this.#messagesById();
-    const delivery = this.#queuedFor(agentId).find(
-      (candidate) => this.#taskIdOf(candidate, messages) === taskId && !this.#isHeldReply(candidate),
-    );
+    const queued = this.#queuedFor(agentId);
+    const eligible = (candidate: StoredDelivery) =>
+      this.#taskIdOf(candidate, messages) === taskId && !this.#isHeldReply(candidate);
+    const delivery =
+      queued.find((candidate) => messages.get(candidate.messageId)?.channelId && eligible(candidate)) ??
+      queued.find(eligible);
     return delivery && this.#mayStart(delivery) ? this.#context(delivery, undefined, messages) : null;
   }
 
