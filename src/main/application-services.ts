@@ -2005,10 +2005,13 @@ export async function createApplicationServices({
    * a managed copy and leaves the system installation untouched.
    */
   const trackSystemCliVersions = (status: AgentStatus): void => {
+    let copyInUse = false;
     for (const provider of status.providers ?? []) {
       const version = provider.cliSource === "system" ? (provider.version ?? null) : null;
-      if (isManagedRuntimeProvider(provider.id)) providerRuntimes.setSystemVersion(provider.id, version);
+      if (isManagedRuntimeProvider(provider.id) && providerRuntimes.setSystemVersion(provider.id, version))
+        copyInUse = true;
     }
+    if (copyInUse) Effect.runFork(providerRuntimes.providerUseChanged());
   };
   trackSystemCliVersions(service.getStatus());
   service.on("event", (event) => {
