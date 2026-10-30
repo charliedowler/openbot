@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
 import { AGENT_PROVIDERS } from "@openbot/contracts/ipc";
 import { Effect } from "effect";
 import type { AgentBrowserHost } from "../src/backend/agent/turn-lifecycle";
@@ -87,7 +88,7 @@ const answer = (message) => {
       const id = "tool-" + turnId;
       waiting.set(id, { threadId: params.threadId, turnId });
       const { __tool, __retry, __followup, __deferCall, ...args } = JSON.parse(match[1].replace(/\\\\"/g, '"'));
-      waiting.set(id, { threadId: params.threadId, turnId, retry: __retry, followup: __followup, stale: Boolean(__deferCall), ended: Boolean(__deferCall) });
+      waiting.set(id, { threadId: params.threadId, turnId, tool: __tool, retry: __retry, followup: __followup, stale: Boolean(__deferCall), ended: Boolean(__deferCall) });
       const sendCall = () => write({
         id,
         method: "item/tool/call",
@@ -146,7 +147,7 @@ process.stdin.on("data", (chunk) => {
         } else if (turn.retry && message.result?.success === false) {
           const id = "retry-" + turn.turnId;
           waiting.set(id, { threadId: turn.threadId, turnId: turn.turnId });
-          write({ id, method: "item/tool/call", params: { threadId: turn.threadId, turnId: turn.turnId, callId: id, namespace: "openbot", tool: "channel_assign", arguments: turn.retry } });
+          write({ id, method: "item/tool/call", params: { threadId: turn.threadId, turnId: turn.turnId, callId: id, namespace: "openbot", tool: turn.tool, arguments: turn.retry } });
         } else {
           log({ turnId: turn.turnId, ...(turn.recovered ? { stage: "recovery" } : {}), result: message.result ?? null, error: message.error ?? null });
           if (!turn.ended) finish(turn.threadId, turn.turnId);
@@ -163,8 +164,13 @@ interface ChannelToolArgs {
   task?: string;
   expectedResult?: string;
   sourceMessageIds?: readonly string[];
-  __retry?: { recipientAgentId: string; task: string; expectedResult: string; sourceMessageIds: string[] };
-  __followup?: { tool: "channel_assign"; arguments: NonNullable<ChannelToolArgs["__retry"]> };
+  __retry?:
+    | { recipientAgentId: string; task: string; expectedResult: string; sourceMessageIds: string[] }
+    | { text: string };
+  __followup?: {
+    tool: "channel_assign";
+    arguments: { recipientAgentId: string; task: string; expectedResult: string; sourceMessageIds: string[] };
+  };
   __deferCall?: string;
   agentId?: string;
   instructions?: string;
@@ -173,6 +179,7 @@ interface ChannelToolArgs {
   instruction?: string;
   schedule?: { kind: "daily"; time: string } | { kind: "once"; date: string; time: string };
   active?: boolean;
+  text?: unknown;
 }
 
 interface ToolLog {
@@ -367,6 +374,45 @@ try {
     "An incomplete handoff does not create a child task",
     channels().store.tasks(channelId).length === beforeTasks + 1,
   );
+  for (const tool of ["channel_remember", "channel_forget_memory"]) {
+    for (const [label, args] of [
+      ["missing text", {}],
+      ["empty text", { text: "" }],
+      ["blank text", { text: "   " }],
+      ["non-string text", { text: 42 }],
+      ["oversized text", { text: "x".repeat(INPUT_LIMITS.agentMemoryText + 1) }],
+    ] as const) {
+      const memoriesBefore = channels().memories.list(channelId);
+      const refused = await callTool(`${tool}: ${label}`, channelId, lead.id, tool, args);
+      pass(`${tool}: ${label} returns failed tool feedback`, report.calls.at(-1)?.success === false, refused.text);
+      pass(`${tool}: ${label} explains the text requirement`, refused.text.includes("text"), refused.text);
+      pass(`${tool}: ${label} does not raise a provider error`, errorEvents.length === 0, JSON.stringify(errorEvents));
+      pass(
+        `${tool}: ${label} preserves saved memories`,
+        JSON.stringify(channels().memories.list(channelId)) === JSON.stringify(memoriesBefore),
+      );
+    }
+  }
+  const memoryText = "The synthetic release requires an independent review.";
+  const memoryRetry = await callTool("corrected memory", channelId, lead.id, "channel_remember", {
+    __retry: { text: memoryText },
+  });
+  pass("The same provider turn can correct its memory arguments", memoryRetry.success, memoryRetry.text);
+  pass(
+    "The corrected memory is saved exactly once",
+    channels()
+      .memories.list(channelId)
+      .filter((entry) => entry.text === memoryText).length === 1,
+  );
+  const forgotten = await callTool("forget corrected memory", channelId, lead.id, "channel_forget_memory", {
+    text: memoryText,
+  });
+  pass(
+    "A valid forget call still removes its matching memory",
+    forgotten.success && channels().memories.list(channelId).length === 0,
+    forgotten.text,
+  );
+  pass("Memory corrections do not raise provider errors", errorEvents.length === 0, JSON.stringify(errorEvents));
   const sourceId = channels()
     .store.messages(channelId)
     .find((message) => message.author.kind === "member")?.id;
