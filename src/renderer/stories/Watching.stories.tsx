@@ -46,7 +46,17 @@ const snapshot: WatchingSnapshot = {
         sourceKind: "Capacity",
         title: "Background capacity check",
         status: "paused",
+        lastError: "The last successful source check is stale.",
       },
+      ...Array.from({ length: 18 }, (_, index) => ({
+        publisherId: "preview-publisher",
+        id: `previous-review-${index}`,
+        ownerAgentId: "research",
+        sourceKind: "T3 thread",
+        title: `Previous review ${index + 1}`,
+        status: "expired" as const,
+        lastError: "The last successful source check is stale.",
+      })),
     ],
   },
   waits: [
@@ -72,4 +82,16 @@ type Story = StoryObj<typeof meta>;
 export const SourceHealthAndWaitingTasks: Story = {};
 export const Empty: Story = {
   render: () => <PrototypeApp options={{ watchingSnapshot: { registry: null, waits: [] } }} />,
+};
+export const CurrentSnapshot: Story = {
+  render: () => (
+    <PrototypeApp
+      options={{
+        watchingSnapshot: {
+          ...snapshot,
+          registry: snapshot.registry && { ...snapshot.registry, generatedAt: new Date().toISOString() },
+        },
+      }}
+    />
+  ),
 };
