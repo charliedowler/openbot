@@ -2376,7 +2376,7 @@ export class ChannelService {
      */
     if (tool === "channel_remember" || tool === "channel_forget_memory") {
       if (!isString(args.text) || !args.text.trim() || args.text.length > INPUT_LIMITS.agentMemoryText)
-        return yield* channelFailure(new Error("Provide the memory text."));
+        return yield* channelFailure(new ChannelToolInputError("Provide the memory text."));
       const text = args.text;
       if (tool === "channel_remember")
         yield* channelSync(() => this.memories.saveFromTool(channelId, text, turnId, `channel-memory:${operationId}`));
