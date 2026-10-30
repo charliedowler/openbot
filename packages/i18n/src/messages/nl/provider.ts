@@ -31,7 +31,7 @@ export const messages = {
   "provider.status.checking": "Controleren",
   "provider.status.off": "Uit",
   "provider.gemini.hostSignIn":
-    "Om Gemini te verbinden, open je OpenBot op de host en kies je Verbinden in Instellingen > Aanbieders. Inloggen bij Google vereist een browser op die host. Op afstand inloggen wordt niet ondersteund.",
+    "Om Gemini te verbinden, open je OpenBot op de host en kies je Verbinden in Serverinstellingen > Aanbieders. Inloggen bij Google vereist een browser op die host. Op afstand inloggen wordt niet ondersteund.",
   "provider.key.free": "Gratis",
   "provider.action.connect": "Verbinden",
   "provider.action.reconnect": "Opnieuw verbinden",
