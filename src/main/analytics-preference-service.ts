@@ -4,6 +4,7 @@ import { Effect, Semaphore } from "effect";
 import {
   readAnalyticsPreference,
   readSavedAnalyticsPreference,
+  type SavedAnalyticsPreference,
   saveAnalyticsDefault,
   writeAnalyticsPreference,
 } from "./analytics-preference-store";
@@ -28,7 +29,8 @@ export interface AnalyticsPreferenceServiceOptions {
 /**
  * The analytics answer of this computer, kept the same as the account's latest answer. A choice of
  * the user goes to the account; a default does not. When the account has an answer and this
- * computer has no unsent choice, this computer follows the account.
+ * computer has no unsent choice, this computer follows the account. An "off" from before the
+ * account kept answers does not follow an account answer of "on".
  */
 export class AnalyticsPreferenceService {
   // One write at a time, so two quick toggles leave the file and the tracker at the last choice.
@@ -68,7 +70,11 @@ export class AnalyticsPreferenceService {
     chosen: boolean,
   ) {
     const preference = yield* this.#writes.withPermit(
-      writeAnalyticsPreference(this.#path, enabled, chosen ? Date.now() : null).pipe(
+      readSavedAnalyticsPreference(this.#path).pipe(
+        // A choice is always saved. When the earlier answer cannot be read, an "off" stays kept.
+        Effect.map((saved) => saved?.keepOff ?? false),
+        Effect.orElseSucceed(() => true),
+        Effect.flatMap((keepOff) => writeAnalyticsPreference(this.#path, enabled, keepOff, chosen ? Date.now() : null)),
         Effect.tap((saved) => Effect.sync(() => this.#setTrackingEnabled(saved.enabled))),
         Effect.uninterruptible,
       ),
@@ -96,8 +102,8 @@ export class AnalyticsPreferenceService {
       Effect.gen({ self: this }, function* () {
         const saved = yield* readSavedAnalyticsPreference(this.#path);
         if (saved?.unsentAt != null) return true;
-        if (account === null || account === saved?.enabled) return false;
-        yield* writeAnalyticsPreference(this.#path, account);
+        if (account === null || account === saved?.enabled || (account && saved?.keepOff)) return false;
+        yield* writeAnalyticsPreference(this.#path, account, saved?.keepOff ?? false);
         this.#adopt(account);
         return false;
       }),
@@ -119,7 +125,7 @@ export class AnalyticsPreferenceService {
             // A newer choice stays unsent; the send that it started reads it.
             const current = yield* readSavedAnalyticsPreference(this.#path);
             if (current?.unsentAt !== unsentAt) return;
-            yield* this.#keep(current.enabled, account);
+            yield* this.#keep(current, account);
           }),
         );
       }),
@@ -137,15 +143,18 @@ export class AnalyticsPreferenceService {
     return state.status === "signed_in" ? (state.user.analyticsEnabled ?? null) : undefined;
   }).bind(this);
 
-  /** Clears the unsent mark. The account keeps a newer answer from another device, and this computer follows it. */
+  /**
+   * Clears the unsent mark. The account keeps a newer answer from another device, and this computer
+   * follows it, except for an "on" over a kept "off".
+   */
   readonly #keep = Effect.fn("AnalyticsPreferences.keep")(function* (
     this: AnalyticsPreferenceService,
-    enabled: boolean,
+    saved: SavedAnalyticsPreference,
     account: boolean | null,
   ) {
-    const answer = account ?? enabled;
-    yield* writeAnalyticsPreference(this.#path, answer);
-    if (answer !== enabled) this.#adopt(answer);
+    const answer = saved.keepOff ? saved.enabled : (account ?? saved.enabled);
+    yield* writeAnalyticsPreference(this.#path, answer, saved.keepOff);
+    if (answer !== saved.enabled) this.#adopt(answer);
   }).bind(this);
 
   #adopt(enabled: boolean): void {
