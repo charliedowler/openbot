@@ -816,7 +816,8 @@ export class OpenBotToolRouter {
     }
     const channelId = this.#channels.store.channelForThread(executionThreadId);
     if (channelId && (params.tool.startsWith("channel_") || params.tool === "send_message")) {
-      if (params.tool === "send_message") throw new Error("Use channel_assign or channel_transfer for channel work.");
+      if (params.tool === "send_message")
+        return openBotToolFailure("Use channel_assign or channel_transfer for channel work.");
       return openBotToolResult(
         yield* this.#channels.tool(
           channelId,
