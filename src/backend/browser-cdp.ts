@@ -2332,6 +2332,7 @@ export class BrowserCdpEngine {
     expression: string,
     awaitPromise = true,
     timeoutMs = ACTION_TIMEOUT_MS,
+    undefinedAsNull = false,
   ): Effect.fn.Return<BrowserJsonValue, BrowserOperationError> {
     return yield* this.#leaseEffect((send) =>
       Effect.gen({ self: this }, function* () {
@@ -2348,6 +2349,7 @@ export class BrowserCdpEngine {
         if (exception)
           return yield* browserFailure(new Error(`Browser evaluation failed: ${exceptionDescription(exception)}`));
         const remoteObject = recordValue(result.result);
+        if (undefinedAsNull && remoteObject?.type === "undefined") return null;
         if (!remoteObject || !("value" in remoteObject) || "unserializableValue" in remoteObject) {
           return yield* browserFailure(new Error("Browser evaluation result is not JSON-serializable."));
         }

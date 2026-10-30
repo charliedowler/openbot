@@ -167,6 +167,9 @@ export type ActionResultReader<A> = (
   timeoutMessage: string,
 ) => Effect.Effect<A, BrowserOperationError>;
 
+/** A `run_script` step reads nothing: the script takes one snapshot at the end. */
+export const skipActionResult: ActionResultReader<null> = () => Effect.succeed(null);
+
 export const readActionSnapshot: ActionResultReader<BrowserSnapshot> = (tab, keepQueueBlocked, timeoutMessage) =>
   readTabSnapshot(tab, tab.revision + 1, keepQueueBlocked, ACTION_POST_DISPATCH_TIMEOUT_MS, timeoutMessage).pipe(
     Effect.map((result) => result.snapshot),
@@ -385,7 +388,14 @@ export const runTabAction = Effect.fn("BrowserTab.action")(
 );
 
 export const runTabEvaluation = Effect.fn("BrowserTab.evaluate")(
-  (tab: BrowserHostTab, requireEvaluable: () => void, expression: string, awaitPromise: boolean, timeoutMs: number) =>
+  (
+    tab: BrowserHostTab,
+    requireEvaluable: () => void,
+    expression: string,
+    awaitPromise: boolean,
+    timeoutMs: number,
+    undefinedAsNull: boolean,
+  ) =>
     enqueueTabOperation(tab, (_tab, keepQueueBlocked) =>
       Effect.gen(function* () {
         if (tab.secret)
@@ -401,6 +411,7 @@ export const runTabEvaluation = Effect.fn("BrowserTab.evaluate")(
             expression,
             awaitPromise,
             yield* browserSync(() => remainingTime(deadline, timeoutMessage)),
+            undefinedAsNull,
           ),
           yield* browserSync(() => remainingTime(deadline, timeoutMessage)),
           timeoutMessage,
