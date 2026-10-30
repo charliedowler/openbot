@@ -359,6 +359,30 @@ try {
   agents.on("event", (event) => {
     if (event.type === "error") errorEvents.push(event);
   });
+  const directMessageTasks = channels().store.tasks(channelId).length;
+  const directMessage = await callTool("direct message from a channel", channelId, lead.id, "send_message", {
+    recipientAgentId: tester.id,
+    text: "Review the synthetic evidence.",
+  });
+  pass(
+    "A direct message from a channel returns failed tool feedback",
+    report.calls.at(-1)?.success === false,
+    directMessage.text,
+  );
+  pass(
+    "The direct message feedback names the channel handoff tools",
+    directMessage.text.includes("channel_assign") && directMessage.text.includes("channel_transfer"),
+    directMessage.text,
+  );
+  pass(
+    "A direct message from a channel does not raise a provider error",
+    errorEvents.length === 0,
+    JSON.stringify(errorEvents),
+  );
+  pass(
+    "A refused direct message creates no child task",
+    channels().store.tasks(channelId).length === directMessageTasks + 1,
+  );
   const beforeTasks = channels().store.tasks(channelId).length;
   const invalid = await callTool("incomplete handoff", channelId, lead.id, "channel_assign", {
     task: "Review the synthetic evidence.",
