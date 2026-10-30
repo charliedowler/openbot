@@ -194,7 +194,11 @@ const Settings = createSimpleContext({
 
     let dynamicIslandSaveCount = 0;
 
-    function updateGeneralSettings(value: GeneralSettingsValue): void {
+    /**
+     * `analyticsChosen` is false for a default that the user did not change, such as the first-run
+     * box left as it was. Only a choice goes to the account.
+     */
+    function updateGeneralSettings(value: GeneralSettingsValue, options: { analyticsChosen?: boolean } = {}): void {
       const previous = generalSettings();
       function persistField<Key extends keyof GeneralSettingsValue, Response>(
         key: Key,
@@ -222,11 +226,15 @@ const Settings = createSimpleContext({
       if (previous.soundFeedback !== value.soundFeedback || previous.soundTheme !== value.soundTheme) {
         setActionSoundChoice(value.soundFeedback ? value.soundTheme : "off");
       }
-      if (previous.productAnalytics !== value.productAnalytics) {
+      // A choice equal to the shown default is still a choice, and the account gets it.
+      if (previous.productAnalytics !== value.productAnalytics || options.analyticsChosen === true) {
         desktopAnalytics.setTrackingEnabled(value.productAnalytics, { recordOptOut: true });
         setAnalyticsPreferenceLoaded(value.productAnalytics);
         void settingsPort()
-          .setAnalyticsPreference({ enabled: value.productAnalytics })
+          .setAnalyticsPreference({
+            enabled: value.productAnalytics,
+            ...(options.analyticsChosen === false ? {} : { chosen: true }),
+          })
           .then((preference) => {
             desktopAnalytics.setTrackingEnabled(preference.enabled);
             setAnalyticsPreferenceLoaded(preference.enabled);
@@ -446,6 +454,11 @@ const Settings = createSimpleContext({
       );
       // A remote owner or admin can change an agent's grant from a phone or the web client.
       const unsubscribeApprovals = settingsPort().onApprovalAutomation(setApprovalAutomation);
+      // Main follows the account's analytics answer from another device.
+      const unsubscribeAnalytics = settingsPort().onAnalyticsPreference(({ enabled }) => {
+        setAnalyticsPreferenceLoaded(enabled);
+        setGeneralSettings((current) => ({ ...current, productAnalytics: enabled }));
+      });
       // An admin of a joined server can change how many memories each agent of this computer keeps.
       const unsubscribeMemoryLimit = settingsPort().onAgentMemoryLimitPreference(({ limit }) => {
         agentMemoryLimitChanged = true;
@@ -475,6 +488,7 @@ const Settings = createSimpleContext({
         unsubscribe();
         unsubscribeUpdateSettings();
         unsubscribeApprovals();
+        unsubscribeAnalytics();
         unsubscribeMemoryLimit();
         unsubscribeUpdates();
       };

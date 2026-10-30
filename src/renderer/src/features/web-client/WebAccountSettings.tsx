@@ -33,7 +33,7 @@ import { isCompletionSoundEnabled, setCompletionSoundEnabled } from "../../compl
 import { webReportsEnabled } from "../../error-reports";
 import { currentDevicePlatform, setSendShortcutMode, useSendShortcutMode } from "../../send-shortcut-preference";
 import type { WebAccountCalls } from "./web-account";
-import { setWebAnalyticsEnabled } from "./web-analytics";
+import { sendWebAnalyticsChoice, setWebAnalyticsEnabled } from "./web-analytics";
 import type { WebNotificationSettings } from "./web-notification-settings";
 
 const TABS = ["profile", "preferences"] as const;
@@ -242,6 +242,9 @@ export default function WebAccountSettings(props: WebAccountSettingsProps) {
                 checked={reportsEnabled()}
                 onChange={(value) => {
                   setReportsEnabled(setWebAnalyticsEnabled(value));
+                  sendWebAnalyticsChoice(props.calls)
+                    .then(() => setReportsEnabled(webReportsEnabled()))
+                    .catch(() => undefined);
                 }}
                 label={t("settings.analytics.title")}
                 description={t("settings.analytics.webDescription")}

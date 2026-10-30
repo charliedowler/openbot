@@ -1,6 +1,8 @@
 import type { AppInfo, CentralAuthUser } from "@openbot/contracts/ipc";
+import { isBoolean, isDynamicRecord, isNumber } from "@openbot/contracts/runtime-values";
 import {
   ANALYTICS_GENERATIONS,
+  analyticsOnByDefault,
   classifyFailure,
   type FailureProperties,
   openPanelTransport,
@@ -21,6 +23,8 @@ const startup: { properties: FailureProperties; timestamp: number }[] = [];
 let profileId: string | null = null;
 /** The web analytics preference. The key keeps its first name, so stored choices stay. */
 export const WEB_PREFERENCE = "openbot:web:error-reports-enabled";
+/** A choice of this browser that the account has not saved yet, "true" or "false". */
+const WEB_ACCOUNT_PENDING = "openbot:web:analytics-account-pending";
 
 export function configureDesktopReports(
   info: AppInfo,
@@ -66,16 +70,47 @@ export function configureErrorReports(tracking: boolean, accountId: string | nul
   }
 }
 
+/** True while this browser has a signed-in account. `configureWebReports` sets it. */
+let webSignedIn = false;
+/** The choice of this page, for a browser that cannot save it. */
+let webChoice: boolean | null = null;
+
+/**
+ * The web choice for failure reports and product analytics. With no saved choice, a signed-in
+ * account keeps the earlier default, on: it signed in before the sign-in screen asked. A signed-out
+ * browser uses the default of its region until the sign-in screen saves a choice.
+ */
 export function webReportsEnabled(): boolean {
   try {
     const stored = localStorage.getItem(WEB_PREFERENCE);
-    return stored === null || stored === "true";
+    if (stored !== null) return stored === "true";
+  } catch {
+    return false;
+  }
+  return webChoice ?? (webSignedIn || webAnalyticsDefault());
+}
+
+/** True when this browser saved "on". The sign-in screen then keeps it and does not ask again. */
+export function webReportsAgreed(): boolean {
+  try {
+    return localStorage.getItem(WEB_PREFERENCE) === "true";
+  } catch {
+    return false;
+  }
+}
+
+/** On only when the region of the browser language and the time zone are in a default-on country. */
+function webAnalyticsDefault(): boolean {
+  try {
+    const region = new Intl.Locale(navigator.language).region;
+    return region !== undefined && analyticsOnByDefault(region, Intl.DateTimeFormat().resolvedOptions().timeZone);
   } catch {
     return false;
   }
 }
 
 export function configureWebReports(user: Pick<CentralAuthUser, "id" | "email"> | null): void {
+  webSignedIn = user !== null;
   if (!import.meta.env.PROD || window.location.origin !== "https://openbot.run") return;
   queue ??= new ReportQueue(
     indexedReportStorage("openbot-web-error-reports-v1"),
@@ -88,6 +123,7 @@ export function configureWebReports(user: Pick<CentralAuthUser, "id" | "email"> 
 export function setWebReportsEnabled(value: boolean): boolean {
   // Disable first. A failed write must never permit a pending send.
   if (!value) configureErrorReports(false);
+  webChoice = value;
   try {
     localStorage.setItem(WEB_PREFERENCE, String(value));
     configureErrorReports(value);
@@ -95,6 +131,34 @@ export function setWebReportsEnabled(value: boolean): boolean {
     configureErrorReports(false);
   }
   return enabled;
+}
+
+/** A choice of the user that the account does not have yet, and its time (ms). */
+export interface WebAccountPending {
+  enabled: boolean;
+  at: number;
+}
+
+/** The user's choice that the account must still save, so their other devices follow it. */
+export function webAccountPending(): WebAccountPending | null {
+  try {
+    const stored = JSON.parse(localStorage.getItem(WEB_ACCOUNT_PENDING) ?? "null");
+    return isDynamicRecord(stored) && isBoolean(stored.enabled) && isNumber(stored.at)
+      ? { enabled: stored.enabled, at: stored.at }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Marks a choice that the account must save, or clears it after the account has it. */
+export function setWebAccountPending(value: boolean | null): void {
+  try {
+    if (value === null) localStorage.removeItem(WEB_ACCOUNT_PENDING);
+    else localStorage.setItem(WEB_ACCOUNT_PENDING, JSON.stringify({ enabled: value, at: Date.now() }));
+  } catch {
+    // Without storage the choice stays on this page only; the account does not get it.
+  }
 }
 
 export function reportNotification(properties: FailureProperties): void {
