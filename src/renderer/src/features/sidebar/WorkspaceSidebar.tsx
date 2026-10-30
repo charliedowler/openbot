@@ -424,6 +424,7 @@ export function WorkspaceSidebar(props: { peopleEnabled: boolean }) {
         supported={watching.supported()}
         error={watching.state.error}
         data={watching.data()}
+        initialOwnerId={activeAgent()?.id}
         onClose={watching.close}
         onRefresh={watching.refresh}
         onOpenChat={(ownerId, channelId) => {
