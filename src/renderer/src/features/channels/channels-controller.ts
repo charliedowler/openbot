@@ -216,7 +216,7 @@ export function createChannelsController(env: ChannelsEnvironment) {
         Object.assign(state, { selectedId: channelId, page: null, editing: null, loading: true });
       }),
     );
-    await refreshAfter();
+    await refresh(channelId);
   }
   async function perform(action: () => Promise<void>): Promise<boolean> {
     const account = env.scopeKey();
