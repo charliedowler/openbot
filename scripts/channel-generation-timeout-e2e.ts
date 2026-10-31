@@ -244,7 +244,7 @@ try {
         },
         new ChannelMemoryStore(database),
       );
-      const fiber = yield* Effect.forkChild(history.prepare(task, lead, lead, null));
+      const fiber = yield* Effect.forkChild(history.prepare(task, lead, lead, null, []));
       for (const started of starts) {
         yield* Deferred.await(started);
         yield* TestClock.adjust(121_000);
