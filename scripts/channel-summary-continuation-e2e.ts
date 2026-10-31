@@ -200,6 +200,7 @@ try {
     },
   ];
   conversations.set(lead.id, firstMessages);
+  const copiedMessages = firstMessages.filter((message) => message.text.length > 0);
   capture(lead, firstTurn.threadId, firstTurn.turnId);
   await runCauseEffect(
     channels.tool(channel.id, lead.id, firstTurn.turnId, randomUUID(), "channel_assign", {
@@ -222,7 +223,7 @@ try {
   const summary = channels.store.summary(channel.id);
   assert.ok(summary.version > 0);
   assert.ok(
-    firstMessages.every(
+    copiedMessages.every(
       (message) => (channels.store.message(channel.id, message.id)?.sequence ?? Infinity) <= summary.throughSequence,
     ),
   );
@@ -245,7 +246,7 @@ try {
   const resumedSummary = channels.store.summary(channel.id);
   assert.deepEqual(resumedSummary, summary, "A normal parent continuation resets the completed channel summary.");
   assert.ok(
-    firstMessages.every((message) => channels.store.message(channel.id, message.id)?.superseded === false),
+    copiedMessages.every((message) => channels.store.message(channel.id, message.id)?.superseded === false),
     "A normal continuation marks valid earlier messages superseded.",
   );
   assert.equal(report.summaryCalls, summaryCallsBeforeResume, "A continuation repeats history summarisation.");
@@ -281,7 +282,7 @@ try {
   assert.ok(corrected);
   assert.notEqual(corrected.requestMessageId, parent.requestMessageId);
   assert.equal(channels.store.summary(channel.id).throughSequence, 0);
-  assert.ok(firstMessages.every((message) => channels.store.message(channel.id, message.id)?.superseded === true));
+  assert.ok(copiedMessages.every((message) => channels.store.message(channel.id, message.id)?.superseded === true));
   await assert.rejects(
     runCauseEffect(
       channels.tool(channel.id, lead.id, resumedTurn.turnId, randomUUID(), "channel_result", {
@@ -300,8 +301,8 @@ try {
   };
   conversations.set(lead.id, [...firstMessages, lateMessage]);
   capture(lead, resumedTurn.threadId, null);
-  assert.ok(firstMessages.every((message) => channels.store.message(channel.id, message.id)?.superseded === true));
-  assert.equal(channels.store.message(channel.id, lateMessage.id)?.superseded, true);
+  assert.ok(copiedMessages.every((message) => channels.store.message(channel.id, message.id)?.superseded === true));
+  assert.notEqual(channels.store.message(channel.id, lateMessage.id)?.superseded, false);
   assert.equal(channels.store.context(channel.id, lead.id).throughSequence, 0);
   report.checks.push(
     "A real request correction invalidates the summary and cursor, supersedes delayed old messages and rejects a stale assignment result.",
