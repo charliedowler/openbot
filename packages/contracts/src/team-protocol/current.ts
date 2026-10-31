@@ -672,6 +672,9 @@ export const TEAM_PROTOCOL_V9_ONLY_CAPABILITIES: ReadonlySet<string> = new Set<T
   PASSWORD_MANAGERS_CAPABILITY,
   BROWSER_PROXIES_CAPABILITY,
   BROWSER_EGRESS_CAPABILITY,
+  SHARED_DIRECTORY_CAPABILITY,
+  CONTEXT_PRS_CAPABILITY,
+  WATCH_REGISTRY_CAPABILITY,
 ]);
 // A v8 host reads at most 128 capabilities, so a client sends the protocol 9 ones only after it
 // negotiates protocol 9.
