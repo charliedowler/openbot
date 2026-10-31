@@ -223,9 +223,9 @@ try {
       Effect.scoped(
         requestJson(`http://127.0.0.1:${port}`, path, decodeWatchingSnapshotFromHost, {
           token: member.sessionToken,
-          protocol: 8,
-          appVersion: "0.54.0",
-          capabilities: teamCapabilitiesForProtocol(8),
+          protocol: 9,
+          appVersion: "0.56.0",
+          capabilities: teamCapabilitiesForProtocol(9),
         }),
       ),
     );
