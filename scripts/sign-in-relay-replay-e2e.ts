@@ -113,10 +113,11 @@ try {
   assert.equal(codex.loginExited, true, "The sign-in ends after the replay.");
   assert.deepEqual(codex.result, { toolCount: 0, error: null }, "The host's result arrives.");
 
-  // A success page that fails does not make `complete` fail: `runCase` would throw.
-  const missing = await runCase("success page that fails", (port) => `http://127.0.0.1:${port}/missing`);
+  // A redirect to another path of the same sign-in is not followed, and does not make `complete`
+  // fail: `runCase` would throw.
+  const missing = await runCase("redirect to another path", (port) => `http://127.0.0.1:${port}/missing`);
   report.cases.push(missing);
-  assert.deepEqual(missing.loginPaths, ["/auth/callback", "/missing"], "The replay loads the redirect once.");
+  assert.deepEqual(missing.loginPaths, ["/auth/callback"], "Only the callback goes to the sign-in.");
   assert.equal(missing.result, null, "The sign-in has no result yet.");
 
   for (const [name, successAt] of [
