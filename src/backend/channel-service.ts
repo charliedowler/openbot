@@ -1022,17 +1022,16 @@ export class ChannelService {
     this: ChannelService,
     channelId: string,
   ): Effect.fn.Return<void, ChannelOperationError> {
-    for (const candidate of yield* channelSync(() => this.store.tasks(channelId))) {
+    const queued = (yield* channelSync(() => this.store.tasks(channelId))).filter((item) => item.state === "queued");
+    for (const candidate of queued) {
       if (this.#stopped || this.#deletedChannels.has(channelId)) return;
       let channel = yield* channelSync(() => this.store.get(channelId));
       if (channel.archived) return;
-      const candidateTask = (yield* channelSync(() => this.store.tasks(channelId))).find(
-        (item) => item.id === candidate.id,
-      );
+      const candidateTask = yield* channelSync(() => this.store.task(channelId, candidate.id));
       if (candidateTask?.state !== "queued") continue;
       let task = candidateTask;
       const rootId = task.rootTaskId;
-      const root = (yield* channelSync(() => this.store.tasks(channelId))).find((item) => item.id === rootId);
+      const root = yield* channelSync(() => this.store.task(channelId, rootId));
       if (root && (root.state === "paused" || root.state === "failed" || root.state === "cancelled")) continue;
       if (!task.ownerAgentId) {
         // One eligible member is not a decision. Routing costs a full turn of the lead's own model,
@@ -1424,9 +1423,7 @@ export class ChannelService {
             ),
           );
         if (this.#deletedChannels.has(channelId)) return;
-        const latest = channelResult(yield* Effect.result(channelSync(() => this.store.tasks(channelId)))).find(
-          (item) => item.id === task.id,
-        );
+        const latest = channelResult(yield* Effect.result(channelSync(() => this.store.task(channelId, task.id))));
         if (
           !latest ||
           latest.revision !== task.revision ||
