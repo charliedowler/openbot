@@ -191,6 +191,9 @@ export class ChannelService {
   /** Turns that the provider started with no delivery. Their rows are no task's reply. */
   readonly #providerTurns = new Set<string>();
   readonly #deletedChannels = new Set<string>();
+  readonly #stopNoticed = new Set<string>();
+  readonly #stopPending = new Map<string, Map<string, number>>();
+  readonly #stopTimers = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #assignmentTerminalWaiters = new Map<string, Set<() => void>>();
   /** The active assignments last seen per channel, so turn traffic reports no new hold. */
   readonly #activeAssignments = new Map<string, string>();
@@ -209,7 +212,7 @@ export class ChannelService {
     readonly mailbox: MailboxStore,
     readonly hooks: ChannelHooks,
   ) {
-    this.store = new ChannelStore(database);
+    this.store = new ChannelStore(database, (channel, tasks) => this.#tasksStopped(channel, tasks));
     this.memories = new ChannelMemoryStore(database);
     this.#history = new ChannelHistory(this.store, hooks.generate, this.memories);
   }
@@ -727,6 +730,113 @@ export class ChannelService {
     yield* this.wake(channel.id);
     return result;
   }).bind(this);
+
+  #tasksStopped(channel: Channel, tasks: ChannelTask[]): void {
+    if (this.#stopped || channel.archived || !channel.leadAgentId) return;
+    const fresh = tasks.filter((task) => {
+      const key = `${task.id}:${task.revision}`;
+      if (isStopNotice(task) || this.#stopNoticed.has(key)) return false;
+      if (this.#stopNoticed.size >= STOP_NOTICE_MEMORY) this.#stopNoticed.clear();
+      this.#stopNoticed.add(key);
+      return true;
+    });
+    if (!fresh.length) return;
+    const pending = this.#stopPending.get(channel.id) ?? new Map<string, number>();
+    for (const task of fresh) pending.set(task.id, task.revision);
+    this.#stopPending.set(channel.id, pending);
+    if (this.#stopTimers.has(channel.id)) return;
+    const timer = setTimeout(() => {
+      this.#stopTimers.delete(channel.id);
+      if (!this.#stopped) this.#dispatchEvent(this.#noticeStopped(channel.id));
+    }, STOP_NOTICE_DELAY_MS);
+    timer.unref?.();
+    this.#stopTimers.set(channel.id, timer);
+  }
+
+  #noticeStopped(channelId: string): Effect.Effect<void, ChannelOperationError> {
+    return Effect.gen({ self: this }, function* () {
+      const pending = this.#stopPending.get(channelId);
+      this.#stopPending.delete(channelId);
+      if (!pending?.size || this.#stopped || this.#deletedChannels.has(channelId)) return;
+      let created = false;
+      yield* this.#serialize(
+        channelId,
+        Effect.gen({ self: this }, function* () {
+          if (!(yield* channelSync(() => this.store.exists(channelId)))) return;
+          const channel = yield* channelSync(() => this.store.get(channelId));
+          const lead = this.hooks.agents().find((agent) => agent.id === channel.leadAgentId);
+          if (channel.archived || !lead || !channel.members.some((member) => member.agentId === lead.id)) return;
+          const tasks = yield* channelSync(() => this.store.tasks(channelId));
+          const byId = new Map(tasks.map((task) => [task.id, task]));
+          const leadRunsAbove = (task: ChannelTask) => {
+            const seen = new Set<string>();
+            for (let parent = task.parentTaskId ? byId.get(task.parentTaskId) : undefined; parent; ) {
+              if (seen.has(parent.id)) return false;
+              seen.add(parent.id);
+              if (
+                parent.ownerAgentId === lead.id &&
+                (parent.state === "queued" || parent.state === "running" || parent.state === "waiting")
+              )
+                return true;
+              parent = parent.parentTaskId ? byId.get(parent.parentTaskId) : undefined;
+            }
+            return false;
+          };
+          const stopped = [...pending].flatMap(([taskId, revision]) => {
+            const task = byId.get(taskId);
+            return task &&
+              task.revision === revision &&
+              (task.state === "paused" || task.state === "failed") &&
+              !leadRunsAbove(task)
+              ? [task]
+              : [];
+          });
+          if (!stopped.length) return;
+          const active = new Set(
+            (yield* channelSync(() => this.store.assignments(channelId)))
+              .filter(activeAssignment)
+              .map((assignment) => assignment.taskId),
+          );
+          if (
+            tasks.some(
+              (task) =>
+                isStopNotice(task) && task.ownerAgentId === lead.id && task.state === "queued" && !active.has(task.id),
+            )
+          )
+            return;
+          const entries = stopped.map((task) => ({
+            id: task.id,
+            parentTaskId: task.parentTaskId,
+            ownerAgentId: task.ownerAgentId,
+            state: task.state,
+            request: (task.instruction.trim().split("\n")[0] ?? "").slice(0, 160),
+            error: task.error,
+          }));
+          const messageId = `${STOP_NOTICE_PREFIX}${randomUUID()}`;
+          const notice: ChannelTask = {
+            ...this.newTask(
+              channelId,
+              messageId,
+              `Channel tasks stopped. You lead this channel, so handle each one under the channel rules: resume it with channel_resume_task, or close it with channel_close_task and a short reason. The list of stopped tasks in this packet is current.\n${JSON.stringify(entries)}`,
+              lead.id,
+            ),
+            expectedResult: "Each listed task is resumed or closed, or you state why it stays stopped.",
+          };
+          const message = this.message(
+            channelId,
+            notice.id,
+            { kind: "coordinator", id: "coordinator", name: "Coordinator" },
+            `${stopped.length === 1 ? "A task stopped" : `${stopped.length} tasks stopped`}. ${lead.name} will resume or close ${stopped.length === 1 ? "it" : "them"}.`,
+            messageId,
+          );
+          yield* channelSync(() => this.store.update(channel, { tasks: [notice], messages: [message] }));
+          this.publish(channelId);
+          created = true;
+        }),
+      );
+      if (created) yield* this.wake(channelId);
+    });
+  }
 
   private newTask(channelId: string, messageId: string, instruction: string, ownerAgentId: string | null): ChannelTask {
     const id = randomUUID();
@@ -3314,6 +3424,8 @@ export class ChannelService {
     this: ChannelService,
   ): Effect.fn.Return<void, ChannelOperationError> {
     this.#stopped = true;
+    for (const timer of this.#stopTimers.values()) clearTimeout(timer);
+    this.#stopTimers.clear();
     yield* Fiber.awaitAll([
       ...this.#events,
       ...this.#pumps.values(),
@@ -3343,6 +3455,14 @@ function routingFailureText(error: unknown): string | null {
   const keys = matchingSourceKeys(error.message);
   if (keys.some((key) => key.startsWith("error.agent.profile"))) return sourceText("error.backend.channelLeadFailed");
   return keys.some((key) => key.startsWith("error.backend.")) ? error.message : null;
+}
+
+const STOP_NOTICE_PREFIX = "channel-stop-notice-";
+const STOP_NOTICE_DELAY_MS = 2_000;
+const STOP_NOTICE_MEMORY = 10_000;
+
+function isStopNotice(task: ChannelTask): boolean {
+  return task.requestMessageId.startsWith(STOP_NOTICE_PREFIX);
 }
 
 function terminal(task: ChannelTask): boolean {
