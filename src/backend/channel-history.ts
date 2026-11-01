@@ -295,6 +295,35 @@ export function assignmentText(
     : text;
 }
 
+const STOPPED_TASK_LIMIT = 20;
+
+function stoppedTaskList(tasks: ChannelTask[], messages: ChannelMessage[], now = Date.now()) {
+  const byId = new Map(messages.map((message) => [message.id, message]));
+  const stopped = tasks
+    .filter((item) => item.state === "paused" || item.state === "failed")
+    .map((item) => {
+      const request = byId.get(item.requestMessageId) ?? byId.get(item.sourceMessageIds[0] ?? "");
+      const requestedAt = request?.message.createdAt ?? null;
+      const time = requestedAt ? Date.parse(requestedAt) : Number.NaN;
+      return { item, requestedAt, time: Number.isNaN(time) ? null : time };
+    })
+    .sort((a, b) => (b.time ?? 0) - (a.time ?? 0));
+  if (!stopped.length) return null;
+  return {
+    total: stopped.length,
+    tasks: stopped.slice(0, STOPPED_TASK_LIMIT).map(({ item, requestedAt, time }) => ({
+      id: item.id,
+      parentTaskId: item.parentTaskId,
+      ownerAgentId: item.ownerAgentId,
+      state: item.state,
+      requestedAt,
+      ageHours: time === null ? null : Math.max(0, Math.floor((now - time) / 3_600_000)),
+      request: (item.instruction.trim().split("\n")[0] ?? "").slice(0, 160),
+      error: item.error,
+    })),
+  };
+}
+
 /** Cuts one rendered message into inputs the summary model accepts. The source ID stays the same. */
 function parts(text: string, size: number): string[] {
   const values: string[] = [];
@@ -642,6 +671,7 @@ export class ChannelHistory {
         const first = omitted[0];
         const last = omitted.at(-1);
         const summaryShown = summary.throughSequence > (seen ?? 0);
+        const leadStoppedTasks = agent.id === channel.leadAgentId ? stoppedTaskList(tasks, messages) : null;
         const parts = {
           assignmentCharacters: assignment.length,
           memoryCharacters: memories.reduce((total, memory) => total + memory.text.length, 0),
@@ -701,6 +731,11 @@ export class ChannelHistory {
           seen === null
             ? `Recent shared messages:\n${render(kept)}`
             : `Shared messages after the ones you already have (after ${seen}):\n${render(kept)}`,
+          ...(leadStoppedTasks
+            ? [
+                `Stopped tasks in this channel, which you lead (${leadStoppedTasks.total}, newest first). Use channel_resume_task when the work must go on, such as a child that stopped because its parent request changed. Use channel_close_task when it needs no more work.\n${JSON.stringify(leadStoppedTasks.tasks)}`,
+              ]
+            : []),
           ...(peers.length
             ? [
                 `Other members answer this same request separately: ${peers.join(", ")}. Give your own view from your own role. Do not answer for them or wait for them.`,
