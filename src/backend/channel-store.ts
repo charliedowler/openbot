@@ -115,7 +115,10 @@ export class ChannelStore {
   /** By channel: how many times a message changed in place after it was complete, in this process. */
   readonly #completedMessageChanges = new Map<string, number>();
 
-  constructor(readonly database: OpenBotDatabase) {}
+  constructor(
+    readonly database: OpenBotDatabase,
+    readonly onTasksStopped?: (channel: Channel, tasks: ChannelTask[]) => void,
+  ) {}
 
   /** A packet built before this count changed can show a message as it was before. */
   completedMessageChanges(channelId: string): number {
@@ -453,7 +456,9 @@ export class ChannelStore {
       (message) => isDeletedChannelMessage(message) || deleted.get(channel.id, message.id) === undefined,
     );
     const payload = { ...change, channel, messages };
-    return this.database.dispatch(
+    const stopping = this.onTasksStopped ? change.tasks.filter(stoppedState) : [];
+    const before = new Map(stopping.map((task) => [task.id, this.task(channel.id, task.id)?.state]));
+    const committed = this.database.dispatch(
       commandId,
       [{ aggregateType: "channel", aggregateId: channel.id, eventType: "channel.changed", payload }],
       (db) => {
@@ -461,6 +466,12 @@ export class ChannelStore {
         return channel;
       },
     );
+    const stopped = stopping.filter((task) => {
+      const state = before.get(task.id);
+      return state !== "paused" && state !== "failed";
+    });
+    if (stopped.length) this.onTasksStopped?.(committed, stopped);
+    return committed;
   }
 
   /**
@@ -1002,6 +1013,10 @@ function previewText(entry: ChannelMessage): string {
   if (entry.message.questionPrompt) return "Asked a question";
   if (entry.message.attachments?.length) return "Sent an attachment";
   return "Sent a message";
+}
+
+function stoppedState(task: ChannelTask): boolean {
+  return task.state === "paused" || task.state === "failed";
 }
 
 function decodeAssignment(value: unknown): ChannelAssignment {
