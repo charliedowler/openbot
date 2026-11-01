@@ -270,6 +270,18 @@ export class ChannelStore {
     });
   }
 
+  task(channelId: string, taskId: string): ChannelTask | null {
+    const row = databaseRow(
+      this.database.connection
+        .prepare("SELECT task_json FROM projection_channel_tasks WHERE task_id = ? AND channel_id = ?")
+        .get(taskId, channelId),
+    );
+    if (!row) return null;
+    const value = JSON.parse(requiredStringColumn(row, "task_json"));
+    if (!isChannelTask(value)) throw new Error("Invalid stored channel task.");
+    return value;
+  }
+
   assignments(channelId: string): ChannelAssignment[] {
     return databaseRows(
       this.database.connection
