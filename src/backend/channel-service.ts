@@ -2553,6 +2553,111 @@ export class ChannelService {
     };
   });
 
+  readonly #stoppedTaskTool = Effect.fn("ChannelService.stoppedTaskTool")(function* (
+    this: ChannelService,
+    channelId: string,
+    currentTaskId: string,
+    agentId: string,
+    operationId: string,
+    tool: "channel_resume_task" | "channel_close_task",
+    args: DynamicRecord,
+  ): Effect.fn.Return<unknown, ChannelOperationError> {
+    if (!isString(args.taskId) || !args.taskId.trim())
+      return yield* channelFailure(
+        new ChannelToolInputError("Provide the taskId of a stopped or failed task in this channel."),
+      );
+    const taskId = args.taskId.trim();
+    const reason = isString(args.reason) ? args.reason.replace(/\s+/gu, " ").trim() : "";
+    if (tool === "channel_close_task" && (!reason || reason.length > 500))
+      return yield* channelFailure(
+        new ChannelToolInputError("Provide a reason of one short sentence, at most 500 characters."),
+      );
+    const agent = { id: agentId, name: this.memberName(agentId) };
+    const receipt = `${agentId}:${operationId}`;
+    if ((yield* channelSync(() => this.store.database.commandResult(`channels:${receipt}`))) !== undefined)
+      return { accepted: true };
+    const outcome: { refusal?: string } = {};
+    yield* this.#serialize(
+      channelId,
+      Effect.gen({ self: this }, function* () {
+        const channel = yield* channelSync(() => this.store.get(channelId));
+        if (channel.archived) {
+          outcome.refusal = "The channel was archived.";
+          return;
+        }
+        const tasks = yield* channelSync(() => this.store.tasks(channelId));
+        const target = tasks.find((item) => item.id === taskId);
+        if (!target) {
+          outcome.refusal = "No task of this channel has that taskId.";
+          return;
+        }
+        if (target.state !== "paused" && target.state !== "failed") {
+          outcome.refusal = `The task is ${target.state}. Only a stopped or failed task can be resumed or closed.`;
+          return;
+        }
+        const branch = descendants(tasks, target.id);
+        if (branch.some((item) => item.id === currentTaskId)) {
+          outcome.refusal = "The task contains your current task. Choose a task outside your own work.";
+          return;
+        }
+        const lead = channel.leadAgentId === agentId;
+        if (tool === "channel_resume_task") {
+          const parentOwner = tasks.find((item) => item.id === target.parentTaskId)?.ownerAgentId;
+          if (!lead && parentOwner !== agentId) {
+            outcome.refusal = "Only the channel lead or the owner of the parent task can resume this task.";
+            return;
+          }
+          yield* this.apply(
+            { type: "resume", operationId, channelId, taskId: target.id, recipientAgentId: null },
+            agent,
+          );
+          return;
+        }
+        if (!lead) {
+          outcome.refusal = "Only the channel lead can close a task.";
+          return;
+        }
+        if (branch.some((item) => item.state !== "paused" && item.state !== "failed")) {
+          outcome.refusal = "A task under it is still active. Wait until it ends, then close the task.";
+          return;
+        }
+        const closed = new Set(branch.map((item) => item.id));
+        const dependent = tasks.find(
+          (item) => !closed.has(item.id) && !terminal(item) && item.dependencies.some((id) => closed.has(id)),
+        );
+        if (dependent) {
+          outcome.refusal = `Task ${dependent.id} waits for this task. Resume or close that task instead.`;
+          return;
+        }
+        const note = this.message(
+          channelId,
+          target.id,
+          { kind: "agent", ...agent },
+          `Closed by ${agent.name}: ${reason}`,
+          undefined,
+          CHANNEL_CHANGE_ITEM_TYPE,
+        );
+        yield* channelSync(() =>
+          this.store.update(
+            channel,
+            {
+              tasks: branch.map(
+                (item): ChannelTask => ({ ...item, state: "cancelled", revision: item.revision + 1, error: null }),
+              ),
+              messages: [{ ...note, message: { ...note.message, source: "system" } }],
+            },
+            receipt,
+          ),
+        );
+        this.publish(channelId);
+      }),
+    );
+    if (outcome.refusal) return yield* channelFailure(new ChannelToolInputError(outcome.refusal));
+    return tool === "channel_resume_task"
+      ? { accepted: true, state: "queued" }
+      : { accepted: true, state: "cancelled" };
+  });
+
   readonly tool = Effect.fn("ChannelService.tool")(function* (
     this: ChannelService,
     channelId: string,
@@ -2655,6 +2760,8 @@ export class ChannelService {
       this.hooks.memoriesChanged?.(channelId);
       return { accepted: true };
     }
+    if (tool === "channel_resume_task" || tool === "channel_close_task")
+      return yield* this.#stoppedTaskTool(channelId, task.id, agentId, operationId, tool, args);
     if (tool !== "channel_assign" && tool !== "channel_transfer")
       return yield* channelFailure(new Error("Unknown channel tool."));
     if (

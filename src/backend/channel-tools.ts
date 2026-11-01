@@ -61,6 +61,21 @@ export const CHANNEL_TOOL_DEFINITIONS: readonly { name: string; description: str
     shape: { text: z.string().min(1).max(INPUT_LIMITS.messageText) },
   },
   {
+    name: "channel_resume_task",
+    description:
+      "Continue a stopped or failed task of this channel, with the tasks under it, as a person's Continue does. The channel lead can resume any task. The owner of a parent task can resume its child tasks, such as a child that stopped because the parent request changed.",
+    shape: { taskId: z.string().min(1).max(INPUT_LIMITS.identifier) },
+  },
+  {
+    name: "channel_close_task",
+    description:
+      "Close a stopped or failed task of this channel, with the stopped tasks under it, when it needs no more work. The tasks end as cancelled, and the channel shows a note with your reason. Only the channel lead can close a task. You cannot close a task that runs or that has active work under it.",
+    shape: {
+      taskId: z.string().min(1).max(INPUT_LIMITS.identifier),
+      reason: z.string().min(1).max(500).describe("One short sentence that tells why the task needs no more work."),
+    },
+  },
+  {
     name: "channel_remember",
     description:
       "Save one short, durable fact about this channel that every member should keep. Save the same text again to correct it. This writes immediately.",
