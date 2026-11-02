@@ -22,11 +22,23 @@ export interface MailboxSyncHooks {
   queueHold(agentId: string): QueueHold | null;
 }
 
+/** The conversation cache calls of the sync, so a check can give its own cache. */
+export type MailboxSyncConversation = Pick<
+  ConversationRuntime,
+  | "emitConversation"
+  | "hasPublishedConversation"
+  | "isExecutionThread"
+  | "publishConversation"
+  | "snapshot"
+  | "snapshotToUpdate"
+  | "snapshotWithTurn"
+>;
+
 export interface MailboxSyncOptions {
   database: OpenBotDatabase;
   mailbox: MailboxStore;
-  conversation: ConversationRuntime;
-  routines: RoutineScheduler;
+  conversation: MailboxSyncConversation;
+  routines: Pick<RoutineScheduler, "reconcileDelivery" | "stateChanged">;
   scope: () => Scope.Scope;
   hooks: MailboxSyncHooks;
 }
@@ -43,8 +55,8 @@ export interface MailboxSyncOptions {
 export class MailboxSync {
   readonly #database: OpenBotDatabase;
   readonly #mailbox: MailboxStore;
-  readonly #conversation: ConversationRuntime;
-  readonly #routines: RoutineScheduler;
+  readonly #conversation: MailboxSyncConversation;
+  readonly #routines: Pick<RoutineScheduler, "reconcileDelivery" | "stateChanged">;
   readonly #scope: () => Scope.Scope;
   readonly #hooks: MailboxSyncHooks;
 
@@ -73,8 +85,10 @@ export class MailboxSync {
     };
   }
 
-  syncMailboxMessages(snapshot: ConversationSnapshot, mailboxMessages?: readonly ConversationMessage[]): void {
-    if (this.#conversation.isExecutionThread(snapshot.threadId)) return;
+  /** Answers whether the messages of the snapshot changed, so a caller does not serialize the whole chat to find out. */
+  syncMailboxMessages(snapshot: ConversationSnapshot, mailboxMessages?: readonly ConversationMessage[]): boolean {
+    if (this.#conversation.isExecutionThread(snapshot.threadId)) return false;
+    const before = messagesState(snapshot.messages);
     const fromCreatedAt = snapshot.messages[0]?.createdAt;
     const incomingMailboxMessages =
       mailboxMessages ??
@@ -103,6 +117,7 @@ export class MailboxSync {
       message.reaction = message.reactions.find((reaction) => reaction.actor.kind === "user")?.emoji ?? null;
     }
     sortConversationMessages(snapshot.messages);
+    return messagesChanged(before, snapshot.messages);
   }
 
   reconcilePersistedMailboxMessages(agent: AgentSummary): void {
@@ -176,9 +191,7 @@ export class MailboxSync {
     for (const affectedAgentId of affectedAgents) {
       const snapshot = this.#conversation.snapshotToUpdate(affectedAgentId);
       if (!snapshot) continue;
-      const previousSignature = conversationContentSignature(snapshot);
-      this.syncMailboxMessages(snapshot);
-      if (conversationContentSignature(snapshot) !== previousSignature) this.#conversation.emitConversation(snapshot);
+      if (this.syncMailboxMessages(snapshot)) this.#conversation.emitConversation(snapshot);
       else if (!this.#conversation.hasPublishedConversation(affectedAgentId))
         this.#conversation.publishConversation(snapshot);
     }
@@ -218,4 +231,39 @@ export class MailboxSync {
       );
     });
   }
+}
+
+interface MessagesState {
+  ids: string[];
+  byId: Map<string, ConversationMessage>;
+  reactions: Map<ConversationMessage, string>;
+}
+
+/** What a mailbox sync can change: the order, the mailbox rows it replaces, and the reactions of every message. */
+function messagesState(messages: readonly ConversationMessage[]): MessagesState {
+  return {
+    ids: messages.map((message) => message.id),
+    byId: new Map(messages.map((message) => [message.id, message])),
+    reactions: new Map(messages.map((message) => [message, reactionKey(message)])),
+  };
+}
+
+function reactionKey(message: ConversationMessage): string {
+  return JSON.stringify({ reactions: message.reactions, reaction: message.reaction });
+}
+
+/**
+ * The same answer as comparing the serialized chat before and after the sync. A message the sync
+ * kept is compared by its reactions; a message it replaced is compared whole.
+ */
+function messagesChanged(before: MessagesState, after: readonly ConversationMessage[]): boolean {
+  if (before.byId.size !== before.ids.length || after.length !== before.ids.length) return true;
+  for (const [index, message] of after.entries()) {
+    if (message.id !== before.ids[index]) return true;
+    const previous = before.byId.get(message.id);
+    if (previous === message) {
+      if (before.reactions.get(message) !== reactionKey(message)) return true;
+    } else if (!previous || JSON.stringify(previous) !== JSON.stringify(message)) return true;
+  }
+  return false;
 }
