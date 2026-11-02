@@ -293,6 +293,7 @@ export interface AgentServiceOptions {
   contextCompactionTimeoutMs?: number;
   /** The pause with no turn before a conversation's memory review runs early. Tests make it short. */
   memoryReviewIdleMs?: number;
+  providerRetryDelayMs?: number;
   preferredProvider?: AgentProvider;
   /** The model chosen beside `preferredProvider`, or `null` for that provider's own default. */
   preferredModel?: AgentModelId | null;
@@ -1261,6 +1262,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     });
     this.#usageLimits = new UsageLimitGate({
       store,
+      ...(options.providerRetryDelayMs === undefined ? {} : { retryDelayMs: options.providerRetryDelayMs }),
       hooks: {
         emit: (event) => this.#emit(event),
         emitRuntimeSnapshot: () => this.#emitRuntimeSnapshot(),
