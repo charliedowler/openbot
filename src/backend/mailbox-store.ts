@@ -258,6 +258,20 @@ export class MailboxStore {
   readonly #deliveryGate = new MailboxDeliveryGate();
   readonly #stagedGeneratedAttachments = new Map<string, StoredGeneratedAttachment>();
   #state: StoredState = structuredClone(EMPTY_STATE);
+  /**
+   * Indexes over the whole history, kept until the array or key map they read changes. A queue
+   * change reads the conversation of each agent that sent to the recipient, and each read used to
+   * build them again from every message, delivery and idempotency key.
+   */
+  #messageIndex: { source: StoredMessage[]; length: number; byId: Map<string, StoredMessage> } | null = null;
+  #deliveryIndex: { source: StoredDelivery[]; length: number; byMessage: Map<string, StoredDelivery[]> } | null = null;
+  #turnIdIndex: {
+    source: Record<string, string>;
+    revision: number;
+    byMessage: Map<string, string | undefined>;
+  } | null = null;
+  /** Counts the changes made in place to `#state.idempotency`, which keep the same object. */
+  #idempotencyRevision = 0;
   /** The rows changed, added or removed, since the last committed write. `#persist` writes only these. */
   readonly #changes = {
     messageIds: new Set<string>(),
@@ -614,7 +628,10 @@ export class MailboxStore {
       this.#state.messages.push(message);
       recordRestartActivity();
       this.#state.deliveries.push(...deliveries);
-      if (input.idempotencyKey) this.#state.idempotency[input.idempotencyKey] = messageId;
+      if (input.idempotencyKey) {
+        this.#state.idempotency[input.idempotencyKey] = messageId;
+        this.#idempotencyRevision += 1;
+      }
       const usedDrafts = voiceDraft ? [...drafts, voiceDraft] : drafts;
       this.#state.drafts = this.#state.drafts.filter((draft) => !usedDrafts.includes(draft));
       this.#changes.messageIds.add(messageId);
@@ -628,6 +645,7 @@ export class MailboxStore {
         this.#state.deliveries = this.#state.deliveries.filter((candidate) => !deliveryIds.has(candidate.id));
         if (input.idempotencyKey && this.#state.idempotency[input.idempotencyKey] === messageId) {
           delete this.#state.idempotency[input.idempotencyKey];
+          this.#idempotencyRevision += 1;
         }
         for (const draft of usedDrafts) {
           if (!this.#state.drafts.some((candidate) => candidate.id === draft.id)) {
@@ -810,8 +828,28 @@ export class MailboxStore {
   }
 
   /** Indexed once for a whole read, so a read over many deliveries does not scan the messages for each one. */
-  #messagesById(): Map<string, StoredMessage> {
-    return new Map(this.#state.messages.map((message) => [message.id, message]));
+  #messagesById(): ReadonlyMap<string, StoredMessage> {
+    const source = this.#state.messages;
+    const index = this.#messageIndex;
+    if (index?.source === source && index.length === source.length) return index.byId;
+    const byId = new Map(source.map((message) => [message.id, message]));
+    this.#messageIndex = { source, length: source.length, byId };
+    return byId;
+  }
+
+  /** The deliveries of each message, in storage order. */
+  #deliveriesByMessage(): ReadonlyMap<string, readonly StoredDelivery[]> {
+    const source = this.#state.deliveries;
+    const index = this.#deliveryIndex;
+    if (index?.source === source && index.length === source.length) return index.byMessage;
+    const byMessage = new Map<string, StoredDelivery[]>();
+    for (const delivery of source) {
+      const deliveries = byMessage.get(delivery.messageId);
+      if (deliveries) deliveries.push(delivery);
+      else byMessage.set(delivery.messageId, [delivery]);
+    }
+    this.#deliveryIndex = { source, length: source.length, byMessage };
+    return byMessage;
   }
 
   /** The task a delivery runs in, or null for the agent's own chat. */
@@ -944,6 +982,7 @@ export class MailboxStore {
       this.#state.reactions = this.#state.reactions.filter((reaction) => !ids.has(reaction.messageId));
       for (const [key, messageId] of Object.entries(this.#state.idempotency))
         if (ids.has(messageId)) delete this.#state.idempotency[key];
+      this.#idempotencyRevision += 1;
       for (const id of ids) this.#changes.messageIds.add(id);
       for (const delivery of deliveries) this.#changes.deliveryIds.add(delivery.id);
       for (const reaction of reactions)
@@ -1116,12 +1155,7 @@ export class MailboxStore {
       1,
       Math.min(options.limit ?? MAILBOX_CONVERSATION_MESSAGE_LIMIT, MAILBOX_CONVERSATION_MESSAGE_LIMIT),
     );
-    const deliveriesByMessage = new Map<string, StoredDelivery[]>();
-    for (const delivery of this.#state.deliveries) {
-      const deliveries = deliveriesByMessage.get(delivery.messageId) ?? [];
-      deliveries.push(delivery);
-      deliveriesByMessage.set(delivery.messageId, deliveries);
-    }
+    const deliveriesByMessage = this.#deliveriesByMessage();
     const selectedStoredMessages: StoredMessage[] = [];
     let completedCount = 0;
     for (let index = this.#state.messages.length - 1; index >= 0; index -= 1) {
@@ -1332,13 +1366,17 @@ export class MailboxStore {
    * The turn that sent each message, by message id, read once for a whole lookup: agent keys are
    * kept for good, so a scan of every key for each message grows with the square of the history.
    */
-  #sourceTurnIds(): Map<string, string | undefined> {
+  #sourceTurnIds(): ReadonlyMap<string, string | undefined> {
+    const source = this.#state.idempotency;
+    const index = this.#turnIdIndex;
+    if (index?.source === source && index.revision === this.#idempotencyRevision) return index.byMessage;
     const turnIds = new Map<string, string | undefined>();
-    for (const [key, messageId] of Object.entries(this.#state.idempotency)) {
+    for (const [key, messageId] of Object.entries(source)) {
       if (turnIds.has(messageId)) continue;
       const parts = key.split(":");
       turnIds.set(messageId, parts.length >= 3 ? parts.at(-2) : undefined);
     }
+    this.#turnIdIndex = { source, revision: this.#idempotencyRevision, byMessage: turnIds };
     return turnIds;
   }
 
