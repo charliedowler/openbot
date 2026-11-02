@@ -25,6 +25,8 @@ const RESET_GRACE_MS = 30_000;
  */
 const PROVIDER_FAILURE_HOLD_MS = 10 * 60_000;
 
+const PROVIDER_RETRY_DELAY_MS = 30_000;
+
 /** The longest delay `setTimeout` keeps. A longer wait is armed again when it fires. */
 const MAX_TIMER_MS = 2_147_483_647;
 
@@ -47,6 +49,7 @@ export interface UsageLimitHooks {
 export interface UsageLimitGateOptions {
   store: AgentStore;
   hooks: UsageLimitHooks;
+  retryDelayMs?: number;
 }
 
 export interface UsageLimitKey {
@@ -101,10 +104,29 @@ export class UsageLimitGate {
   readonly #failures = new Map<string, ProviderFailure>();
   /** The agents that may start one turn while their limit holds, with that limit's key. */
   readonly #tries = new Map<string, string>();
+  readonly #retries = new Map<string, ReturnType<typeof setTimeout>>();
+  readonly #retryDelayMs: number;
 
   constructor(options: UsageLimitGateOptions) {
     this.#store = options.store;
     this.#hooks = options.hooks;
+    this.#retryDelayMs = options.retryDelayMs ?? PROVIDER_RETRY_DELAY_MS;
+  }
+
+  holdForRetry(agentId: string): void {
+    const previous = this.#retries.get(agentId);
+    if (previous) clearTimeout(previous);
+    this.#retries.set(
+      agentId,
+      setTimeout(() => {
+        this.#retries.delete(agentId);
+        this.#hooks.scheduleDrain(agentId);
+      }, this.#retryDelayMs),
+    );
+  }
+
+  retryHeld(agentId: string): boolean {
+    return this.#retries.has(agentId);
   }
 
   mayDrain(agentId: string): boolean {
@@ -293,6 +315,8 @@ export class UsageLimitGate {
     this.#limits.clear();
     for (const failure of this.#failures.values()) clearTimeout(failure.timer);
     this.#failures.clear();
+    for (const timer of this.#retries.values()) clearTimeout(timer);
+    this.#retries.clear();
     this.#tries.clear();
     this.#announced.clear();
     yield* Scope.close(this.#scope, Exit.void);

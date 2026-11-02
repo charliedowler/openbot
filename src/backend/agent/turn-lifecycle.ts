@@ -109,6 +109,8 @@ const FAILOVER_CAUSES: ReadonlySet<CauseCode> = new Set([
   "timeout",
 ]);
 
+const TRANSIENT_CAUSES: ReadonlySet<CauseCode> = new Set(["provider_unavailable", "timeout"]);
+
 /** A provider error held until the end of its turn, which runs the turn again on a backup model or shows it. */
 interface HeldProviderError {
   message: string;
@@ -1010,8 +1012,8 @@ export class TurnLifecycle {
           agentId &&
           errorTurnId !== null &&
           this.#runningTurns.has(errorTurnId) &&
-          FAILOVER_CAUSES.has(context.causeCode) &&
-          this.#hooks.mayFailOver(agentId)
+          ((FAILOVER_CAUSES.has(context.causeCode) && this.#hooks.mayFailOver(agentId)) ||
+            TRANSIENT_CAUSES.has(context.causeCode))
         ) {
           this.#failoverTurns.set(errorTurnId, { message, context });
           return;
@@ -1157,10 +1159,15 @@ export class TurnLifecycle {
       // A refused session is closed below, and a spent plan would refuse the summary turn too, so
       // neither is compacted.
       // A routine run's own session closes after this turn, so it is not compacted either. Nor is a
-      // turn that a provider error ended before it did work: it can run again on a backup model.
+      // turn that a provider error ended before it did work, or that an outage ended: it can run again.
       const routineSession = this.#conversation.isRoutineSession(threadId);
+      const transientFailure = failover !== undefined && TRANSIENT_CAUSES.has(failover.context.causeCode);
       const mayRunAgain =
-        failover !== undefined && !limited && status === "failed" && running !== undefined && !running.acted;
+        failover !== undefined &&
+        !limited &&
+        status === "failed" &&
+        running !== undefined &&
+        (!running.acted || transientFailure);
       const shouldCompact =
         !refused &&
         !limited &&
@@ -1191,32 +1198,41 @@ export class TurnLifecycle {
       const carriesWork =
         running !== undefined &&
         (running.acted || deliveries.some((context) => context.resumeAfterUsageLimit !== undefined));
+      // The limit belongs to the model the turn ran on, which the agent may have left since.
+      const model = this.#hooks.turnModel(agentId, turnId);
+      // A message runs again once for each provider account and model that failed it, so a move that
+      // does not happen cannot run it on the same one again.
+      const failedKey = this.#usageLimits.failureKey(agentId, model);
+      const firstFailure =
+        failedKey !== null &&
+        deliveries.length > 0 &&
+        deliveries.every(({ delivery }) => !this.#failoverRetries.get(delivery.id)?.has(failedKey));
+      const backupReady = this.#hooks.mayFailOver(agentId);
+      let runsAgain = mayRunAgain && transientFailure && firstFailure;
       let continuing = limited && carriesWork && deliveries.length > 0 && this.#hooks.mayContinueOnBackup(agentId);
-      if (continuing) {
+      if (continuing || runsAgain) {
         for (const { delivery, channelId } of deliveries) {
           if (channelId && !(yield* this.#hooks.requeueChannelDelivery(delivery.id, true))) {
             continuing = false;
+            runsAgain = false;
             break;
           }
         }
       }
+      if (runsAgain && carriesWork) continuing = true;
       const repeatable = limited && running !== undefined && (!running.acted || continuing) && deliveries.length > 0;
-      const requeue = repeatable && (!channelTurn || continuing);
-      // The limit belongs to the model the turn ran on, which the agent may have left since.
-      const model = this.#hooks.turnModel(agentId, turnId);
-      // The same for a provider error, when the agent moves to a backup model. Only the agent's own
-      // chat moves it: a task or a channel task fails as before. A message runs again once for each
-      // provider account and model that failed it, so a move that does not happen cannot run it on
-      // the same one again.
-      const failedKey = this.#usageLimits.failureKey(agentId, model);
+      const requeue = (repeatable && (!channelTurn || continuing)) || runsAgain;
+      // Any other provider error moves the agent to a backup model only from its own chat, and only
+      // before the turn did work: a task or a channel task fails as before.
       const failedOver =
         mayRunAgain &&
-        failedKey !== null &&
-        deliveries.length > 0 &&
+        !transientFailure &&
+        running !== undefined &&
+        !running.acted &&
+        firstFailure &&
         !taskTurn &&
         !channelTurn &&
-        deliveries.every(({ delivery }) => !this.#failoverRetries.get(delivery.id)?.has(failedKey)) &&
-        this.#hooks.mayFailOver(agentId);
+        backupReady;
       // A foreground subagent ends with its turn. A background one works on and reports later.
       const subagents = snapshot.messages.find((message) => message.id === `${turnId}:subagents`);
       stopRunningSubagents(subagents?.subagents, new Date().toISOString(), { background: false });
@@ -1225,7 +1241,7 @@ export class TurnLifecycle {
         if (parent.turnId === turnId) this.#codexChildren.delete(childId);
       for (const message of snapshot.messages) {
         if (this.#itemTurns.get(message.id) !== turnId || message.status !== "streaming") continue;
-        message.status = normalizeCompletionStatus(repeatable || failedOver ? "interrupted" : status);
+        message.status = normalizeCompletionStatus(repeatable || runsAgain || failedOver ? "interrupted" : status);
         markIncompleteImageGeneration(message, message.status);
       }
       // Only this loop reads the map, so the finished turn's items go, or it holds every item ever seen.
@@ -1272,8 +1288,18 @@ export class TurnLifecycle {
               }
             : undefined,
         );
-        // After the requeue, so a routine set to skip finds its run back in the queue.
-        yield* this.#usageLimits.reached(agentId, resetsAt, model);
+        if (runsAgain && failedKey !== null) {
+          if (failover) this.#hooks.emitFailure?.({ code: "agent_error", agentId, ...failover.context });
+          for (const { delivery } of deliveries) {
+            const failed = this.#failoverRetries.get(delivery.id) ?? new Set<string>();
+            this.#failoverRetries.set(delivery.id, failed.add(failedKey));
+          }
+          if (backupReady) this.#usageLimits.failed(agentId, model);
+          else this.#usageLimits.holdForRetry(agentId);
+        } else {
+          // After the requeue, so a routine set to skip finds its run back in the queue.
+          yield* this.#usageLimits.reached(agentId, resetsAt, model);
+        }
         this.#hooks.scheduleDrain(agentId);
         return;
       }

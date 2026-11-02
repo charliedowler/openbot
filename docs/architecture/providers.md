@@ -1047,10 +1047,20 @@ Two holds move an agent:
   after it goes back. The return is marked `cause: "provider-error"`, so the notes read
   `model-switch:provider-error` and `model-switch:provider-error-ended`.
 
-A turn that wrote text or ran a tool fails with its error, as with no backup. Tasks, channel tasks,
-a refused `turn/start`, and a provider that fails to start do not fail over. A message runs again at
-most once for each model that failed it, so a move that cannot happen shows the error on the next
-failure; the check for a ready backup runs again when the turn ends.
+An outage (`provider_unavailable`, such as Codex `serverOverloaded` "Selected model is at capacity"
+or a Claude 529, or `timeout`) runs the turn again also after it did work, in the agent's chat, a task
+or a channel task. The turn goes back to the queue with the `resumeAfterUsageLimit` continuation that
+a usage limit uses: the captured work steps and the instruction to check saved work before an action
+is repeated. A channel task keeps its assignment (`requeueForLimit(deliveryId, true)`). With a ready
+backup, `UsageLimitGate.failed` passes over the model and the drain moves the agent. With no ready
+backup, `UsageLimitGate.holdForRetry` holds the agent's queue for 30 seconds (`providerRetryDelayMs`),
+and the turn runs once more on the same model.
+
+Any other provider error after the turn wrote text or ran a tool fails with its error, as with no
+backup, and only the agent's own chat fails over before work. A refused `turn/start` and a provider
+that fails to start do not fail over. A message runs again at most once for each model that failed
+it, so a move that cannot happen shows the error on the next failure; the check for a ready backup
+runs again when the turn ends.
 
 ### Usage read pacing
 

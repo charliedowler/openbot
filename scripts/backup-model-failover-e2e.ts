@@ -2,14 +2,17 @@
 // and that read_agent shows the move (#2834). Runs the real agent service on a temporary profile. Claude is the real `ClaudeAgentClient`,
 // which the Claude Agent SDK connects to a stand-in `claude` executable. The stand-in answers each
 // message on its current model, and fails it with the CLI's report of an Anthropic overload (529)
-// when that model is in `failing.json`. A message with `act-then-fail` writes text before it fails.
+// when that model is in `failing.json`. A message with `act-then-fail` writes text before it fails,
+// and `auth-error` fails with a sign-in error instead.
 // Checks:
-//   1. A turn that wrote text before the error does not move: it fails with its error, as before.
-//   2. An agent with no backup models fails with its error, as before.
+//   1. A turn that wrote text before a sign-in error does not move: it fails with its error, as before.
+//   2. An agent with no backup models runs the turn once more after an outage, then fails with its error.
 //   3. A turn that did nothing yet runs again on the backup model, with a note and no error.
 //   4. read_agent shows the backup model, and the model to go back to with the provider error as cause.
 //   5. After a restart, the agent goes back to its own model, with a note.
-// Also checks continuation after a usage limit interrupts partial work.
+// Also checks continuation after a usage limit interrupts partial work, and after an outage
+// (Codex "at capacity", Claude 529) interrupts it: on a ready backup, in a channel task, and once
+// more on the same model when no backup is ready.
 // `bun run test:backup-model-failover`. Writes .openbot-build/backup-model-failover-e2e/report.json.
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -52,6 +55,10 @@ const BACKUP: AgentModelId = PRIMARY === "claude-sonnet-5-5" ? "claude-opus-5-5"
 // The text the Claude CLI writes in an outage. It names no HTTP status phrase, only the 529 and its type.
 const PROVIDER_ERROR =
   'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"},"request_id":"req_e2e"}';
+const AUTH_ERROR =
+  'Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}';
+// The text Codex 0.166 sends with `codexErrorInfo: "serverOverloaded"` when the model has no capacity.
+const CAPACITY_ERROR = "Selected model is at capacity. Please try a different model.";
 
 // Before the service modules load: the stores and the CLI search read these.
 process.env.HOME = home;
@@ -127,7 +134,7 @@ const turn = (message) => {
   }
   if (fails) {
     if (acts) assistant("Partial answer.");
-    result({ is_error: true, result: ${JSON.stringify(PROVIDER_ERROR)} });
+    result({ is_error: true, result: input.includes("auth-error") ? ${JSON.stringify(AUTH_ERROR)} : ${JSON.stringify(PROVIDER_ERROR)} });
     return;
   }
   const caseId = /case:([a-z-]+)/.exec(input)?.[1];
@@ -209,7 +216,31 @@ const answer = (request) => {
       const item = (item) => { turn.items.push(item); write({ method: "item/completed", params: { threadId: thread.id, turnId: turn.id, item } }); };
       const finish = (status) => { turn.status = status; write({ method: "turn/completed", params: { threadId: thread.id, turn } }); };
       active.set(turn.id, finish);
+      const outage = /outage-(capacity|once|always|auth)/.exec(current)?.[1];
+      const continued = input.includes("Continue the unfinished task");
       setImmediate(() => {
+        if (outage) {
+          if (!continued) {
+            fs.appendFileSync(${JSON.stringify(workLog)}, JSON.stringify({ caseId, step: "checkpoint" }) + "\\n");
+            item({ type: "commandExecution", id: randomUUID(), command: "save-checkpoint " + caseId, cwd: params.cwd, status: "completed", exitCode: 0, aggregatedOutput: "checkpoint-result=" + caseId });
+          }
+          if (outage === "once" && continued) {
+            fs.appendFileSync(${JSON.stringify(workLog)}, JSON.stringify({ caseId, step: input.includes("checkpoint-result=" + caseId) ? "final" : "repeated-checkpoint" }) + "\\n");
+            item({ type: "agentMessage", id: randomUUID(), phase: "final_answer", text: "Done." });
+            finish("completed");
+          } else {
+            const error = outage === "auth"
+              ? { message: "401 Unauthorized", codexErrorInfo: "unauthorized" }
+              : outage === "once"
+                ? { message: ${JSON.stringify(CAPACITY_ERROR)} }
+                : { message: ${JSON.stringify(CAPACITY_ERROR)}, codexErrorInfo: "serverOverloaded" };
+            turn.error = error;
+            write({ method: "error", params: { threadId: thread.id, turnId: turn.id, error, willRetry: false } });
+            finish("failed");
+          }
+          active.delete(turn.id);
+          return;
+        }
         if (limited && !current.includes("usage-empty")) {
           fs.appendFileSync(${JSON.stringify(workLog)}, JSON.stringify({ caseId, step: "checkpoint" }) + "\\n");
           item({ type: "commandExecution", id: randomUUID(), command: "save-checkpoint " + caseId, cwd: params.cwd, status: "completed", exitCode: 0, aggregatedOutput: "checkpoint-result=" + caseId });
@@ -441,6 +472,7 @@ function startService() {
     store,
     mailbox,
     browser,
+    providerRetryDelayMs: 50,
     preferredProvider: "claude",
     offProviders: AGENT_PROVIDERS.filter((provider) => provider !== "claude" && provider !== "codex"),
     clientFactory: (provider, cli) => {
@@ -617,19 +649,35 @@ try {
   );
   failing([PRIMARY]);
 
-  await check("a turn that wrote text does not move", async () => {
+  await check("a turn that wrote text before a sign-in error does not move", async () => {
     const since = events.length;
-    const outcome = await send(mover.id, "act-then-fail");
+    const before = turns().length;
+    const outcome = await send(mover.id, "act-then-fail auth-error");
+    assert.deepEqual(
+      turns()
+        .slice(before)
+        .map((turn) => turn.model),
+      [PRIMARY],
+      "A sign-in error does not run the turn again.",
+    );
     assert.equal(outcome.status, "failed", "The turn fails.");
     assert.equal(agentOf(mover.id).model, PRIMARY, "The agent stays on its own model.");
     assert.ok(errorsFor(mover.id, since).length > 0, "The error shows.");
     return outcome;
   });
 
-  await check("an agent with no backup models fails as before", async () => {
+  await check("an agent with no backup models runs once more after an outage, then fails", async () => {
     const since = events.length;
+    const before = turns().length;
     const outcome = await send(stayer.id, "work");
     assert.equal(outcome.status, "failed", "The turn fails.");
+    assert.deepEqual(
+      turns()
+        .slice(before)
+        .map((turn) => turn.model),
+      [PRIMARY, PRIMARY],
+      "The turn runs once more on the same model, and no more.",
+    );
     assert.equal(agentOf(stayer.id).model, PRIMARY, "The agent stays on its own model.");
     assert.ok(errorsFor(stayer.id, since).length > 0, "The error shows.");
     return outcome;
@@ -987,6 +1035,219 @@ try {
       return outcome;
     });
   }
+
+  /** Starts a channel led by `agentId`, sends it one task, and waits for the task to end. */
+  async function channelTask(agentId: string, text: string) {
+    const channelId = randomUUID();
+    const actor = { id: "local", name: "Alex" };
+    await runCauseEffect(
+      service.channels.command(
+        {
+          type: "save",
+          operationId: randomUUID(),
+          channelId,
+          draft: {
+            name: "Outage",
+            title: "",
+            instructions: "Finish the assigned work.",
+            members: [{ agentId }],
+            leadAgentId: agentId,
+          },
+        },
+        actor,
+      ),
+    );
+    await runCauseEffect(
+      service.channels.command(
+        {
+          type: "send",
+          operationId: randomUUID(),
+          channelId,
+          text,
+          recipientAgentId: agentId,
+          replyToMessageId: null,
+          attachmentDraftIds: [],
+        },
+        actor,
+      ),
+    );
+    const task = await waitFor("the channel task to end", () =>
+      service.channels.store.tasks(channelId).find((task) => ["completed", "failed", "paused"].includes(task.state)),
+    );
+    return { channelId, task };
+  }
+
+  const workSteps = (caseId: string) =>
+    readLog<{ caseId: string; step: string }>(workLog)
+      .filter((step) => step.caseId === caseId)
+      .map((step) => step.step);
+
+  await check("Codex at capacity after work continues on the backup", async () => {
+    await restart();
+    const agent = await createCodex("Capacity", automaticBackups);
+    const since = events.length;
+    const beforeCodex = readLog<CodexTurn>(codexLog).length;
+    const beforeClaude = turns().length;
+    const outcome = await send(agent.id, "outage-capacity case:capacity");
+    assert.equal(outcome.status, "completed", `The task completes on its backup: ${outcome.error}`);
+    assert.equal(readLog<CodexTurn>(codexLog).length, beforeCodex + 1, "The model at capacity is not run again.");
+    const backups = turns().slice(beforeClaude);
+    assert.deepEqual(
+      backups.map((turn) => turn.model),
+      [PRIMARY],
+    );
+    const input = backups[0]?.input ?? "";
+    assert.ok(input.includes("Continue the unfinished task"), "The backup gets a continuation request.");
+    assert.ok(input.includes("checkpoint-result=capacity"), "The completed tool result reaches the backup.");
+    assert.deepEqual(workSteps("capacity"), ["checkpoint", "final"], "The completed action runs once.");
+    assert.deepEqual(errorsFor(agent.id, since), [], "A recovered outage shows no error.");
+    const moved = agentOf(agent.id);
+    assert.equal(moved.usageLimitReturn?.provider, "codex", "The agent goes back to Codex later.");
+    assert.equal(moved.usageLimitReturn?.cause, "provider-error", "The return names the provider error.");
+    return { outcome, backups: backups.map((turn) => turn.model) };
+  });
+
+  await check("a channel task at capacity continues on the backup", async () => {
+    await restart();
+    const agent = await createCodex("Channel capacity", automaticBackups);
+    const beforeClaude = turns().length;
+    const { channelId, task } = await channelTask(agent.id, "outage-capacity case:channel-capacity");
+    assert.equal(task.state, "completed", JSON.stringify(task));
+    assert.equal(service.channels.store.tasks(channelId).length, 1, "The outage keeps one task.");
+    const backups = turns().slice(beforeClaude);
+    assert.deepEqual(
+      backups.map((turn) => turn.model),
+      [PRIMARY],
+    );
+    const input = backups[0]?.input ?? "";
+    assert.ok(input.includes("Continue the unfinished task"));
+    assert.ok(input.includes("checkpoint-result=channel-capacity"), "The channel backup receives the tool result.");
+    assert.deepEqual(workSteps("channel-capacity"), ["checkpoint", "final"]);
+    return { taskId: task.id, state: task.state };
+  });
+
+  await check("a task at capacity continues on the backup", async () => {
+    await restart();
+    const agent = await createCodex("Task capacity", automaticBackups);
+    const before = turns().length;
+    const task = await runCauseEffect(
+      service.startTask({ agentId: agent.id, text: "outage-capacity case:task-capacity" }),
+    );
+    await waitFor(
+      "the task to complete on its backup",
+      () =>
+        turns().length > before &&
+        service.readTask(agent.id, task.id).messages.some((message) => message.text === "Done."),
+    );
+    const input = turns()[before]?.input ?? "";
+    assert.ok(input.includes("Continue the unfinished task"));
+    assert.ok(input.includes("checkpoint-result=task-capacity"));
+    assert.deepEqual(workSteps("task-capacity"), ["checkpoint", "final"]);
+    assert.equal(service.listTasks(agent.id).tasks.length, 1);
+    return { taskId: task.id };
+  });
+
+  await check("without a backup, an outage after work runs once more on the same model", async () => {
+    await restart();
+    const agent = await createCodex("Retry");
+    const since = events.length;
+    const beforeCodex = readLog<CodexTurn>(codexLog).length;
+    const beforeClaude = turns().length;
+    const outcome = await send(agent.id, "outage-once case:once");
+    assert.equal(outcome.status, "completed", `The second run completes: ${outcome.error}`);
+    const attempts = readLog<CodexTurn>(codexLog).slice(beforeCodex);
+    assert.deepEqual(
+      attempts.map((attempt) => attempt.model),
+      [CODEX_MODEL, CODEX_MODEL],
+      "The turn runs once more on the same model.",
+    );
+    assert.ok(attempts[1]?.input.includes("Continue the unfinished task"), "The second run continues the work.");
+    assert.equal(turns().length, beforeClaude, "No other provider runs.");
+    assert.deepEqual(workSteps("once"), ["checkpoint", "final"], "The completed action runs once.");
+    assert.deepEqual(errorsFor(agent.id, since), [], "A recovered outage shows no error.");
+    return { outcome };
+  });
+
+  await check("without a backup, a second outage fails as before", async () => {
+    await restart();
+    const agent = await createCodex("Retry fails");
+    const since = events.length;
+    const beforeCodex = readLog<CodexTurn>(codexLog).length;
+    const outcome = await send(agent.id, "outage-always case:always");
+    assert.equal(outcome.status, "failed");
+    assert.equal(readLog<CodexTurn>(codexLog).length, beforeCodex + 2, "The turn runs once more, and no more.");
+    assert.deepEqual(workSteps("always"), ["checkpoint"], "The completed action is not repeated.");
+    assert.ok(errorsFor(agent.id, since).length > 0, "The error shows.");
+    return outcome;
+  });
+
+  await check("without a backup, a channel task runs once more after an outage", async () => {
+    await restart();
+    const agent = await createCodex("Channel retry");
+    const beforeCodex = readLog<CodexTurn>(codexLog).length;
+    const { channelId, task } = await channelTask(agent.id, "outage-once case:channel-once");
+    assert.equal(task.state, "completed", JSON.stringify(task));
+    assert.equal(service.channels.store.tasks(channelId).length, 1);
+    assert.equal(readLog<CodexTurn>(codexLog).length, beforeCodex + 2);
+    assert.deepEqual(workSteps("channel-once"), ["checkpoint", "final"]);
+    return { taskId: task.id, state: task.state };
+  });
+
+  await check("a sign-in error after work does not continue", async () => {
+    await restart();
+    const agent = await createCodex("Signed out", automaticBackups);
+    const since = events.length;
+    const beforeCodex = readLog<CodexTurn>(codexLog).length;
+    const beforeClaude = turns().length;
+    const outcome = await send(agent.id, "outage-auth case:auth");
+    assert.equal(outcome.status, "failed");
+    assert.equal(readLog<CodexTurn>(codexLog).length, beforeCodex + 1);
+    assert.equal(turns().length, beforeClaude, "No backup runs.");
+    assert.ok(errorsFor(agent.id, since).length > 0, "The error shows.");
+    return outcome;
+  });
+
+  await check("a Claude outage after text continues on the backup", async () => {
+    await restart();
+    const agent = await runCauseEffect(
+      service.createAgent({
+        name: "Claude outage",
+        description: "Checks backup models.",
+        avatarSeed: "claude-outage",
+        avatarHue: null,
+        initialMessage: "Hello.",
+        provider: "claude",
+        model: PRIMARY,
+      }),
+    );
+    await waitFor("the initial Claude turn to end", () =>
+      service.listQueue(agent.id).deliveries.every((delivery) => delivery.status === "completed"),
+    );
+    await runCauseEffect(
+      service.updateAgent({
+        agentId: agent.id,
+        backupModels: { automatic: true, order: [{ provider: "claude", model: BACKUP }] },
+      }),
+    );
+    failing([PRIMARY]);
+    try {
+      const since = events.length;
+      const before = turns().length;
+      const outcome = await send(agent.id, "act-then-fail");
+      assert.equal(outcome.status, "completed", `The turn completes on the backup: ${outcome.error}`);
+      const ran = turns().slice(before);
+      assert.deepEqual(
+        ran.map((turn) => turn.model),
+        [PRIMARY, BACKUP],
+      );
+      assert.ok(ran[1]?.input.includes("Continue the unfinished task"), "The backup gets a continuation request.");
+      assert.ok(ran[1]?.input.includes("Partial answer."), "The interrupted progress reaches the backup.");
+      assert.deepEqual(errorsFor(agent.id, since), [], "A recovered outage shows no error.");
+      return { ran: ran.map((turn) => turn.model) };
+    } finally {
+      failing([]);
+    }
+  });
 
   report.passed = true;
 } catch (error) {

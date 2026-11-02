@@ -351,6 +351,7 @@ export class DrainScheduler {
     if (this.#compactionHolds(lane)) return "compaction";
     if (!this.#routines.mayDrain(agentId)) return "routine";
     if (!this.#usageLimits.mayDrain(agentId) && !this.#usageLimits.mayTry(agentId)) return "usage-limit";
+    if (this.#usageLimits.retryHeld(agentId)) return "provider-retry";
     return null;
   }
 

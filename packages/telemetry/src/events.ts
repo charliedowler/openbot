@@ -195,6 +195,7 @@ const STRUCTURED_CAUSES: Readonly<Record<string, CauseCode>> = {
   rate_limit_error: "rate_limit",
   rateLimitExceeded: "rate_limit",
   serverOverloaded: "provider_unavailable",
+  policyCapacityUnavailable: "provider_unavailable",
   internalServerError: "provider_unavailable",
   flexUnavailable: "provider_unavailable",
   insufficient_quota: "billing",
@@ -265,10 +266,11 @@ export function classifyFailure(error: unknown): CauseCode {
     return "network";
   if (/\b(?:ENOSPC|SQLITE_FULL|disk full)\b/iu.test(message)) return "storage";
   if (/\b(?:EACCES|permission denied|403 forbidden)\b/iu.test(message)) return "permission";
-  // An outage: Claude's "API Error: 529 … overloaded_error", OpenAI's "server_error", Google's
-  // UNAVAILABLE status in capitals, or a 5xx status that the text names as a status.
+  // An outage: Claude's "API Error: 529 … overloaded_error", OpenAI's "server_error", Codex's "Selected
+  // model is at capacity", Google's UNAVAILABLE status in capitals, or a 5xx status that the text names
+  // as a status.
   if (
-    /\b(?:service unavailable|bad gateway|internal server error|overloaded(?:_error)?|server_error|api_error|server had an error|high demand|temporarily unavailable|upstream connect error)\b/iu.test(
+    /\b(?:service unavailable|bad gateway|internal server error|overloaded(?:_error)?|server_error|api_error|server had an error|high demand|temporarily unavailable|upstream connect error|model is at capacity)\b/iu.test(
       message,
     ) ||
     /\bUNAVAILABLE\b/u.test(message) ||
