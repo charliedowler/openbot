@@ -494,6 +494,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: bun scripts/channel-handoff-validation-e2e.ts
 
+      - name: Run the mailbox queue fan-out E2E test
+        if: ${{ !cancelled() }}
+        run: bun scripts/mailbox-queue-fanout-e2e.ts
+
       - name: Run the agent profile accounts E2E test
         if: ${{ !cancelled() }}
         run: bun run test:agent-profile-accounts
@@ -656,6 +660,7 @@ jobs:
             .openbot-build/agent-channel-create-e2e/
             .openbot-build/agent-workflow-gate-e2e/
             .openbot-build/channel-handoff-validation-e2e/
+            .openbot-build/mailbox-queue-fanout-e2e/
             .openbot-build/agent-profile-accounts-e2e/
             .openbot-build/browser-profile-agents-e2e/
             .openbot-build/claude-usage-resume-e2e/
