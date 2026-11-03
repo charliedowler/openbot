@@ -141,8 +141,8 @@ short digest of its answer to the chat session's pending handoff (`appendRoutine
 characters for each run, 6,000 in total), so the next chat turn reads it. The chat session keeps its
 id and its context. A restart during a run marks the run interrupted: the session is not saved.
 
-While the agent's channel work holds its own chat, a routine run at the head of the own chat starts
-in the routine lane, beside the channel turn. `MailboxStore` keeps that delivery out of the main lane
+While the agent's channel work, or a compaction of a channel thread, holds its own chat, a routine
+run with no message of the person before it starts in the routine lane, beside the channel work. `MailboxStore` keeps that delivery out of the main lane
 while it starts and runs, only in memory. See
 [channels and messaging](channels-and-messaging.md) for the rules.
 
