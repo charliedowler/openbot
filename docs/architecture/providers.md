@@ -939,6 +939,45 @@ sign-in and wait for a Reconnect. The accounts after the first and their folders
 need the connected CLI, so they wait too. A joined server uses the optional `provider-sign-out-v1`
 route.
 
+### Codex through an OpenAI-compatible proxy
+
+A Codex sign-in can send its requests through an OpenAI-compatible proxy that pools several
+accounts, such as CLIProxyAPI. The proxy moves a request to another account when one reaches its
+limit. The setting is per sign-in and off by default: a file `openbot-proxy.json` in the Codex home
+folder (`CODEX_HOME`, or the folder of an account after the first):
+
+```json
+{ "baseUrl": "https://proxy.example/v1", "apiKeyFile": "/path/to/proxy-key" }
+```
+
+`apiKeyFile` is absolute or relative to the home folder, and holds only the key. When a Codex
+process starts, `CodexAppServerClient` reads the file (`src/backend/codex-proxy.ts`) and starts
+`codex -c cli_auth_credentials_store="ephemeral" -c openai_base_url=<baseUrl> app-server`. After
+`initialize` it sends `account/login/start` with `type: "apiKey"`, before the caller reads the account.
+
+- `openai_base_url` changes only the address of the built-in `openai` provider. Codex binds each
+  saved chat to its provider ID, so a custom provider would refuse the chats ("This chat uses
+  openai, but your current provider is …"); this one continues them.
+- The ephemeral store keeps the key in the process memory. Codex neither reads nor writes
+  `auth.json`, so its ChatGPT sign-in stays. Remove the file to use that sign-in again. The key is
+  never in `auth.json`, the database, a status or an event, and `registerSecretValue` masks it in
+  logs.
+- Codex refuses the plan usage read for a key. The client answers `account/rateLimits/read` with no
+  reading, so the account shows no usage ring and its check does not fail.
+- The proxy answers 429 only when no pooled account is left. Codex keeps only that status
+  (`responseTooManyFailedAttempts` with `httpStatusCode` 429), and the client reports it as
+  `usageLimitExceeded`. The usage limit gate then holds the agents, as for a spent plan; with no
+  reset, it tries one turn every 15 minutes.
+- Codex reads its credentials and the base address when its process starts. A change to the file
+  takes effect for a Codex process that starts after it: a restart of OpenBot or of the provider, or
+  an agent's own process after its idle stop. A file that OpenBot cannot use stops the start with
+  `error.provider.codexProxyInvalid`, so the agents do not move to the own sign-in without notice.
+- The ChatGPT sign-in flow (`CodexLoginFlow`) does not use the proxy, so a new sign-in still saves to
+  `auth.json`.
+
+`scripts/codex-proxy-account-e2e.ts` runs the real agent service and Codex CLI against a local stand-in
+for the proxy.
+
 ## Provider settings and the ACP registry
 
 `AgentClient` remains the provider boundary. ACP session ownership, history replay, and turn
