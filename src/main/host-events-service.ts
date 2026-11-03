@@ -36,7 +36,7 @@ import { causeHelpers } from "../backend/effect-boundary";
 import type { RoutineRecords } from "../backend/routine-records";
 import type { OwnedRoutineRecord, RoutineRecordInput, WebhookReceiveResult } from "../backend/routine-store";
 import type { WebhookRouteOwner } from "../backend/webhook-route-store";
-import { WEBHOOK_EVENT_TYPE_MAX_LENGTH } from "../backend/webhook-trigger";
+import { isWebhookWaitId, WEBHOOK_EVENT_TYPE_MAX_LENGTH } from "../backend/webhook-trigger";
 import type { WorkflowWebhookDelivery, WorkflowWebhookResult } from "../backend/workflows/workflows";
 import {
   type HostEventsApi,
@@ -164,6 +164,7 @@ interface DecodedWebhookBody {
   type: string;
   occurredAt: string | null;
   data: EventJsonValue;
+  waitId?: string;
 }
 
 /** The body as a JSON object, or null when it is not UTF-8 JSON or not an object. */
@@ -180,14 +181,20 @@ function isEventType(value: unknown): value is string {
   return isString(value) && value.length >= 1 && value.length <= WEBHOOK_EVENT_TYPE_MAX_LENGTH;
 }
 
-function decodeWebhookBody(body: Uint8Array): DecodedWebhookBody | null {
+export function decodeWebhookBody(body: Uint8Array): DecodedWebhookBody | null {
   const value = parseJsonObject(body);
   if (!value || !isEventType(value.type)) return null;
   if (value.occurredAt !== undefined && (!isString(value.occurredAt) || Number.isNaN(Date.parse(value.occurredAt))))
     return null;
   const data = value.data ?? null;
   if (!isEventJsonValue(data)) return null;
-  return { type: value.type, occurredAt: value.occurredAt ?? null, data };
+  if (value.waitId !== undefined && !isWebhookWaitId(value.waitId)) return null;
+  return {
+    type: value.type,
+    occurredAt: value.occurredAt ?? null,
+    data,
+    ...(value.waitId === undefined ? {} : { waitId: value.waitId }),
+  };
 }
 
 /**
@@ -556,6 +563,7 @@ export class HostEventsService implements HostEventsApi {
       data: body.data,
       occurredAt: body.occurredAt ?? receivedAt,
       receivedAt,
+      ...(body.waitId === undefined ? {} : { waitId: body.waitId }),
     };
     const { owner } = route;
     const received: ReceivedDelivery =

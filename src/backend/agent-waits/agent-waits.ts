@@ -102,16 +102,29 @@ export class AgentWaits {
   /**
    * Marks the waits that a routine run wakes, after its delivery is queued. A script event that
    * names a wait wakes only that wait. Any other run wakes every wait of its agent that has no
-   * routine or has this routine. A wait whose last wake has not ended yet stays with that run.
+   * routine or has this routine. With `fallback`, as for a signed webhook request, a named wait
+   * that this run would wake is the only one it wakes, and any other name wakes as if unnamed, so
+   * a sender only narrows the waits a run wakes. A wait whose last wake has not ended yet stays
+   * with that run.
    */
   wakeForRun(
     run: { agentId: string; routineId: string },
     deliveryId: string,
     waitId: string | null,
+    fallback = false,
   ): Effect.Effect<void, AgentWaitError> {
     return Effect.gen({ self: this }, function* () {
       const named = waitId ? this.#store.get(run.agentId, waitId) : null;
-      const candidates = waitId ? (named ? [named] : []) : this.#store.forRoutineRun(run.agentId, run.routineId);
+      const runWaits = () => this.#store.forRoutineRun(run.agentId, run.routineId);
+      const candidates = !waitId
+        ? runWaits()
+        : !fallback
+          ? named
+            ? [named]
+            : []
+          : named && (named.routineId === null || named.routineId === run.routineId)
+            ? [named]
+            : runWaits();
       for (const wait of candidates) {
         if (wait.wakeDeliveryId && this.#isPending(wait.wakeDeliveryId)) continue;
         if (wait.id.startsWith("channel:")) {

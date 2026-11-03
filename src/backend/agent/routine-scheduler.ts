@@ -394,7 +394,7 @@ export class RoutineScheduler implements RoutineDueSource {
     if (!this.mayDrain(agentId)) return { kind: "unavailable" } as const;
     const result = yield* routineStep(() => this.#routines.receiveWebhook(agentId, routineId, event));
     if (result.kind === "started") {
-      yield* this.#enqueueRunEffect(result.run).pipe(
+      yield* this.#enqueueRunEffect(result.run, event.waitId ?? null, true).pipe(
         Effect.catch((failure) =>
           Effect.sync(() => this.#hooks.emitError("routine_delivery_failed", failure.cause, agentId)),
         ),
@@ -1008,11 +1008,15 @@ export class RoutineScheduler implements RoutineDueSource {
     return deliveryId;
   }, Effect.uninterruptible);
 
-  /** `waitId` is the one open wait a script event names; null wakes every wait the run matches. */
+  /**
+   * `waitId` is the one open wait a script or webhook event names; null wakes every wait the run
+   * matches. With `fallback`, a name that is not a wait of this run wakes as if it were null.
+   */
   readonly #enqueueRunEffect = Effect.fn("RoutineScheduler.enqueueRun")(function* (
     this: RoutineScheduler,
     run: RoutineRun,
     waitId: string | null = null,
+    fallback = false,
   ) {
     // A test or a script run that arrives while a spent plan holds the agent would wait for the
     // reset, and a routine set to skip has no use for a late result.
@@ -1067,7 +1071,7 @@ export class RoutineScheduler implements RoutineDueSource {
         }
       });
       yield* this.#waits
-        .wakeForRun(run, deliveryId, waitId)
+        .wakeForRun(run, deliveryId, waitId, fallback)
         .pipe(Effect.mapError((cause) => new RoutineOperationFailed({ cause })));
       // A run in the routine's thread shows in that thread's queue, and the chat keeps its preview.
       if (thread) {

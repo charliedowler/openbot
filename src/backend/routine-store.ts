@@ -154,6 +154,7 @@ export interface ReceivedWebhookEvent {
   data: EventJsonValue;
   occurredAt: string;
   receivedAt: string;
+  waitId?: string;
 }
 
 export type WebhookReceiveResult<Run = OwnedRoutineRun> =
