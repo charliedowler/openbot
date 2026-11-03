@@ -1,3 +1,4 @@
+import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
 import type { EventEnvelope, EventFilter, EventJsonValue, WebhookReceiptReason } from "@openbot/contracts/ipc-events";
 import { isEventFilter } from "@openbot/contracts/ipc-events";
 import { isDynamicRecord } from "@openbot/contracts/runtime-values";
@@ -10,6 +11,10 @@ export const WEBHOOK_FILTERS_LIMIT = 128;
 export const EXTERNAL_EVENT_START = "--- external event input ---";
 /** The last line of an event that comes from outside the host. */
 export const EXTERNAL_EVENT_END = "--- end of external event input ---";
+
+export function isWebhookWaitId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= INPUT_LIMITS.identifier;
+}
 
 /** Rejects a trigger that the editor or a Team API client could have corrected. */
 export function validateWebhookTrigger(eventType: string | null, filters: readonly EventFilter[]): void {

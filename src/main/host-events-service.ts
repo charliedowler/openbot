@@ -35,7 +35,7 @@ import { causeHelpers } from "../backend/effect-boundary";
 import type { RoutineRecords } from "../backend/routine-records";
 import type { OwnedRoutineRecord, RoutineRecordInput, WebhookReceiveResult } from "../backend/routine-store";
 import type { WebhookRouteOwner } from "../backend/webhook-route-store";
-import { WEBHOOK_EVENT_TYPE_MAX_LENGTH } from "../backend/webhook-trigger";
+import { isWebhookWaitId, WEBHOOK_EVENT_TYPE_MAX_LENGTH } from "../backend/webhook-trigger";
 import type { WorkflowWebhookDelivery, WorkflowWebhookResult } from "../backend/workflows/workflows";
 import {
   type HostEventsApi,
@@ -160,9 +160,10 @@ interface DecodedWebhookBody {
   type: string;
   occurredAt: string | null;
   data: EventJsonValue;
+  waitId?: string;
 }
 
-function decodeWebhookBody(body: Uint8Array): DecodedWebhookBody | null {
+export function decodeWebhookBody(body: Uint8Array): DecodedWebhookBody | null {
   let value: unknown;
   try {
     value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body));
@@ -175,7 +176,13 @@ function decodeWebhookBody(body: Uint8Array): DecodedWebhookBody | null {
     return null;
   const data = value.data ?? null;
   if (!isEventJsonValue(data)) return null;
-  return { type: value.type, occurredAt: value.occurredAt ?? null, data };
+  if (value.waitId !== undefined && !isWebhookWaitId(value.waitId)) return null;
+  return {
+    type: value.type,
+    occurredAt: value.occurredAt ?? null,
+    data,
+    ...(value.waitId === undefined ? {} : { waitId: value.waitId }),
+  };
 }
 
 /**
@@ -509,6 +516,7 @@ export class HostEventsService implements HostEventsApi {
       data: body.data,
       occurredAt: body.occurredAt ?? receivedAt,
       receivedAt,
+      ...(body.waitId === undefined ? {} : { waitId: body.waitId }),
     };
     const { owner } = route;
     const received: ReceivedDelivery =
