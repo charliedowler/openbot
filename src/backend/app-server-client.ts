@@ -6,6 +6,7 @@ import { Effect, Fiber } from "effect";
 import { LOG_TIMESTAMP_PREFIX } from "./agent/provider-diagnostics";
 import { AgentProcessExitError, type AgentProvider, RequestTimeoutError } from "./agent-client";
 import { cliSpawnTarget } from "./cli";
+import { type CodexProxy, codexProxyArgs, isProxyLimitError } from "./codex-proxy";
 import { JsonLineDecoder, LineTooLongError } from "./jsonl";
 import {
   type AppServerNotification,
@@ -80,12 +81,21 @@ export class CodexAppServerClient extends EventEmitter<ClientEvents> {
 
   /** Added to the inherited environment, such as the `CODEX_HOME` of an account after the first. */
   readonly #extraEnv: Readonly<Record<string, string>> | undefined;
+  /** Read at each start, so a process that starts after the proxy file changes uses the change. */
+  readonly #readProxy: (() => CodexProxy | null) | undefined;
+  #proxy: CodexProxy | null = null;
 
-  constructor(executable: string, requestTimeoutMs = 30_000, extraEnv?: Readonly<Record<string, string>>) {
+  constructor(
+    executable: string,
+    requestTimeoutMs = 30_000,
+    extraEnv?: Readonly<Record<string, string>>,
+    readProxy?: () => CodexProxy | null,
+  ) {
     super();
     this.#executable = executable;
     this.#requestTimeoutMs = requestTimeoutMs;
     this.#extraEnv = extraEnv;
+    this.#readProxy = readProxy;
   }
 
   get running(): boolean {
@@ -97,7 +107,14 @@ export class CodexAppServerClient extends EventEmitter<ClientEvents> {
 
     this.#stopping = false;
     this.#decoder = new JsonLineDecoder();
-    const target = cliSpawnTarget(this.#executable, ["app-server", "--listen", "stdio://"]);
+    const proxy = this.#readProxy?.() ?? null;
+    this.#proxy = proxy;
+    const target = cliSpawnTarget(this.#executable, [
+      ...(proxy ? codexProxyArgs(proxy) : []),
+      "app-server",
+      "--listen",
+      "stdio://",
+    ]);
     const child = spawn(target.command, target.args, {
       stdio: ["pipe", "pipe", "pipe"],
       env: this.#extraEnv ? { ...process.env, ...this.#extraEnv } : process.env,
@@ -293,12 +310,41 @@ export class CodexAppServerClient extends EventEmitter<ClientEvents> {
     }
   });
 
+  /**
+   * Through a proxy, the handshake signs Codex in with the proxy's key before the caller reads the
+   * account, and the plan usage read gets no reading: Codex refuses it for a key, and an error there
+   * would mark the account as failed.
+   */
   readonly request = Effect.fn("CodexAppServer.request")(function* <T>(
     this: CodexAppServerClient,
     method: string,
     params: unknown,
     decoder: ResponseDecoder<T>,
     timeoutMs = this.#requestTimeoutMs,
+  ) {
+    const proxy = this.#proxy;
+    if (proxy && method === "account/rateLimits/read")
+      return yield* Effect.try({
+        try: () => decoder({ rateLimits: null, rateLimitsByLimitId: null }),
+        catch: (cause) => new ProviderClientOperationError({ cause }),
+      });
+    const result = yield* this.#send(method, params, decoder, timeoutMs);
+    if (proxy && method === "initialize")
+      yield* this.#send(
+        "account/login/start",
+        { type: "apiKey", apiKey: proxy.apiKey },
+        decodeRecordResponse,
+        timeoutMs,
+      );
+    return result;
+  });
+
+  readonly #send = Effect.fn("CodexAppServer.send")(function* <T>(
+    this: CodexAppServerClient,
+    method: string,
+    params: unknown,
+    decoder: ResponseDecoder<T>,
+    timeoutMs: number,
   ) {
     const id = this.#nextId++;
     const child = this.#process;
@@ -397,7 +443,12 @@ export class CodexAppServerClient extends EventEmitter<ClientEvents> {
           this.#cancelToolRequests(message.params.threadId, message.params.turn.id);
           this.#interruptedTurns.delete(JSON.stringify([message.params.threadId, message.params.turn.id]));
         }
-        this.emit("notification", { method: message.method, params: message.params });
+        // Through a proxy, a 429 means that no pooled account is left, so it reads as a spent plan.
+        const params =
+          this.#proxy && message.method === "error" && isProxyLimit(message.params)
+            ? { ...message.params, error: { ...message.params.error, codexErrorInfo: "usageLimitExceeded" } }
+            : message.params;
+        this.emit("notification", { method: message.method, params });
       }
       return;
     }
@@ -486,6 +537,15 @@ interface HistoryTurnPage {
 interface HistoryItemPage {
   data: Array<{ turnId: string; item: ThreadItem }>;
   nextCursor: string | null;
+}
+
+function isProxyLimit(params: unknown): params is DynamicRecord & { error: DynamicRecord } {
+  return (
+    isRecord(params) &&
+    params.willRetry !== true &&
+    isRecord(params.error) &&
+    isProxyLimitError(params.error.codexErrorInfo)
+  );
 }
 
 function metadataOnlyResumeParams(params: unknown): DynamicRecord {

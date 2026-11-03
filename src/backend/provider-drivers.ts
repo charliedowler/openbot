@@ -57,6 +57,7 @@ import {
   resolvePiCli,
 } from "./cli";
 import { clineFreeModels } from "./cline-free-models";
+import { codexHome, readCodexProxy } from "./codex-proxy";
 import { readCursorUsage } from "./cursor-usage";
 import { CustomAcpAgentsClient, type CustomAgentConfig, type CustomAgentSource } from "./custom-acp-agents-client";
 import { GrokAgentClient } from "./grok-client";
@@ -801,12 +802,12 @@ export const BUILT_IN_PROVIDER_DRIVERS: readonly BuiltInProviderDriver[] = [
     },
     catalog: { paged: true, modelFields: codexFastServiceTier },
     resolveCli: resolveCodexCli,
-    createClient: (cli, requestTimeoutMs, context) =>
-      new CodexAppServerClient(cli.executable, requestTimeoutMs, {
-        ...cliPathEnvironment(cli),
-        ...context.serverEnvironment,
-        ...context.accountEnvironment,
-      }),
+    createClient: (cli, requestTimeoutMs, context) => {
+      const environment = { ...cliPathEnvironment(cli), ...context.serverEnvironment, ...context.accountEnvironment };
+      return new CodexAppServerClient(cli.executable, requestTimeoutMs, environment, () =>
+        readCodexProxy(codexHome(environment)),
+      );
+    },
     authState: (account) => ({ kind: "chatgpt", email: account?.email ?? null }),
     // An API-key login has no plan usage to read.
     validateAccount: (account) => {
