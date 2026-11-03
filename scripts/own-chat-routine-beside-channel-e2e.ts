@@ -402,6 +402,83 @@ try {
     await waitFor("the channel turn C5B to start", () => started("HOLD-C5B"));
   });
 
+  // 7. A message from the person arrives while a routine run of the own chat runs beside the channel
+  // turn. It waits for the routine run and for the channel work, and no second own-chat turn starts.
+  await scenario("person waits for a beside routine run", ["HOLD-C7", "HOLD-R7", "HOLD-U7"], async () => {
+    await sendChannel("HOLD-C7");
+    await waitFor("the channel turn C7 to start", () => started("HOLD-C7"));
+    await runRoutine("HOLD-R7");
+    await waitFor("the routine turn R7 to start beside C7", () => started("HOLD-R7"), 8_000);
+    await sendOwnChat("Status please. HOLD-U7");
+    await sleep(OBSERVE_MS);
+    check("A message of the person does not start while a beside routine run runs", !started("HOLD-U7"));
+    release("HOLD-R7");
+    await waitFor("the routine turn R7 to end", () => ended("HOLD-R7"));
+    await sleep(OBSERVE_MS);
+    check("The message of the person still waits for the channel turn after the beside run ends", !started("HOLD-U7"));
+    release("HOLD-C7");
+    await waitFor("the person's message U7 to start", () => started("HOLD-U7"));
+    check("The message of the person starts after the channel turn ends", Boolean(ended("HOLD-C7")));
+  });
+
+  // 8. A routine run passes a queued teammate message beside the channel work. The teammate message
+  // keeps its place in the main lane and runs once the channel work ends.
+  await scenario("routine passes a teammate message", ["HOLD-C8", "HOLD-R8"], async () => {
+    await sendChannel("HOLD-C8");
+    await waitFor("the channel turn C8 to start", () => started("HOLD-C8"));
+    const receipt = await runCauseEffect(
+      mailbox.enqueue({
+        sender: { kind: "agent", agentId: helper.id },
+        recipientAgentIds: [lead.id],
+        text: "Status please.",
+        expectsReply: false,
+        draftIds: [],
+        replyToMessageId: null,
+      }),
+    );
+    const teammateId = receipt.deliveries[0]?.id ?? "";
+    const teammateStatus = () => mailbox.getDelivery(teammateId)?.delivery.status;
+    await runRoutine("HOLD-R8");
+    const routine = await waitFor("the routine turn R8 to start beside C8", () => started("HOLD-R8"), 8_000).catch(
+      () => undefined,
+    );
+    check("A routine run behind a queued teammate message starts beside the channel turn", Boolean(routine));
+    check("The teammate message stays queued while the channel turn runs", teammateStatus() === "queued");
+    release("HOLD-R8");
+    await waitFor("the routine turn R8 to end", () => ended("HOLD-R8"));
+    await sleep(OBSERVE_MS / 2);
+    check("The teammate message still waits for the channel work", teammateStatus() === "queued");
+    release("HOLD-C8");
+    await waitFor("the teammate message to run", () => teammateStatus() === "completed");
+  });
+
+  // 9. The channel work ends while a routine run beside it still runs. A message from the person
+  // waits for the routine run: the own chat runs one turn at a time.
+  await scenario(
+    "person waits for a beside run after the channel work",
+    ["HOLD-C9", "HOLD-R9", "HOLD-U9"],
+    async () => {
+      await sendChannel("HOLD-C9");
+      await waitFor("the channel turn C9 to start", () => started("HOLD-C9"));
+      await runRoutine("HOLD-R9");
+      await waitFor("the routine turn R9 to start beside C9", () => started("HOLD-R9"), 8_000);
+      release("HOLD-C9");
+      await waitFor("the channel work C9 to end", () => ended("HOLD-C9") && !channelWorkActive());
+      await sendOwnChat("Status please. HOLD-U9");
+      await sleep(OBSERVE_MS);
+      check(
+        "A message of the person does not start while a beside routine run outlives the channel work",
+        !started("HOLD-U9"),
+      );
+      release("HOLD-R9");
+      await waitFor("the person's message U9 to start", () => started("HOLD-U9"));
+      check(
+        "The message of the person starts after the routine run ends",
+        turns().findIndex((entry) => entry.event === "end" && entry.token === "HOLD-R9") < startIndex("HOLD-U9"),
+      );
+    },
+  );
+
   // 6. No two turns ever ran on the own chat at the same time. Own-chat turns carry no channel token.
   const open = new Set<string>();
   let overlap = false;

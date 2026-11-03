@@ -202,6 +202,8 @@ interface EnqueueInput {
   voiceRecordingDraftId?: string;
   sourcePaths?: string[];
   idempotencyKey?: string;
+  /** Keeps the new deliveries from starting until `releaseStart`, only in memory. */
+  holdStart?: boolean;
 }
 
 /** A file a chat message carries or an agent made, as the Storage view lists it. */
@@ -260,6 +262,8 @@ export class MailboxStore {
    * are not part of the main lane while they start or run. Only in memory: a restart ends the run.
    */
   readonly #besideDeliveries = new Set<string>();
+  /** Queued deliveries that no lane starts until their sender calls `releaseStart`. Only in memory. */
+  readonly #startHolds = new Set<string>();
   readonly #deliveryGate = new MailboxDeliveryGate();
   readonly #stagedGeneratedAttachments = new Map<string, StoredGeneratedAttachment>();
   #state: StoredState = structuredClone(EMPTY_STATE);
@@ -633,6 +637,7 @@ export class MailboxStore {
       this.#state.messages.push(message);
       recordRestartActivity();
       this.#state.deliveries.push(...deliveries);
+      if (input.holdStart) for (const delivery of deliveries) this.#startHolds.add(delivery.id);
       if (input.idempotencyKey) {
         this.#state.idempotency[input.idempotencyKey] = messageId;
         this.#idempotencyRevision += 1;
@@ -646,6 +651,7 @@ export class MailboxStore {
         this.#persist();
       } catch (error) {
         const deliveryIds = new Set(deliveries.map((delivery) => delivery.id));
+        for (const deliveryId of deliveryIds) this.#startHolds.delete(deliveryId);
         this.#state.messages = this.#state.messages.filter((candidate) => candidate.id !== messageId);
         this.#state.deliveries = this.#state.deliveries.filter((candidate) => !deliveryIds.has(candidate.id));
         if (input.idempotencyKey && this.#state.idempotency[input.idempotencyKey] === messageId) {
@@ -959,25 +965,29 @@ export class MailboxStore {
 
   /**
    * The routine run that can start beside the agent's channel work, or null. It is the oldest queued
-   * message of the agent's own chat (channel and messaging work excepted), so it never passes a
-   * message of the person or of a teammate. A plan continuation or a continuation after a usage limit
-   * keeps its place in the main lane.
+   * own-chat routine run (channel and messaging work excepted) with no message of the person before
+   * it. It can pass a teammate's message: that message stays at its place in the main lane, so it
+   * still runs before every later message of a teammate or of the person, and a routine run in its
+   * own session reads nothing of the chat session. A plan continuation or a continuation after a
+   * usage limit keeps its place in the main lane, and so do the routine runs after it.
    */
   nextBesideRoutine(agentId: string): DeliveryContext | null {
     if (this.besideActive(agentId)) return null;
     const messages = this.#messagesById();
-    const head = this.#queuedFor(agentId).find((candidate) => {
+    for (const candidate of this.#queuedFor(agentId)) {
       const message = messages.get(candidate.messageId);
-      return (
-        this.#taskIdOf(candidate, messages) === null &&
-        !message?.channelId &&
-        !message?.messaging &&
-        !this.#isHeldReply(candidate)
-      );
-    });
-    if (!head || head.planContinuation || head.resumeAfterUsageLimit || !this.#mayStart(head)) return null;
-    if (messages.get(head.messageId)?.sender.kind !== "routine") return null;
-    return this.#context(head, undefined, messages);
+      if (this.#taskIdOf(candidate, messages) !== null || message?.channelId || message?.messaging) continue;
+      if (message?.sender.kind === "agent") continue;
+      if (
+        message?.sender.kind !== "routine" ||
+        candidate.planContinuation ||
+        candidate.resumeAfterUsageLimit ||
+        !this.#mayStart(candidate)
+      )
+        return null;
+      return this.#context(candidate, undefined, messages);
+    }
+    return null;
   }
 
   /** The queued deliveries of one lane, without those that wait for their automatic plan continuation. */
@@ -1570,7 +1580,17 @@ export class MailboxStore {
   }
 
   #mayStart(delivery: StoredDelivery): boolean {
+    return this.#editable(delivery) && !this.#startHolds.has(delivery.id);
+  }
+
+  /** Whether no edit or save of the queued message is in progress. */
+  #editable(delivery: StoredDelivery): boolean {
     return !delivery.editId && !this.#queueUpdates.has(delivery.id);
+  }
+
+  /** Lets a delivery that `enqueue` held with `holdStart` start. */
+  releaseStart(deliveryId: string): void {
+    this.#startHolds.delete(deliveryId);
   }
 
   /**
@@ -1929,7 +1949,7 @@ export class MailboxStore {
   ): Effect.fn.Return<boolean, StoredStateFailure> {
     try {
       const delivery = this.#state.deliveries.find((candidate) => candidate.id === deliveryId);
-      if (delivery?.status !== "queued" || !this.#mayStart(delivery)) return false;
+      if (delivery?.status !== "queued" || !this.#editable(delivery)) return false;
       this.#clearSteerFallback(deliveryId);
       yield* this.#updateDeliveryEffect(deliveryId, ["queued"], { status: "completed", error: null });
       return true;

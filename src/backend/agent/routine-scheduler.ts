@@ -1017,6 +1017,10 @@ export class RoutineScheduler implements RoutineDueSource {
     recordRestartActivity();
     const validateRecipient = yield* routineStep(() => this.#mailbox.prepareDelivery([run.agentId]));
     const agent = yield* this.#store.getOrCreate(run.agentId).pipe(toRoutineOperationFailed);
+    // A named channel wait can take the event to its task, and then no own-chat turn runs. Until
+    // that is known, no lane starts the delivery: a drain that ran in between would start the turn.
+    const holdStart = fallback && waitId !== null;
+    let heldDeliveryId: string | null = null;
     return yield* Effect.gen({ self: this }, function* () {
       yield* routineStep(validateRecipient);
       const receipt = yield* this.#mailbox
@@ -1033,9 +1037,11 @@ export class RoutineScheduler implements RoutineDueSource {
           draftIds: [],
           replyToMessageId: null,
           idempotencyKey: run.triggerId ? `routine:${run.triggerId}:${run.scheduledFor}` : `routine:manual:${run.id}`,
+          ...(holdStart ? { holdStart: true } : {}),
         })
         .pipe(toRoutineOperationFailed);
       const deliveryId = receipt.deliveries[0]?.id;
+      if (holdStart && deliveryId) heldDeliveryId = deliveryId;
       if (!deliveryId)
         return yield* new RoutineOperationFailed({ cause: new Error("Unable to create the routine delivery.") });
       const queued = yield* routineStep(() => {
@@ -1087,6 +1093,14 @@ export class RoutineScheduler implements RoutineDueSource {
         return current.status === "succeeded" ? current : this.#transitionRunWithConversation(current, "succeeded");
       });
     }).pipe(
+      // After a success or a failure: a delivery that is still queued can start now.
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (!heldDeliveryId) return;
+          this.#mailbox.releaseStart(heldDeliveryId);
+          this.#hooks.scheduleDrain(run.agentId);
+        }),
+      ),
       Effect.tapError((failure) =>
         routineStep(() => {
           const error = failure.cause;
