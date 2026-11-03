@@ -222,8 +222,6 @@ export class DrainScheduler {
    */
   readonly #startingDeliveries = new Map<AgentProvider, number>();
   readonly #scheduledDrains = new Set<string>();
-  /** The delivery that a running drain took, by lane key. Unset until the drain has chosen one. */
-  readonly #drainPicks = new Map<string, string>();
   readonly #drainTasks = new Map<string, Deferred.Deferred<void, DeliveryStartFailed>>();
 
   constructor(options: DrainSchedulerOptions) {
@@ -322,15 +320,40 @@ export class DrainScheduler {
   /**
    * Whether a compaction holds this lane. A side thread waits for a compaction of its own thread
    * only; the agent's own chat waits for one of any other thread (its chat, channel or messaging
-   * thread), so threads that run in parallel do not wait for each other.
+   * thread), so threads that run in parallel do not wait for each other. The routine lane waits for
+   * a compaction of the chat session only: its run has a session of its own.
    */
   #compactionHolds(lane: Lane): boolean {
+    if (lane.routine)
+      return this.#compactingThreads(lane.agentId).some((threadId) => this.#isOwnChat(lane.agentId, threadId));
     const sideThreadId = lane.taskId === null ? null : this.#tasks.threadId(lane.taskId);
-    return this.#compaction.heldThreads(lane.agentId).some((externalThreadId) => {
-      const publicThreadId = this.#conversation.publicThreadId(lane.agentId, externalThreadId);
+    return this.#compactingThreads(lane.agentId).some((publicThreadId) => {
       if (!this.#conversation.isTaskThread(publicThreadId)) return lane.taskId === null;
       return publicThreadId === sideThreadId;
     });
+  }
+
+  /** The public threads of this agent whose provider session compacts. */
+  #compactingThreads(agentId: string): string[] {
+    return this.#compaction
+      .heldThreads(agentId)
+      .map((externalThreadId) => this.#conversation.publicThreadId(agentId, externalThreadId));
+  }
+
+  #isOwnChat(agentId: string, publicThreadId: string): boolean {
+    return this.#store.list().find((agent) => agent.id === agentId)?.threadId === publicThreadId;
+  }
+
+  /** Whether a compaction of one of this agent's channel threads holds its own chat. */
+  #channelCompactionHolds(agentId: string): boolean {
+    const channels = this.#channels;
+    if (!channels) return false;
+    return this.#compactingThreads(agentId).some(
+      (threadId) =>
+        !this.#conversation.isTaskThread(threadId) &&
+        !this.#isOwnChat(agentId, threadId) &&
+        channels.store.channelForThread(threadId) !== null,
+    );
   }
 
   /** The first clause of `mayDrain` that holds this lane, or null when none does. */
@@ -394,22 +417,21 @@ export class DrainScheduler {
   }
 
   /**
-   * Why the routine lane cannot start a run. It runs only while channel work holds the agent's own
-   * chat, on a provider that runs turns at the same time, and never beside a turn of the own chat: a
-   * routine run shows in that chat. Every other case keeps the routine run in the main lane.
+   * Why the routine lane cannot start a run. It runs only while channel work, or a compaction of a
+   * channel thread, holds the agent's own chat, on a provider that runs turns at the same time, and
+   * never beside a turn of the own chat: a routine run shows in that chat. Every other case keeps
+   * the routine run in the main lane. In both cases the main lane starts only channel work.
    */
   #routineLaneHold(agentId: string): string | null {
     if (this.#tasks.oneTurnAtATime(agentId)) return "one-turn";
     if (this.#mailbox.besideActive(agentId)) return "active-turn";
-    if (!this.#channels?.queueHold(agentId)) return "no-channel-work";
-    const mainKey = laneKey(mainLane(agentId));
-    const mainPick = this.#drainPicks.get(mainKey);
-    if (
-      this.#mailbox.mainLaneRunsNonChannelWork(agentId) ||
-      (this.#drainingLanes.has(mainKey) && !(mainPick && this.#isChannelDelivery(mainPick)))
-    )
-      return "chat-turn";
+    if (!this.#routineLaneOpen(agentId)) return "no-channel-work";
+    if (this.#mailbox.mainLaneRunsNonChannelWork(agentId)) return "chat-turn";
     return null;
+  }
+
+  #routineLaneOpen(agentId: string): boolean {
+    return Boolean(this.#channels?.queueHold(agentId)) || this.#channelCompactionHolds(agentId);
   }
 
   /** Whether the routine lane of this agent starts or runs a run. */
@@ -420,11 +442,7 @@ export class DrainScheduler {
   /** Whether the next delivery of the agent's main lane is channel work. */
   #nextIsChannelWork(agentId: string): boolean {
     const next = this.#mailbox.nextQueued(agentId);
-    return next !== null && this.#isChannelDelivery(next.delivery.id);
-  }
-
-  #isChannelDelivery(deliveryId: string): boolean {
-    return this.#channels?.store.assignmentForDelivery(deliveryId) != null;
+    return next !== null && this.#channels?.store.assignmentForDelivery(next.delivery.id) != null;
   }
 
   /**
@@ -485,7 +503,7 @@ export class DrainScheduler {
 
   /** Schedules the routine lane when it has a run that could start. A move for a usage limit stays with the main lane. */
   #scheduleRoutineLane(agentId: string): void {
-    if (this.#channels?.queueHold(agentId) && this.#mailbox.nextBesideRoutine(agentId))
+    if (this.#routineLaneOpen(agentId) && this.#mailbox.nextBesideRoutine(agentId))
       this.#scheduleLane(routineLane(agentId), false);
   }
 
@@ -565,7 +583,6 @@ export class DrainScheduler {
     const ofAgent = (key: string) => laneOf(key).agentId === agentId;
     for (const keys of [this.#drainingLanes, this.#scheduledDrains, this.#slotWaiters])
       for (const key of [...keys]) if (ofAgent(key)) keys.delete(key);
-    for (const key of [...this.#drainPicks.keys()]) if (ofAgent(key)) this.#drainPicks.delete(key);
     for (const key of [...this.#reportedHolds.keys()]) if (ofAgent(key)) this.#reportedHolds.delete(key);
     for (const key of [...this.#turnModels.keys()]) if (ofAgent(key)) this.#turnModels.delete(key);
     this.#requeuedAtLimit.delete(agentId);
@@ -574,7 +591,6 @@ export class DrainScheduler {
 
   dispose(): void {
     this.#drainingLanes.clear();
-    this.#drainPicks.clear();
     this.#scheduledDrains.clear();
     this.#slotWaiters.clear();
     this.#reportedHolds.clear();
@@ -638,12 +654,10 @@ export class DrainScheduler {
       if (lane.routine) {
         const run = this.#mailbox.nextBesideRoutine(agentId);
         if (!run || !this.#runsInOwnSession(run)) return;
-        this.#drainPicks.set(key, run.delivery.id);
         yield* this.startDelivery(run, undefined, true);
         return;
       }
       const context = this.#mailbox.nextQueued(agentId, taskId);
-      if (context) this.#drainPicks.set(key, context.delivery.id);
       if (!context) {
         // Here, so that a message that arrives during the new chat waits for this drain to end.
         if (taskId === null) yield* this.#hooks.startRequestedNewChat(agentId);
@@ -691,10 +705,8 @@ export class DrainScheduler {
       Effect.ensuring(
         Effect.sync(() => {
           this.#drainingLanes.delete(key);
-          this.#drainPicks.delete(key);
           if (this.#requeuedAtLimit.delete(agentId) || this.#mailbox.nextQueued(agentId))
             this.#scheduleLane(mainLane(agentId));
-          // The routine lane waits for a drain of the main lane that has not chosen its delivery yet.
           // A routine lane does not schedule itself again: the end of its run does that.
           if (!lane.routine) this.#scheduleRoutineLane(agentId);
           // Every task too: this lane can have held another one for the task limit or the process.

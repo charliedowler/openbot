@@ -319,12 +319,16 @@ a channel delivery or a messaging delivery. While the agent has an active assign
 `ChannelService.mayDrain` holds its other main-lane requests. The work of other agents does not hold
 it. The tasks of the agent run beside the channel turn within the agent task limit, and a channel
 turn takes no task slot. The routine lane of `DrainScheduler` starts a routine run of the agent's own
-chat beside its channel work when the run is the oldest queued message of the own chat (channel and
-messaging work excepted) and the provider runs turns at the same time. The run has its own provider
-session (see [Routine sessions](agents.md#routine-sessions)) and shows in the own chat, so it waits
-for a turn of the own chat, and the own chat's other messages wait for it. The other holds of the
-agent (compaction, usage limit, a changing provider process, memory and turn slots) hold the routine
-lane too. A new channel task still waits while a turn of the own chat runs (`busy`). When the provider of the agent runs one turn at a time (`concurrentTurns:
+chat while channel work, or a compaction of one of its channel threads, holds the own chat, and the
+provider runs turns at the same time. It takes the oldest queued own-chat routine run (channel and
+messaging work excepted) with no message of the person before it. It can pass a teammate's message,
+which keeps its place in the main lane. A plan continuation or a continuation after a usage limit
+keeps its place too. The run has its own provider session (see
+[Routine sessions](agents.md#routine-sessions)) and shows in the own chat, so it waits for a turn of
+the own chat, and the own chat's messages other than channel work wait for it. A compaction of the
+chat session, the usage limit, a changing provider process, memory and turn slots hold the routine
+lane too. Two turns of the agent then work in the same workspace, so a file that both write needs
+one writer. A new channel task still waits while a turn of the own chat runs (`busy`). When the provider of the agent runs one turn at a time (`concurrentTurns:
 false`), its task turns count as busy. Only declared `browser` and `workspace:<path>` resources are
 serialized: the same browser, or two workspaces where one path contains the other. An empty list,
 `none`, and `host` (from an earlier version) reserve nothing. An assignment keeps the resources it

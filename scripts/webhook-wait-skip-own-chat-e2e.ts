@@ -41,6 +41,10 @@ class Harness {
   readonly scheduler: RoutineScheduler;
   readonly listeners = new Set<() => void>();
   busy = false;
+  /** What each lane of the agent would start next at the moment a channel wait resumes. */
+  readonly atResume: Array<{ main: string | null; beside: string | null }> = [];
+  /** The routine run that each drain the scheduler asks for could start. */
+  readonly atSchedule: Array<string | null> = [];
   failure: Error | null = null;
   closed = false;
 
@@ -84,8 +88,13 @@ class Harness {
         channelWaitEventHandled: (wait, deliveryId) => this.channels.eventWaitHandled(wait, deliveryId),
         channelWaitState: (wait) => this.channels.channelWaitState(wait),
         resumeChannelWait: (wait, deliveryId) =>
-          this.channels
-            .resumeEventWait(wait, deliveryId)
+          Effect.sync(() => {
+            this.atResume.push({
+              main: this.mailbox.nextQueued(wait.agentId)?.delivery.id ?? null,
+              beside: this.mailbox.nextBesideRoutine(wait.agentId)?.delivery.id ?? null,
+            });
+          })
+            .pipe(Effect.andThen(this.channels.resumeEventWait(wait, deliveryId)))
             .pipe(Effect.mapError((failure) => new AgentWaitError(String(failure.cause)))),
         channelWaitMatches: (wait, assignment) => this.channels.channelWaitMatches(wait, assignment),
         ownsRoutine: () => true,
@@ -114,7 +123,9 @@ class Harness {
           throw error;
         },
         emitQueue: () => {},
-        scheduleDrain: () => {},
+        scheduleDrain: (agentId) => {
+          this.atSchedule.push(this.mailbox.nextBesideRoutine(agentId)?.delivery.id ?? null);
+        },
         interrupt: () => Effect.void,
         awaitDrain: () => undefined,
         syncMailboxMessages: () => {},
@@ -352,6 +363,22 @@ try {
   );
 
   await check(
+    "No lane can start a named pod.result in the own chat while its channel wait resumes.",
+    async (harness) => {
+      const compass = await harness.agent("Compass");
+      const results = harness.inbox(compass.id, "Pod results (Compass)");
+      const named = await harness.open(compass.id, results.id);
+      const deliveryId = await harness.receive(compass.id, results.id, "evt-held", named.waitId);
+      assert.ok(harness.atResume.length > 0, "the channel wait must resume");
+      for (const next of harness.atResume) {
+        assert.notEqual(next.main, deliveryId, "the main lane must not start the delivery");
+        assert.notEqual(next.beside, deliveryId, "the routine lane must not start the delivery");
+      }
+      assert.equal(harness.delivery(deliveryId).status, "completed");
+    },
+  );
+
+  await check(
     "A second pod.result for the same wait before the task starts keeps the first event and runs in the own chat.",
     async (harness) => {
       const compass = await harness.agent("Compass");
@@ -463,6 +490,8 @@ try {
     const deliveryId = await harness.receive(compass.id, results.id, "evt-early", wait.waitId);
     assert.equal(harness.channels.store.assignments(wait.channelId).length, 1);
     assert.equal(harness.delivery(deliveryId).status, "queued");
+    assert.equal(harness.mailbox.nextBesideRoutine(compass.id)?.delivery.id, deliveryId, "the delivery is not held");
+    assert.ok(harness.atSchedule.includes(deliveryId), "the drain that the run asks for can start the delivery");
   });
   report.passed = report.failed.length === 0;
 } finally {
