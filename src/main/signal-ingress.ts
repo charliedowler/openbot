@@ -683,8 +683,11 @@ export class SignalIngress implements MessagingIngress {
       return;
     }
     if (message.type === "error") {
-      // Signal closes the socket after an error that ends it. Only the code is logged.
-      logger.warn("Signal refused the ingress socket.", { code: message.code });
+      // Signal closes the socket after an error that ends it. Only the code is logged. Signal sends
+      // `permission_denied` without a close, for a result that came after its delivery timeout.
+      if (message.code === "permission_denied")
+        logger.info("Signal did not accept a message on the ingress socket.", { code: message.code });
+      else logger.warn("Signal refused the ingress socket.", { code: message.code });
       return;
     }
     if (message.type === "discord-session") {
