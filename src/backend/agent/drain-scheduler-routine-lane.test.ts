@@ -181,6 +181,7 @@ async function harness(change: Partial<World> = {}) {
     world,
     agent,
     starts,
+    ownChat,
     besideStarts: () => starts.filter((start) => start.beside).map((start) => start.deliveryId),
     started: (id: string) => starts.some((start) => start.deliveryId === id),
     startIndex: (id: string) => starts.findIndex((start) => start.deliveryId === id),
@@ -398,6 +399,25 @@ describe("routine lane beside channel work", () => {
     await test.routine();
     await test.schedule();
     expect(test.besideStarts()).toEqual([]);
+  });
+
+  it("does not start a routine run beside an own-chat turn that no delivery started", async () => {
+    const test = await harness();
+    await channelTurnRuns(test);
+    test.ownChat.activeTurnId = "turn-unprompted";
+    await test.routine();
+    await test.schedule();
+    expect(test.besideStarts()).toEqual([]);
+  });
+
+  it("keeps a routine run in the main lane on a one-turn provider while the channel assignment has no delivery yet", async () => {
+    const test = await harness({ oneTurnAtATime: true, assignmentActive: true });
+    await test.routine();
+    await test.schedule();
+    expect(test.starts).toEqual([]);
+    const channel = await test.channel();
+    await test.schedule();
+    expect(test.starts).toEqual([{ deliveryId: channel, beside: false }]);
   });
 
   it("does not start a routine run beside a turn of the own chat", async () => {
