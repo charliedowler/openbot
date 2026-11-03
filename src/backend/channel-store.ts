@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { isDeepStrictEqual } from "node:util";
 import {
   CHANNEL_PREVIEW_LIMIT,
   CHANNEL_ROUTING_EVENT_ITEM_TYPE_PREFIX,
@@ -28,6 +29,16 @@ import {
 } from "./database/database-rows";
 import type { OpenBotDatabase } from "./openbot-database";
 import { revokeRoutineWebhooks } from "./webhook-route-store";
+
+function sameSummaryContent(stored: string, message: ChannelMessage): boolean {
+  const previous = JSON.parse(stored);
+  const next = JSON.parse(JSON.stringify(message));
+  if (!isChannelMessage(previous) || !isChannelMessage(next)) return false;
+  return isDeepStrictEqual(
+    { ...previous, sequence: 0, message: { ...previous.message, status: "completed" } },
+    { ...next, sequence: 0, message: { ...next.message, status: "completed" } },
+  );
+}
 
 export interface ChannelAssignment {
   id: string;
@@ -439,7 +450,7 @@ export class ChannelStore {
       const existing = databaseRow(
         db
           .prepare(
-            "SELECT sequence, json_extract(message_json, '$.message.status') AS status FROM projection_channel_messages WHERE channel_id = ? AND message_id = ?",
+            "SELECT sequence, message_json, json_extract(message_json, '$.message.status') AS status FROM projection_channel_messages WHERE channel_id = ? AND message_id = ?",
           )
           .get(change.channel.id, message.id),
       );
@@ -462,9 +473,10 @@ export class ChannelStore {
         // A streaming message changes on each part of its text; a packet already leaves it unread.
         if (existing.status !== "streaming")
           this.#completedMessageChanges.set(change.channel.id, this.completedMessageChanges(change.channel.id) + 1);
-        db.prepare(
-          "UPDATE projection_channel_summaries SET version = version + 1, through_sequence = 0, text = '' WHERE channel_id = ? AND through_sequence >= ?",
-        ).run(change.channel.id, assigned);
+        if (!sameSummaryContent(requiredStringColumn(existing, "message_json"), message))
+          db.prepare(
+            "UPDATE projection_channel_summaries SET version = version + 1, through_sequence = 0, text = '' WHERE channel_id = ? AND through_sequence >= ?",
+          ).run(change.channel.id, assigned);
         // A member read this message before it changed, as when a correction supersedes a result. A
         // packet with only later messages would not show the change, so the next one is complete.
         db.prepare(
