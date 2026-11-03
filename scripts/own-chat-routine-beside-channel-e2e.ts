@@ -402,6 +402,50 @@ try {
     await waitFor("the channel turn C5B to start", () => started("HOLD-C5B"));
   });
 
+  // 7. A message from the person arrives while a routine run of the own chat runs beside the channel
+  // turn. It waits for the routine run and for the channel work, and no second own-chat turn starts.
+  await scenario("person waits for a beside routine run", ["HOLD-C7", "HOLD-R7", "HOLD-U7"], async () => {
+    await sendChannel("HOLD-C7");
+    await waitFor("the channel turn C7 to start", () => started("HOLD-C7"));
+    await runRoutine("HOLD-R7");
+    await waitFor("the routine turn R7 to start beside C7", () => started("HOLD-R7"), 8_000);
+    await sendOwnChat("Status please. HOLD-U7");
+    await sleep(OBSERVE_MS);
+    check("A message of the person does not start while a beside routine run runs", !started("HOLD-U7"));
+    release("HOLD-R7");
+    await waitFor("the routine turn R7 to end", () => ended("HOLD-R7"));
+    await sleep(OBSERVE_MS);
+    check("The message of the person still waits for the channel turn after the beside run ends", !started("HOLD-U7"));
+    release("HOLD-C7");
+    await waitFor("the person's message U7 to start", () => started("HOLD-U7"));
+    check("The message of the person starts after the channel turn ends", Boolean(ended("HOLD-C7")));
+  });
+
+  // 8. A routine run behind a teammate message does not start beside the channel work: the teammate
+  // message runs in the chat session and keeps its place.
+  await scenario("routine behind a teammate message", ["HOLD-C8", "HOLD-R8"], async () => {
+    await sendChannel("HOLD-C8");
+    await waitFor("the channel turn C8 to start", () => started("HOLD-C8"));
+    await runCauseEffect(
+      mailbox.enqueue({
+        sender: { kind: "agent", agentId: helper.id },
+        recipientAgentIds: [lead.id],
+        text: "Status please.",
+        expectsReply: false,
+        draftIds: [],
+        replyToMessageId: null,
+      }),
+    );
+    await runRoutine("HOLD-R8");
+    await sleep(OBSERVE_MS);
+    const teammateQueued = agents
+      .listQueue(lead.id)
+      .deliveries.some((delivery) => delivery.sender.kind === "agent" && delivery.status === "queued");
+    check("The teammate message is queued in the lead's own chat", teammateQueued);
+    check("A routine run behind a queued teammate message does not start beside the channel turn", !started("HOLD-R8"));
+    release("HOLD-C8");
+  });
+
   // 6. No two turns ever ran on the own chat at the same time. Own-chat turns carry no channel token.
   const open = new Set<string>();
   let overlap = false;
