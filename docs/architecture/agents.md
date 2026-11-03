@@ -141,6 +141,11 @@ short digest of its answer to the chat session's pending handoff (`appendRoutine
 characters for each run, 6,000 in total), so the next chat turn reads it. The chat session keeps its
 id and its context. A restart during a run marks the run interrupted: the session is not saved.
 
+While the agent's channel work holds its own chat, a routine run at the head of the own chat starts
+in the routine lane, beside the channel turn. `MailboxStore` keeps that delivery out of the main lane
+while it starts and runs, only in memory. See
+[channels and messaging](channels-and-messaging.md) for the rules.
+
 ## Routine calendar feed
 
 `src/main/routine-feed-server.ts` is a loopback HTTP listener that serves the routines of this

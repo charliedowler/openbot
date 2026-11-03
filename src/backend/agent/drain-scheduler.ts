@@ -98,26 +98,34 @@ export interface TaskLanes {
 
 /**
  * One queue that runs one turn at a time: the agent's own chat (`taskId` null, with its channel and
- * messaging work), or one of its tasks.
+ * messaging work), one of its tasks, or the routine lane (`routine`): the routine runs of the
+ * agent's own chat that start while its channel work holds the own chat.
  */
 interface Lane {
   readonly agentId: string;
   readonly taskId: string | null;
+  readonly routine?: true;
 }
+
+/** Not a task id: task ids never hold this character. */
+const ROUTINE_LANE = "\u0001routine";
 
 /** The key of a lane. The agent's own chat keeps the agent id, so its maps read as before tasks. */
 function laneKey(lane: Lane): string {
+  if (lane.routine) return `${lane.agentId}\u0000${ROUTINE_LANE}`;
   return lane.taskId === null ? lane.agentId : `${lane.agentId}\u0000${lane.taskId}`;
 }
 
 function laneOf(key: string): Lane {
   const separator = key.indexOf("\u0000");
-  return separator < 0
-    ? { agentId: key, taskId: null }
-    : { agentId: key.slice(0, separator), taskId: key.slice(separator + 1) };
+  if (separator < 0) return { agentId: key, taskId: null };
+  const agentId = key.slice(0, separator);
+  const rest = key.slice(separator + 1);
+  return rest === ROUTINE_LANE ? routineLane(agentId) : { agentId, taskId: rest };
 }
 
 const mainLane = (agentId: string): Lane => ({ agentId, taskId: null });
+const routineLane = (agentId: string): Lane => ({ agentId, taskId: null, routine: true });
 
 export interface DrainSchedulerOptions {
   store: AgentStore;
@@ -198,6 +206,8 @@ export class DrainScheduler {
    */
   readonly #startingDeliveries = new Map<AgentProvider, number>();
   readonly #scheduledDrains = new Set<string>();
+  /** The delivery that a running drain took, by lane key. Unset until the drain has chosen one. */
+  readonly #drainPicks = new Map<string, string>();
   readonly #drainTasks = new Map<string, Deferred.Deferred<void, DeliveryStartFailed>>();
 
   constructor(options: DrainSchedulerOptions) {
@@ -232,16 +242,9 @@ export class DrainScheduler {
       },
       isWaiting: (key) => {
         const lane = laneOf(key);
-        return (
-          this.#mayStartNow(lane) &&
-          this.#memory.mayDrain(lane.agentId) &&
-          this.#mailbox.nextQueued(lane.agentId, lane.taskId) !== null
-        );
+        return this.#mayStartNow(lane) && this.#memory.mayDrain(lane.agentId) && this.#laneHead(lane) !== null;
       },
-      head: (key) => {
-        const lane = laneOf(key);
-        return this.#mailbox.nextQueued(lane.agentId, lane.taskId)?.delivery ?? null;
-      },
+      head: (key) => this.#laneHead(laneOf(key))?.delivery ?? null,
     });
   }
 
@@ -250,9 +253,20 @@ export class DrainScheduler {
     return this.#heldBy(mainLane(agentId)) === null;
   }
 
-  /** The agent's own chat and its open tasks. */
+  /** The agent's own chat, its routine lane and its open tasks. */
   #lanesOf(agentId: string): Lane[] {
-    return [mainLane(agentId), ...this.#tasks.openTaskIds(agentId).map((taskId) => ({ agentId, taskId }))];
+    return [
+      mainLane(agentId),
+      routineLane(agentId),
+      ...this.#tasks.openTaskIds(agentId).map((taskId) => ({ agentId, taskId })),
+    ];
+  }
+
+  /** The next delivery that this lane would start. */
+  #laneHead(lane: Lane): DeliveryContext | null {
+    return lane.routine
+      ? this.#mailbox.nextBesideRoutine(lane.agentId)
+      : this.#mailbox.nextQueued(lane.agentId, lane.taskId);
   }
 
   /**
@@ -260,6 +274,7 @@ export class DrainScheduler {
    * with no turn ID, and its turn can still run.
    */
   #laneRunning(lane: Lane): boolean {
+    if (lane.routine) return this.#drainingLanes.has(laneKey(lane)) || this.#mailbox.besideActive(lane.agentId);
     return (
       this.#drainingLanes.has(laneKey(lane)) ||
       this.#laneTurnActive(lane) ||
@@ -267,8 +282,21 @@ export class DrainScheduler {
     );
   }
 
+  /**
+   * The routine lane reads the turn of the agent's own chat: a routine run shows there. The main lane
+   * reads the turns of the own chat and of the channel and messaging threads, except a routine run
+   * that started beside the channel work.
+   */
   #laneTurnActive(lane: Lane): boolean {
-    if (lane.taskId === null) return Boolean(this.#conversation.workingSnapshot(lane.agentId)?.activeTurnId);
+    if (lane.routine) return Boolean(this.#conversation.loadedSnapshot(lane.agentId)?.activeTurnId);
+    if (lane.taskId === null)
+      return [...this.#conversation.activeSnapshots()].some(
+        ([id, snapshot]) =>
+          id === lane.agentId &&
+          snapshot.activeTurnId &&
+          !this.#conversation.isTaskThread(snapshot.threadId) &&
+          !this.#mailbox.besideTurn(lane.agentId, snapshot.activeTurnId),
+      );
     const threadId = this.#tasks.threadId(lane.taskId);
     return this.#conversation
       .workingTaskSnapshots(lane.agentId)
@@ -292,12 +320,20 @@ export class DrainScheduler {
   /** The first clause of `mayDrain` that holds this lane, or null when none does. */
   #heldBy(lane: Lane): string | null {
     const { agentId, taskId } = lane;
+    const key = laneKey(lane);
     if (this.#settingsHolds.has(agentId)) return "session-settings";
     if (this.#laneTurnActive(lane)) return "active-turn";
+    if (lane.routine) {
+      const hold = this.#routineLaneHold(agentId);
+      if (hold) return hold;
+    } else if (taskId === null && this.#routineLaneBusy(agentId) && !this.#nextIsChannelWork(agentId))
+      // A routine run beside the channel work shows in the agent's own chat. Only channel work runs
+      // beside it; the other messages of the own chat wait for it.
+      return "routine-run";
     // The provider has one turn of the agent at a time, so each lane waits for the turn of any other.
     if (
       this.#tasks.oneTurnAtATime(agentId) &&
-      this.#lanesOf(agentId).some((other) => other.taskId !== taskId && this.#laneRunning(other))
+      this.#lanesOf(agentId).some((other) => laneKey(other) !== key && this.#laneRunning(other))
     )
       return "one-turn";
     if (taskId !== null) {
@@ -313,20 +349,56 @@ export class DrainScheduler {
     if (
       agent &&
       !this.#providers.agentClientCurrent(agent) &&
-      this.#lanesOf(agentId).some((other) => other.taskId !== taskId && this.#laneRunning(other))
+      this.#lanesOf(agentId).some((other) => laneKey(other) !== key && this.#laneRunning(other))
     )
       return "agent-client-changing";
     // A hidden agent finishes the turn that runs. Its queued messages wait until the user restores it.
     if (agent?.hiddenAt !== undefined) return "hidden";
-    // Channel work holds only the agent's own chat. Its tasks run beside a channel turn.
-    if (taskId === null && !(this.#channels?.mayDrain(agentId) ?? true)) return "channel";
+    // Channel work holds only the agent's own chat. Its tasks and the routine lane run beside a channel turn.
+    if (taskId === null && !lane.routine && !(this.#channels?.mayDrain(agentId) ?? true)) return "channel";
     if (!this.#profileSave.mayDrain(agentId)) return "profile-save";
     if (!this.#duplication.mayDrain(agentId)) return "duplication";
     if (this.#compactionHolds(lane)) return "compaction";
     if (!this.#routines.mayDrain(agentId)) return "routine";
+    // The one try that a message from the person allows at a limit stays with the main lane.
+    if (lane.routine && !this.#usageLimits.mayDrain(agentId)) return "usage-limit";
     if (!this.#usageLimits.mayDrain(agentId) && !this.#usageLimits.mayTry(agentId)) return "usage-limit";
     if (this.#usageLimits.retryHeld(agentId)) return "provider-retry";
     return null;
+  }
+
+  /**
+   * Why the routine lane cannot start a run. It runs only while channel work holds the agent's own
+   * chat, on a provider that runs turns at the same time, and never beside a turn of the own chat: a
+   * routine run shows in that chat. Every other case keeps the routine run in the main lane.
+   */
+  #routineLaneHold(agentId: string): string | null {
+    if (this.#tasks.oneTurnAtATime(agentId)) return "one-turn";
+    if (this.#mailbox.besideActive(agentId)) return "active-turn";
+    if (!this.#channels?.queueHold(agentId)) return "no-channel-work";
+    const mainKey = laneKey(mainLane(agentId));
+    const mainPick = this.#drainPicks.get(mainKey);
+    if (
+      this.#mailbox.mainLaneRunsNonChannelWork(agentId) ||
+      (this.#drainingLanes.has(mainKey) && !(mainPick && this.#isChannelDelivery(mainPick)))
+    )
+      return "chat-turn";
+    return null;
+  }
+
+  /** Whether the routine lane of this agent starts or runs a run. */
+  #routineLaneBusy(agentId: string): boolean {
+    return this.#drainingLanes.has(laneKey(routineLane(agentId))) || this.#mailbox.besideActive(agentId);
+  }
+
+  /** Whether the next delivery of the agent's main lane is channel work. */
+  #nextIsChannelWork(agentId: string): boolean {
+    const next = this.#mailbox.nextQueued(agentId);
+    return next !== null && this.#isChannelDelivery(next.delivery.id);
+  }
+
+  #isChannelDelivery(deliveryId: string): boolean {
+    return this.#channels?.store.assignmentForDelivery(deliveryId) != null;
   }
 
   /**
@@ -335,6 +407,8 @@ export class DrainScheduler {
    */
   #reportHold(lane: Lane, reason: string): void {
     const key = laneKey(lane);
+    // The main lane reports the same queue. A routine lane that waits is the normal case.
+    if (lane.routine) return;
     if (this.#reportedHolds.get(key) === reason || !this.#mailbox.nextQueued(lane.agentId, lane.taskId)) return;
     this.#reportedHolds.set(key, reason);
     const working =
@@ -376,10 +450,17 @@ export class DrainScheduler {
     }
   }
 
-  /** Schedules the agent's own chat, then each task with a message that can start. */
+  /** Schedules the agent's own chat, then its routine lane, then each task with a message that can start. */
   #scheduleDrain(agentId: string, followUsageLimit = true): void {
     if (this.#scheduleLane(mainLane(agentId), followUsageLimit)) return;
+    this.#scheduleRoutineLane(agentId);
     this.#scheduleTasks(agentId);
+  }
+
+  /** Schedules the routine lane when it has a run that could start. A move for a usage limit stays with the main lane. */
+  #scheduleRoutineLane(agentId: string): void {
+    if (this.#channels?.queueHold(agentId) && this.#mailbox.nextBesideRoutine(agentId))
+      this.#scheduleLane(routineLane(agentId), false);
   }
 
   /**
@@ -447,6 +528,7 @@ export class DrainScheduler {
     const ofAgent = (key: string) => laneOf(key).agentId === agentId;
     for (const keys of [this.#drainingLanes, this.#scheduledDrains, this.#slotWaiters])
       for (const key of [...keys]) if (ofAgent(key)) keys.delete(key);
+    for (const key of [...this.#drainPicks.keys()]) if (ofAgent(key)) this.#drainPicks.delete(key);
     for (const key of [...this.#reportedHolds.keys()]) if (ofAgent(key)) this.#reportedHolds.delete(key);
     for (const key of [...this.#turnModels.keys()]) if (ofAgent(key)) this.#turnModels.delete(key);
     this.#requeuedAtLimit.delete(agentId);
@@ -455,6 +537,7 @@ export class DrainScheduler {
 
   dispose(): void {
     this.#drainingLanes.clear();
+    this.#drainPicks.clear();
     this.#scheduledDrains.clear();
     this.#slotWaiters.clear();
     this.#reportedHolds.clear();
@@ -467,7 +550,7 @@ export class DrainScheduler {
    */
   #heldByMachine(lane: Lane): boolean {
     if (!this.#memory.mayDrain(lane.agentId)) {
-      if (this.#mailbox.nextQueued(lane.agentId, lane.taskId)) this.#memory.held(lane.agentId);
+      if (this.#laneHead(lane)) this.#memory.held(lane.agentId);
       return true;
     }
     const key = laneKey(lane);
@@ -515,7 +598,15 @@ export class DrainScheduler {
     this.#drainingLanes.add(key);
     yield* Effect.gen({ self: this }, function* () {
       if (this.#laneTurnActive(lane)) return;
+      if (lane.routine) {
+        const run = this.#mailbox.nextBesideRoutine(agentId);
+        if (!run || !this.#runsInOwnSession(run)) return;
+        this.#drainPicks.set(key, run.delivery.id);
+        yield* this.startDelivery(run, undefined, true);
+        return;
+      }
       const context = this.#mailbox.nextQueued(agentId, taskId);
+      if (context) this.#drainPicks.set(key, context.delivery.id);
       if (!context) {
         // Here, so that a message that arrives during the new chat waits for this drain to end.
         if (taskId === null) yield* this.#hooks.startRequestedNewChat(agentId);
@@ -562,8 +653,12 @@ export class DrainScheduler {
       Effect.ensuring(
         Effect.sync(() => {
           this.#drainingLanes.delete(key);
+          this.#drainPicks.delete(key);
           if (this.#requeuedAtLimit.delete(agentId) || this.#mailbox.nextQueued(agentId))
             this.#scheduleLane(mainLane(agentId));
+          // The routine lane waits for a drain of the main lane that has not chosen its delivery yet.
+          // A routine lane does not schedule itself again: the end of its run does that.
+          if (!lane.routine) this.#scheduleRoutineLane(agentId);
           // Every task too: this lane can have held another one for the task limit or the process.
           this.#scheduleTasks(agentId);
           this.retrySlotWaiters();
@@ -605,10 +700,12 @@ export class DrainScheduler {
       ),
   );
 
+  /** `beside`: a routine run of the routine lane, which starts beside the agent's channel work. */
   readonly startDelivery = Effect.fn("DrainScheduler.startDelivery")(function* (
     this: DrainScheduler,
     context: DeliveryContext,
     planNote?: string,
+    beside = false,
   ) {
     const { delivery } = context;
     const channelDelivery = this.#channels ? this.#channels.store.assignmentForDelivery(delivery.id) !== null : false;
@@ -654,7 +751,7 @@ export class DrainScheduler {
     // a plan limit belongs to the model the provider refused.
     let requestedModel: string | null = null;
     yield* Effect.gen({ self: this }, function* () {
-      for (const item of batch) yield* this.#mailbox.markStarting(item.delivery.id).pipe(toDeliveryStartFailed);
+      for (const item of batch) yield* this.#mailbox.markStarting(item.delivery.id, beside).pipe(toDeliveryStartFailed);
       this.#mailboxSync.emitQueue(delivery.recipientAgentId);
       yield* this.#mailbox.verifyDeliveryAttachments(delivery.id).pipe(toDeliveryStartFailed);
       // An answer whose attachment changed fails alone. The message that starts the turn still runs.
@@ -894,7 +991,10 @@ export class DrainScheduler {
       // event would end it, and it would hold every message of this agent.
       if (!this.#hooks.turnEnded(response.turn.id)) snapshot.activeTurnId = response.turn.id;
       confirmedTurnId = response.turn.id;
-      this.#turnModels.set(laneKey({ agentId: agent.id, taskId }), { turnId: response.turn.id, model: agent.model });
+      this.#turnModels.set(laneKey(beside ? routineLane(agent.id) : { agentId: agent.id, taskId }), {
+        turnId: response.turn.id,
+        model: agent.model,
+      });
       for (const item of batch)
         yield* this.#mailbox.markRunning(item.delivery.id, response.turn.id).pipe(toDeliveryStartFailed);
       if (this.#channels)
