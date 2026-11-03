@@ -215,6 +215,8 @@ export const messages = defineMessages("error.provider", {
   "error.provider.noneReady": "No agent provider is ready.",
   "error.provider.claudeTurnActive": "Wait for the active Claude turn before refreshing its context.",
   "error.provider.codexLoginRequired": "Codex requires a ChatGPT subscription login. Run `codex login`.",
+  "error.provider.codexProxyInvalid":
+    "OpenBot cannot use the Codex proxy file {path}. It needs a baseUrl and an apiKeyFile that holds one key.",
   "error.provider.cliUpdateFailed": "OpenBot could not update the {provider} CLI. {reason}",
   "error.provider.tryAgain": "Try again.",
   "error.provider.noAgentProcess": "{provider} has no process running for this agent.",
