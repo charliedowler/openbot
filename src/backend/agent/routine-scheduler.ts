@@ -991,7 +991,9 @@ export class RoutineScheduler implements RoutineDueSource {
 
   /**
    * `waitId` is the one open wait a script or webhook event names; null wakes every wait the run
-   * matches. With `fallback`, a name that is not a wait of this run wakes as if it were null.
+   * matches. With `fallback`, a name that is not a wait of this run wakes as if it were null, and a
+   * named channel wait that takes the event to its task ends the run without a turn in the own chat:
+   * the task reads the event and acknowledges it.
    */
   readonly #enqueueRunEffect = Effect.fn("RoutineScheduler.enqueueRun")(function* (
     this: RoutineScheduler,
@@ -1048,24 +1050,28 @@ export class RoutineScheduler implements RoutineDueSource {
           throw error;
         }
       });
-      yield* this.#waits
+      const forwarded = yield* this.#waits
         .wakeForRun(run, deliveryId, waitId, fallback)
         .pipe(Effect.mapError((cause) => new RoutineOperationFailed({ cause })));
+      const settled =
+        forwarded && (yield* this.#mailbox.completeQueuedWithoutTurn(deliveryId).pipe(toRoutineOperationFailed));
       const snapshot = yield* routineStep(() => {
         const current = this.#conversation.ensureSnapshot(agent.id, agent.threadId);
         this.#hooks.syncMailboxMessages(current);
         return current;
       });
-      // A run that ends quiet, or answers only the no-update marker, puts the earlier preview back.
-      const previous = this.#store.list().find((entry) => entry.id === agent.id)?.preview;
-      if (previous !== undefined)
-        this.#rememberPreviewBeforeRun(
-          deliveryId,
-          agent.id,
-          previous,
-          run.instruction.slice(0, AGENT_PREVIEW_MAX_LENGTH),
-        );
-      yield* this.#store.updatePreview(agent.id, run.instruction).pipe(toRoutineOperationFailed);
+      if (!settled) {
+        // A run that ends quiet, or answers only the no-update marker, puts the earlier preview back.
+        const previous = this.#store.list().find((entry) => entry.id === agent.id)?.preview;
+        if (previous !== undefined)
+          this.#rememberPreviewBeforeRun(
+            deliveryId,
+            agent.id,
+            previous,
+            run.instruction.slice(0, AGENT_PREVIEW_MAX_LENGTH),
+          );
+        yield* this.#store.updatePreview(agent.id, run.instruction).pipe(toRoutineOperationFailed);
+      }
       yield* routineStep(() => {
         this.#hooks.emit({ type: "agents-changed", agents: this.#hooks.listAgents() });
         this.#conversation.emitConversation(snapshot, "routine.run-queued", {
@@ -1075,7 +1081,11 @@ export class RoutineScheduler implements RoutineDueSource {
         this.#hooks.emitQueue(agent.id);
         this.#hooks.scheduleDrain(agent.id);
       });
-      return queued;
+      if (!settled) return queued;
+      return yield* routineStep(() => {
+        const current = this.#routines.runForDelivery(deliveryId) ?? queued;
+        return current.status === "succeeded" ? current : this.#transitionRunWithConversation(current, "succeeded");
+      });
     }).pipe(
       Effect.tapError((failure) =>
         routineStep(() => {
