@@ -23,7 +23,7 @@ import type { EventRoutine } from "@openbot/contracts/ipc-events";
 import { type DynamicRecord, isBoolean } from "@openbot/contracts/runtime-values";
 import { sourceText } from "@openbot/i18n/source";
 import { collapseMissedOccurrences, RoutineInputError } from "@openbot/team-client/routine-schedule";
-import { Effect, Schema } from "effect";
+import { Effect, Fiber, Schema, Scope, Semaphore } from "effect";
 import { AgentRoutineStore } from "../agent-routine-store";
 import { AGENT_PREVIEW_MAX_LENGTH, type AgentStore } from "../agent-store";
 import type { AgentWaits } from "../agent-waits/agent-waits";
@@ -127,6 +127,8 @@ export interface RoutineSchedulerOptions {
   timezone?: () => string;
   /** Built after the service, so read when a tool call needs it. Omitted, the tool refuses. */
   webhookRoutines?: (() => WebhookRoutineWriter) | undefined;
+  /** Owns the webhook runs that queue their delivery after the sender has its answer. Omitted, a scope of its own. */
+  scope?: (() => Scope.Scope) | undefined;
 }
 
 /** The agent preview before a routine run, and the routine task the run showed in its place. */
@@ -177,6 +179,10 @@ export class RoutineScheduler implements RoutineDueSource {
    * restart, the preview keeps the task. Past the cap, the oldest entry goes.
    */
   readonly #previewsBeforeRun = new Map<string, RoutinePreviewBeforeRun & { agentId: string }>();
+  readonly #scope: () => Scope.Scope;
+  /** Webhook runs whose delivery is still being queued. They queue one at a time, in the order the requests came. */
+  readonly #webhookRuns = new Set<Fiber.Fiber<void>>();
+  readonly #webhookRunOrder = Semaphore.makeUnsafe(1);
 
   constructor(options: RoutineSchedulerOptions) {
     this.#store = options.store;
@@ -188,6 +194,8 @@ export class RoutineScheduler implements RoutineDueSource {
     this.#waits = options.waits;
     this.#timezone = options.timezone ?? localTimezone;
     this.#webhookRoutines = options.webhookRoutines;
+    const ownScope = Scope.makeUnsafe();
+    this.#scope = options.scope ?? (() => ownScope);
   }
 
   noteDeliveryTimezone(deliveryId: string, timezone: string): void {
@@ -375,7 +383,9 @@ export class RoutineScheduler implements RoutineDueSource {
 
   /**
    * Starts a run for one verified webhook request. An agent that is held or being deleted is
-   * unavailable, so the sender retries later and nothing is written.
+   * unavailable, so the sender retries later and nothing is written. The sender gets its answer when
+   * the run is saved, and the delivery is queued after that: Signal waits 2.5 seconds for the answer,
+   * and a busy host can take longer to queue. A restart before the delivery is queued resumes the run.
    */
   readonly receiveWebhook = Effect.fn("RoutineScheduler.receiveWebhook")(function* (
     this: RoutineScheduler,
@@ -386,15 +396,27 @@ export class RoutineScheduler implements RoutineDueSource {
     if (!this.mayDrain(agentId)) return { kind: "unavailable" } as const;
     const result = yield* routineStep(() => this.#routines.receiveWebhook(agentId, routineId, event));
     if (result.kind === "started") {
-      yield* this.#enqueueRunEffect(result.run, event.waitId ?? null, true).pipe(
-        Effect.catch((failure) =>
-          Effect.sync(() => this.#hooks.emitError("routine_delivery_failed", failure.cause, agentId)),
-        ),
-      );
+      const fiber = yield* this.#webhookRunOrder
+        .withPermit(this.#enqueueRunEffect(result.run, event.waitId ?? null, true))
+        .pipe(
+          Effect.catch((failure) =>
+            Effect.sync(() => this.#hooks.emitError("routine_delivery_failed", failure.cause, agentId)),
+          ),
+          Effect.ensuring(Effect.sync(() => this.stateChanged(agentId))),
+          Effect.asVoid,
+          Effect.forkIn(this.#scope()),
+        );
+      this.#webhookRuns.add(fiber);
+      fiber.addObserver(() => this.#webhookRuns.delete(fiber));
     }
     yield* routineStep(() => this.stateChanged(agentId));
     return result;
   }, Effect.uninterruptible);
+
+  /** The webhook runs that still queue their delivery, so a stop can let them finish. */
+  pendingWebhookRuns(): Effect.Effect<void>[] {
+    return [...this.#webhookRuns].map((fiber) => Effect.asVoid(Fiber.await(fiber)));
+  }
 
   readonly delete = Effect.fn("RoutineScheduler.delete")(function* (
     this: RoutineScheduler,

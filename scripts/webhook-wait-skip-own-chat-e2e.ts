@@ -286,6 +286,7 @@ class Harness {
       ...(waitId === undefined ? {} : { waitId }),
     };
     const result = await runCauseEffect(this.scheduler.receiveWebhook(agentId, routineId, event));
+    await runCauseEffect(Effect.all(this.scheduler.pendingWebhookRuns()));
     assert.equal(result.kind, "started");
     assert.ok(result.kind === "started" && result.run);
     const run = this.scheduler.listRuns({ agentId, routineId, limit: 50 }).find((item) => item.id === result.run.id);

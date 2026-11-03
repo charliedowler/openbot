@@ -672,6 +672,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     this.#routines = new RoutineScheduler({
       timer: this.#routineTimer,
       waits: this.#waits,
+      scope: () => this.#scope,
       ...(options.timezone ? { timezone: options.timezone } : {}),
       webhookRoutines: options.webhookRoutines,
       store,
@@ -4154,6 +4155,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
   readonly stop = Effect.fn("AgentService.stop")(function* (this: AgentService) {
     this.#stopping = true;
     yield* this.#memoryReview.dispose();
+    yield* settleLifecycleTasks("finish webhook runs", this.#routines.pendingWebhookRuns());
     const channelStop = yield* Effect.forkChild(
       this.channels
         .stop()
