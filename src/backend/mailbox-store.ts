@@ -258,6 +258,11 @@ export class MailboxStore {
   readonly #files: AttachmentFiles;
   readonly #database: OpenBotDatabase;
   readonly #queueUpdates = new Set<string>();
+  /**
+   * Routine runs of an agent's own chat that started beside its channel work, by delivery id. They
+   * are not part of the main lane while they start or run. Only in memory: a restart ends the run.
+   */
+  readonly #besideDeliveries = new Set<string>();
   readonly #deliveryGate = new MailboxDeliveryGate();
   readonly #stagedGeneratedAttachments = new Map<string, StoredGeneratedAttachment>();
   #state: StoredState = structuredClone(EMPTY_STATE);
@@ -947,8 +952,66 @@ export class MailboxStore {
       (delivery) =>
         delivery.recipientAgentId === agentId &&
         (delivery.status === "starting" || delivery.status === "running") &&
-        this.#taskIdOf(delivery) === taskId,
+        this.#taskIdOf(delivery) === taskId &&
+        !(taskId === null && this.#besideDeliveries.has(delivery.id)),
     );
+  }
+
+  /** Whether a routine run of this agent's own chat starts or runs beside its channel work. */
+  besideActive(agentId: string): boolean {
+    return this.#state.deliveries.some(
+      (delivery) =>
+        delivery.recipientAgentId === agentId &&
+        (delivery.status === "starting" || delivery.status === "running") &&
+        this.#besideDeliveries.has(delivery.id),
+    );
+  }
+
+  /** Whether this turn is the turn of a routine run beside the agent's channel work. */
+  besideTurn(agentId: string, turnId: string): boolean {
+    return this.#state.deliveries.some(
+      (delivery) =>
+        delivery.recipientAgentId === agentId &&
+        delivery.turnId === turnId &&
+        (delivery.status === "starting" || delivery.status === "running") &&
+        this.#besideDeliveries.has(delivery.id),
+    );
+  }
+
+  /** Whether the main lane of this agent starts or runs a delivery that is not channel work. */
+  mainLaneRunsNonChannelWork(agentId: string): boolean {
+    const messages = this.#messagesById();
+    return this.#state.deliveries.some(
+      (delivery) =>
+        delivery.recipientAgentId === agentId &&
+        (delivery.status === "starting" || delivery.status === "running") &&
+        !this.#besideDeliveries.has(delivery.id) &&
+        this.#taskIdOf(delivery, messages) === null &&
+        !messages.get(delivery.messageId)?.channelId,
+    );
+  }
+
+  /**
+   * The routine run that can start beside the agent's channel work, or null. It is the oldest queued
+   * message of the agent's own chat (channel and messaging work excepted), so it never passes a
+   * message of the person or of a teammate. A plan continuation or a continuation after a usage limit
+   * keeps its place in the main lane.
+   */
+  nextBesideRoutine(agentId: string): DeliveryContext | null {
+    if (this.besideActive(agentId)) return null;
+    const messages = this.#messagesById();
+    const head = this.#queuedFor(agentId).find((candidate) => {
+      const message = messages.get(candidate.messageId);
+      return (
+        this.#taskIdOf(candidate, messages) === null &&
+        !message?.channelId &&
+        !message?.messaging &&
+        !this.#isHeldReply(candidate)
+      );
+    });
+    if (!head || head.planContinuation || head.resumeAfterUsageLimit || !this.#mayStart(head)) return null;
+    if (messages.get(head.messageId)?.sender.kind !== "routine") return null;
+    return this.#context(head, undefined, messages);
   }
 
   /** The queued deliveries of one lane, without those that wait for their automatic plan continuation. */
@@ -2051,13 +2114,18 @@ export class MailboxStore {
     });
   }
 
+  /** `beside`: a routine run that starts beside the agent's channel work, outside the main lane. */
   markStarting = Effect.fn("MailboxStore.markStarting")(function* (
     this: MailboxStore,
     deliveryId: string,
+    beside = false,
   ): Effect.fn.Return<void, StoredStateFailure> {
     try {
       this.#assertQueueNotEditing(deliveryId);
       this.#clearSteerFallback(deliveryId);
+      const queued = this.#state.deliveries.find((candidate) => candidate.id === deliveryId)?.status === "queued";
+      if (beside && queued) this.#besideDeliveries.add(deliveryId);
+      else if (queued) this.#besideDeliveries.delete(deliveryId);
       yield* this.#updateDeliveryEffect(deliveryId, ["queued"], { status: "starting", error: null });
     } catch (cause) {
       return yield* new StoredStateFailure({ cause });
@@ -2517,6 +2585,7 @@ export class MailboxStore {
     try {
       this.#assertQueueNotEditing(deliveryId);
       this.#clearSteerFallback(deliveryId);
+      this.#besideDeliveries.delete(deliveryId);
       yield* this.#updateDeliveryEffect(deliveryId, ["queued"], {
         status: "starting",
         turnId,
@@ -2545,6 +2614,7 @@ export class MailboxStore {
       }
       Object.assign(delivery, { status: "queued", turnId: null, error: null });
       delete delivery.steeredAt;
+      this.#besideDeliveries.delete(delivery.id);
       this.#changes.deliveryIds.add(delivery.id);
       this.#persist("delivery.updated");
     } catch (cause) {
@@ -3182,6 +3252,8 @@ export class MailboxStore {
       if (!allowed.includes(delivery.status)) return;
       Object.assign(delivery, patch);
       if (patch.status === "queued") delete delivery.steeredAt;
+      if (patch.status !== undefined && patch.status !== "starting" && patch.status !== "running")
+        this.#besideDeliveries.delete(id);
       this.#changes.deliveryIds.add(delivery.id);
       this.#persist("delivery.updated");
     } catch (cause) {

@@ -318,7 +318,13 @@ Channel work holds only the agent that does it. An agent runs one main-lane turn
 a channel delivery or a messaging delivery. While the agent has an active assignment,
 `ChannelService.mayDrain` holds its other main-lane requests. The work of other agents does not hold
 it. The tasks of the agent run beside the channel turn within the agent task limit, and a channel
-turn takes no task slot. When the provider of the agent runs one turn at a time (`concurrentTurns:
+turn takes no task slot. The routine lane of `DrainScheduler` starts a routine run of the agent's own
+chat beside its channel work when the run is the oldest queued message of the own chat (channel and
+messaging work excepted) and the provider runs turns at the same time. The run has its own provider
+session (see [Routine sessions](agents.md#routine-sessions)) and shows in the own chat, so it waits
+for a turn of the own chat, and the own chat's other messages wait for it. The other holds of the
+agent (compaction, usage limit, a changing provider process, memory and turn slots) hold the routine
+lane too. A new channel task still waits while a turn of the own chat runs (`busy`). When the provider of the agent runs one turn at a time (`concurrentTurns:
 false`), its task turns count as busy. Only declared `browser` and `workspace:<path>` resources are
 serialized: the same browser, or two workspaces where one path contains the other. An empty list,
 `none`, and `host` (from an earlier version) reserve nothing. An assignment keeps the resources it
