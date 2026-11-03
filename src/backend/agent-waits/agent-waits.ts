@@ -105,15 +105,17 @@ export class AgentWaits {
    * routine or has this routine. With `fallback`, as for a signed webhook request, a named wait
    * that this run would wake is the only one it wakes, and any other name wakes as if unnamed, so
    * a sender only narrows the waits a run wakes. A wait whose last wake has not ended yet stays
-   * with that run.
+   * with that run. Returns whether, with `fallback`, the named channel wait alone took the event to
+   * its task.
    */
   wakeForRun(
     run: { agentId: string; routineId: string },
     deliveryId: string,
     waitId: string | null,
     fallback = false,
-  ): Effect.Effect<void, AgentWaitError> {
+  ): Effect.Effect<boolean, AgentWaitError> {
     return Effect.gen({ self: this }, function* () {
+      let forwarded = false;
       const named = waitId ? this.#store.get(run.agentId, waitId) : null;
       const runWaits = () => this.#store.forRoutineRun(run.agentId, run.routineId);
       const candidates = !waitId
@@ -130,18 +132,21 @@ export class AgentWaits {
         if (wait.id.startsWith("channel:")) {
           const state = this.#hooks.channelWaitState?.(wait) ?? "stale";
           if (state !== "stale" && this.#hooks.channelWaitEventHandled?.(wait, deliveryId)) continue;
+          if (state === "running" && this.#holdsEventWithoutTurn(wait)) continue;
           if (state === "stale") {
             this.#store.delete(run.agentId, wait.id);
           } else if (state === "running") {
             this.#store.markWoken(run.agentId, [wait.id], deliveryId);
           } else {
-            yield* this.#resumeChannelWait(wait, deliveryId);
+            const resumed = yield* this.#resumeChannelWait(wait, deliveryId);
+            forwarded = resumed && fallback && wait.id === waitId;
           }
         } else {
           this.#store.markWoken(run.agentId, [wait.id], deliveryId);
         }
         this.#changed(run.agentId);
       }
+      return forwarded;
     });
   }
 
@@ -188,12 +193,24 @@ export class AgentWaits {
     });
   }
 
-  #resumeChannelWait(wait: AgentWait, sourceDeliveryId: string): Effect.Effect<void, AgentWaitError> {
+  #resumeChannelWait(wait: AgentWait, sourceDeliveryId: string): Effect.Effect<boolean, AgentWaitError> {
     return Effect.gen({ self: this }, function* () {
       this.#store.markWoken(wait.agentId, [wait.id], sourceDeliveryId);
       const resumed = yield* this.#hooks.resumeChannelWait?.(wait, sourceDeliveryId) ?? Effect.succeed(false);
       if (!resumed) this.#store.delete(wait.agentId, wait.id);
+      return resumed;
     });
+  }
+
+  #holdsEventWithoutTurn(wait: AgentWait): boolean {
+    const source = wait.wakeDeliveryId ? this.#mailbox.getDelivery(wait.wakeDeliveryId) : null;
+    return (
+      source !== null &&
+      !source.channelId &&
+      source.delivery.sender.kind === "routine" &&
+      source.delivery.status === "completed" &&
+      source.delivery.turnId === null
+    );
   }
 
   channelWakeInput(assignment: ChannelAssignment): { text: string; waitIds: string[] } | null {

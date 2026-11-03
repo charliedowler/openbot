@@ -2115,6 +2115,21 @@ export class MailboxStore {
     }
   }, Effect.uninterruptible).bind(this);
 
+  completeQueuedWithoutTurn = Effect.fn("MailboxStore.completeQueuedWithoutTurn")(function* (
+    this: MailboxStore,
+    deliveryId: string,
+  ): Effect.fn.Return<boolean, StoredStateFailure> {
+    try {
+      const delivery = this.#state.deliveries.find((candidate) => candidate.id === deliveryId);
+      if (delivery?.status !== "queued" || !this.#mayStart(delivery)) return false;
+      this.#clearSteerFallback(deliveryId);
+      yield* this.#updateDeliveryEffect(deliveryId, ["queued"], { status: "completed", error: null });
+      return true;
+    } catch (cause) {
+      return yield* new StoredStateFailure({ cause });
+    }
+  }, Effect.uninterruptible).bind(this);
+
   cancel = Effect.fn("MailboxStore.cancel")(function* (
     this: MailboxStore,
     agentId: string,
