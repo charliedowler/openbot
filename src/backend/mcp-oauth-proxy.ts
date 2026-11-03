@@ -21,6 +21,12 @@ const POST_HEADER_TIMEOUT_MS = 5 * 60_000;
 /** A GET opens a stream and a DELETE ends a session; both answer at once when the server is up. */
 const OTHER_HEADER_TIMEOUT_MS = 30_000;
 const MAX_REDIRECTS = 3;
+/**
+ * The provider's pool ends an idle connection; the proxy never does. Node would end one after five
+ * quiet seconds, and Codex 0.166 then writes its next request into the closed socket and reports
+ * "error sending request" to the agent.
+ */
+const IDLE_CONNECTION_TIMEOUT_MS = 0;
 /** The JSON-RPC code that MCP servers use for a request they refuse without a sign-in. */
 const SIGN_IN_NEEDED_CODE = -32001;
 /** An `initialize` request is small. A larger body goes through as it is. */
@@ -187,6 +193,7 @@ export class McpOAuthProxy {
       const server = createServer((request, response) => {
         void runCauseEffect(this.#handle(request, response));
       });
+      server.keepAliveTimeout = IDLE_CONNECTION_TIMEOUT_MS;
       let transferred = false;
       const failed = (cause: Error) => resume(Effect.fail(new McpOperationError({ cause })));
       server.once("error", failed);
