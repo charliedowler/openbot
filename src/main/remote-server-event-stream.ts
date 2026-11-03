@@ -53,8 +53,10 @@ const REMOTE_EVENT_RECONNECT_MAX_MS = 60_000;
 const REMOTE_EVENT_RECONNECT_JITTER = 0.2;
 // Signal said the host is not connected. The account directory keeps hosts that went away for good,
 // so a one-minute retry ran all day against them, and each retry spent a Signal ticket. An offline
-// host retries each five minutes while an app window has focus, and each fifteen minutes without
-// focus. Focus and a manual retry still retry at once.
+// host retries after fifteen seconds, and the delay doubles up to five minutes while an app window
+// has focus, and up to fifteen minutes without focus. A connect starts the delay again. Focus and a
+// manual retry still retry at once.
+const REMOTE_HOST_OFFLINE_FIRST_RETRY_MS = 15_000;
 const REMOTE_HOST_OFFLINE_RETRY_MS = 5 * 60_000;
 const REMOTE_HOST_OFFLINE_UNFOCUSED_RETRY_MS = 15 * 60_000;
 // A hosted server that starts after a wake request comes online in about a minute. It retries at
@@ -435,7 +437,7 @@ export class RemoteEventStream {
     const offlineDelay = this.#appFocused ? REMOTE_HOST_OFFLINE_RETRY_MS : REMOTE_HOST_OFFLINE_UNFOCUSED_RETRY_MS;
     const maximumDelay = hostOffline ? offlineDelay : REMOTE_EVENT_RECONNECT_MAX_MS;
     const exponentialDelay = hostOffline
-      ? offlineDelay
+      ? Math.min(offlineDelay, REMOTE_HOST_OFFLINE_FIRST_RETRY_MS * 2 ** (attempt - 1))
       : Math.min(REMOTE_EVENT_RECONNECT_MAX_MS, REMOTE_EVENT_RECONNECT_BASE_MS * 2 ** (attempt - 1));
     const jitter = exponentialDelay * REMOTE_EVENT_RECONNECT_JITTER * (Math.random() * 2 - 1);
     const delay = this.#startingHosts.has(serverId)
