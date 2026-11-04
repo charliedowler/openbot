@@ -42,9 +42,10 @@ export class TurnSlots {
     if (!head) return true;
     let ahead = 0;
     for (const other of lanes) {
-      if (other === lane || this.#options.isRunning(other) || !this.#options.isWaiting(other)) continue;
+      if (other === lane) continue;
       const otherHead = this.#options.head(other);
-      if (otherHead && startsBefore(otherHead, other, head, lane)) ahead += 1;
+      if (!otherHead || !startsBefore(otherHead, other, head, lane)) continue;
+      if (!this.#options.isRunning(other) && this.#options.isWaiting(other)) ahead += 1;
     }
     return ahead < free;
   }
