@@ -263,6 +263,8 @@ export const messages = {
   "chat.newMessages.jump": { one: "Ir para {count} nova mensagem", other: "Ir para {count} novas mensagens" },
   "chat.newMessages.scrollToLatest": "Rolar até a mensagem mais recente",
   "chat.newMessages.dismiss": "Dispensar contagem de novas mensagens",
+  "chat.routineEvent.hide": "Ocultar o texto completo",
+  "chat.routineEvent.show": "Mostrar o texto completo",
   "chat.reply.showOriginal": "Mostrar a mensagem original",
   "chat.reply.originalUnavailable": "Mensagem original indisponível",
   "chat.reply.back": "Voltar à resposta",

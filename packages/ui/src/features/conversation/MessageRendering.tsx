@@ -408,12 +408,15 @@ export function MessageBody(props: {
       ? standaloneAttachments().filter((attachment) => !isLightboxImage(attachment))
       : standaloneAttachments(),
   );
+  const [routineEventOpen, setRoutineEventOpen] = createSignal(false);
+  const routineEventLine = () =>
+    props.message.routineEvent && !routineEventOpen() ? props.message.routineEvent.summary : null;
   const contentBlocks = createMemo<MessageContentBlock[]>((previous) =>
     reuseUnchangedBlocks(
       previous ?? [],
       props.message.author === "agent"
         ? sharedContentBlocks(streamedBody(), streamingBody.revealing())
-        : [{ type: "text", text: selectionInstruction()?.instruction ?? props.message.body }],
+        : [{ type: "text", text: routineEventLine() ?? selectionInstruction()?.instruction ?? props.message.body }],
     ),
   );
   const textTailAfter = createMemo(
@@ -645,6 +648,17 @@ export function MessageBody(props: {
               </For>
               <Show when={selectionInstruction()}>
                 {(selection) => <blockquote class="message-selection-quote">{selection().quote}</blockquote>}
+              </Show>
+              <Show when={props.message.routineEvent}>
+                <Button
+                  variant="ghost"
+                  type="button"
+                  class="message-routine-event-toggle"
+                  aria-expanded={routineEventOpen() ? "true" : "false"}
+                  onClick={() => setRoutineEventOpen((open) => !open)}
+                >
+                  {routineEventOpen() ? t("chat.routineEvent.hide") : t("chat.routineEvent.show")}
+                </Button>
               </Show>
             </Show>
           </StreamingRevealContext>

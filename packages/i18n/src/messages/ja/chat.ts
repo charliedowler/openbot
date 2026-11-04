@@ -249,6 +249,8 @@ export const messages = {
   "chat.newMessages.jump": { other: "{count} 件の新しいメッセージに移動" },
   "chat.newMessages.scrollToLatest": "最新のメッセージまでスクロール",
   "chat.newMessages.dismiss": "新しいメッセージの件数を閉じる",
+  "chat.routineEvent.hide": "全文を隠す",
+  "chat.routineEvent.show": "全文を表示",
   "chat.reply.showOriginal": "元のメッセージを表示",
   "chat.reply.originalUnavailable": "元のメッセージは利用できません",
   "chat.reply.back": "返信に戻る",

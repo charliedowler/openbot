@@ -257,6 +257,8 @@ export const messages = {
   "chat.newMessages.jump": { one: "跳到 {count} 条新消息", other: "跳到 {count} 条新消息" },
   "chat.newMessages.scrollToLatest": "滚动到最新消息",
   "chat.newMessages.dismiss": "关闭新消息计数",
+  "chat.routineEvent.hide": "隐藏全文",
+  "chat.routineEvent.show": "显示全文",
   "chat.reply.showOriginal": "查看原消息",
   "chat.reply.originalUnavailable": "原消息不可用",
   "chat.reply.back": "回到回复",

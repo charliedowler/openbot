@@ -278,6 +278,8 @@ export const messages = {
   },
   "chat.newMessages.scrollToLatest": "Ir al último mensaje",
   "chat.newMessages.dismiss": "Ocultar contador de mensajes nuevos",
+  "chat.routineEvent.hide": "Ocultar el texto completo",
+  "chat.routineEvent.show": "Mostrar el texto completo",
   "chat.reply.showOriginal": "Mostrar el mensaje original",
   "chat.reply.originalUnavailable": "Mensaje original no disponible",
   "chat.reply.back": "Volver a la respuesta",
