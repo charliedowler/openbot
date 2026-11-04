@@ -143,8 +143,8 @@ type ReceivedDelivery = WebhookReceiveResult<unknown> | WorkflowWebhookResult | 
 function deliveryStatus(result: ReceivedDelivery) {
   switch (result.kind) {
     case "started":
-    case "ignored":
       return 202;
+    case "ignored":
     case "duplicate":
       return 200;
     case "gone":
