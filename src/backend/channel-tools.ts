@@ -76,7 +76,7 @@ export const CHANNEL_TOOL_DEFINITIONS: readonly { name: string; description: str
   {
     name: "channel_close_task",
     description:
-      "Close a stopped or failed task of this channel, with the stopped tasks under it, when it needs no more work. The tasks end as cancelled, and the channel shows a note with your reason. Only the channel lead can close a task. You cannot close a task that runs or that has active work under it.",
+      "Close a stopped or failed task of this channel, or a waiting task that has no open wait, with the stopped tasks under it, when it needs no more work. The tasks end as cancelled, and the channel shows a note with your reason. A task that waits for a closed task continues and reads it as cancelled. Only the channel lead can close a task. You cannot close a task that runs, that has an open wait, or that has active work under it.",
     shape: {
       taskId: z.string().min(1).max(INPUT_LIMITS.identifier),
       reason: z.string().min(1).max(500).describe("One short sentence that tells why the task needs no more work."),

@@ -2313,6 +2313,15 @@ export class ChannelService {
           );
         }
       }
+      if (!archived.has(channelId)) {
+        const current = yield* channelSync(() => this.store.tasks(channelId));
+        const stranded = current.flatMap((task) => {
+          const settled = this.#settleWaitingTask(channelId, current, task);
+          return settled ? [settled] : [];
+        });
+        if (stranded.length)
+          yield* channelSync(() => this.store.update(this.store.get(channelId), { tasks: stranded }));
+      }
       // A stop in older versions gave no reason, so the task showed no way to continue it. An archive
       // also pauses with no reason, so only a channel that is not archived gets the stop reason.
       if (!archived.has(channelId)) {
@@ -2537,6 +2546,50 @@ export class ChannelService {
     if (!origin || (origin.task.state !== "waiting" && origin.task.state !== "queued")) return;
     this.store.update(origin.channel, { tasks: [{ ...origin.task, state: "paused" }] });
     this.publish(origin.channel.id);
+  }
+
+  eventWaitClosed(wait: AgentWait): void {
+    const origin = this.#eventWaitOrigin(wait);
+    if (origin?.task.state !== "waiting") return;
+    const settled = this.#settleWaitingTask(origin.channel.id, this.store.tasks(origin.channel.id), origin.task);
+    if (!settled) return;
+    this.store.update(origin.channel, { tasks: [settled] });
+    this.publish(origin.channel.id);
+    if (settled.state === "queued") this.#dispatchEvent(this.wake(origin.channel.id));
+  }
+
+  #hasOpenWait(channelId: string, task: ChannelTask): boolean {
+    return this.store
+      .assignments(channelId)
+      .some(
+        (item) =>
+          item.taskId === task.id &&
+          item.taskRevision === task.revision &&
+          item.deliveryId !== null &&
+          this.hooks.waitingForEvent?.(item.deliveryId) === true,
+      );
+  }
+
+  #waitsWithoutWait(channelId: string, task: ChannelTask): boolean {
+    return (
+      task.state === "waiting" &&
+      !this.#hasOpenWait(channelId, task) &&
+      !this.store.assignments(channelId).some((item) => item.taskId === task.id && activeAssignment(item))
+    );
+  }
+
+  #settleWaitingTask(channelId: string, tasks: readonly ChannelTask[], task: ChannelTask): ChannelTask | null {
+    if (!this.#waitsWithoutWait(channelId, task)) return null;
+    const byId = new Map(tasks.map((item) => [item.id, item]));
+    if (task.dependencies.some((id) => !resolvedDependency(byId.get(id)))) return null;
+    const last = this.store
+      .assignments(channelId)
+      .filter((item) => item.taskId === task.id && item.taskRevision === task.revision)
+      .at(-1);
+    const awaitsChildren = task.dependencies.some((id) => !last?.awaitedTaskIds.includes(id));
+    return awaitsChildren
+      ? { ...task, state: "queued", revision: task.revision + 1, error: null }
+      : { ...task, state: "paused", error: sourceText("error.backend.channelTaskStopped") };
   }
 
   readonly resumeEventWait = Effect.fn("ChannelService.resumeEventWait")(function* (
@@ -3247,7 +3300,7 @@ export class ChannelService {
     const receipt = `${agentId}:${operationId}`;
     if ((yield* channelSync(() => this.store.database.commandResult(`channels:${receipt}`))) !== undefined)
       return { accepted: true };
-    const outcome: { refusal?: string } = {};
+    const outcome: { refusal?: string; wake?: boolean } = {};
     yield* this.#serialize(
       channelId,
       Effect.gen({ self: this }, function* () {
@@ -3262,8 +3315,17 @@ export class ChannelService {
           outcome.refusal = "No task of this channel has that taskId.";
           return;
         }
-        if (target.state !== "paused" && target.state !== "failed") {
-          outcome.refusal = `The task is ${target.state}. Only a stopped or failed task can be resumed or closed.`;
+        const idle = (item: ChannelTask) =>
+          item.state === "paused" || item.state === "failed" || this.#waitsWithoutWait(channelId, item);
+        if (tool === "channel_resume_task" && target.state !== "paused" && target.state !== "failed") {
+          outcome.refusal = `The task is ${target.state}. Only a stopped or failed task can be resumed.`;
+          return;
+        }
+        if (tool === "channel_close_task" && !idle(target)) {
+          outcome.refusal =
+            target.state === "waiting"
+              ? "The task is waiting with an open wait or a running turn. Wait until it ends, or close its wait first."
+              : `The task is ${target.state}. Only a stopped or failed task, or a waiting task with no open wait, can be closed.`;
           return;
         }
         const branch = descendants(tasks, target.id);
@@ -3288,18 +3350,21 @@ export class ChannelService {
           outcome.refusal = "Only the channel lead can close a task.";
           return;
         }
-        if (branch.some((item) => item.state !== "paused" && item.state !== "failed")) {
+        const open = branch.filter((item) => !terminal(item));
+        if (open.some((item) => !idle(item))) {
           outcome.refusal = "A task under it is still active. Wait until it ends, then close the task.";
           return;
         }
-        const closed = new Set(branch.map((item) => item.id));
-        const dependent = tasks.find(
-          (item) => !closed.has(item.id) && !terminal(item) && item.dependencies.some((id) => closed.has(id)),
+        const closed = new Set(open.map((item) => item.id));
+        const cancelled = open.map(
+          (item): ChannelTask => ({ ...item, state: "cancelled", revision: item.revision + 1, error: null }),
         );
-        if (dependent) {
-          outcome.refusal = `Task ${dependent.id} waits for this task. Resume or close that task instead.`;
-          return;
-        }
+        const after = tasks.map((item) => cancelled.find((change) => change.id === item.id) ?? item);
+        const woken = after.flatMap((item) => {
+          if (closed.has(item.id) || !item.dependencies.some((id) => closed.has(id))) return [];
+          const settled = this.#settleWaitingTask(channelId, after, item);
+          return settled?.state === "queued" ? [settled] : [];
+        });
         const note = this.message(
           channelId,
           target.id,
@@ -3312,18 +3377,18 @@ export class ChannelService {
           this.store.update(
             channel,
             {
-              tasks: branch.map(
-                (item): ChannelTask => ({ ...item, state: "cancelled", revision: item.revision + 1, error: null }),
-              ),
+              tasks: [...cancelled, ...woken],
               messages: [{ ...note, message: { ...note.message, source: "system" } }],
             },
             receipt,
           ),
         );
         this.publish(channelId);
+        if (woken.length) outcome.wake = true;
       }),
     );
     if (outcome.refusal) return yield* channelFailure(new ChannelToolInputError(outcome.refusal));
+    if (outcome.wake) yield* this.wake(channelId);
     return tool === "channel_resume_task"
       ? { accepted: true, state: "queued" }
       : { accepted: true, state: "cancelled" };
@@ -4117,7 +4182,7 @@ function channelResultId(assignment: ChannelAssignment): string {
  * question, so the caller continues without the answer instead of waiting for a person.
  */
 function settled(task: ChannelTask, state: string = task.state): boolean {
-  return state === "completed" || (state === "failed" && isReplyTask(task));
+  return state === "completed" || state === "cancelled" || (state === "failed" && isReplyTask(task));
 }
 
 /**
@@ -4146,6 +4211,9 @@ function isStopNotice(task: ChannelTask): boolean {
 
 function terminal(task: ChannelTask): boolean {
   return task.state === "completed" || task.state === "cancelled";
+}
+function resolvedDependency(task: ChannelTask | undefined): boolean {
+  return task !== undefined && settled(task);
 }
 /** The states in which an assignment still holds the host. */
 const ACTIVE_ASSIGNMENT_STATES: readonly ChannelAssignment["state"][] = ["starting", "running", "queued"];
