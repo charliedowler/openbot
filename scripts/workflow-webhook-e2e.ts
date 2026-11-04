@@ -238,7 +238,7 @@ try {
   check(
     "a busy workflow accepts the request and starts no run",
     statuses.gatedFirst === 202 &&
-      statuses.gatedBusy === 202 &&
+      statuses.gatedBusy === 200 &&
       gatedRuns.length === 1 &&
       gatedRuns[0]?.run.status === "approval",
     { statuses, runs: gatedRuns.map(({ run }) => run) },
@@ -272,7 +272,7 @@ try {
   statuses.refused = (await deliver(filedRoute, filedSecret.secret, "file-1")).status;
   check(
     "a graph that cannot run accepts the request and starts no run",
-    statuses.refused === 202 && (await runsOf(filed.summary.id)).length === 0,
+    statuses.refused === 200 && (await runsOf(filed.summary.id)).length === 0,
     statuses,
   );
   const refusedReceipt = database.connection

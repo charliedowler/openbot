@@ -119,8 +119,8 @@ if (response.status !== 200 && response.status !== 202) {
 
 | Status | Meaning | Retry |
 | --- | --- | --- |
-| `202` | The host saved the event. The routine started, or the host ignored the event because the event type or a filter did not match, or because the routine is paused. | No |
-| `200` | The routine already has this delivery ID. | No |
+| `202` | The host saved the event and the routine started a run. | No |
+| `200` | The host saved the event and started no run. The event type or a filter did not match, the routine is paused, or the routine already has this delivery ID. | No |
 | `400` | The body is not valid. | No. Correct the body. |
 | `401` | A header or the signature is not valid, or the timestamp is not within 5 minutes of the host clock. | No. Correct the secret, the headers, or the clock. |
 | `404` | The host does not know the route. | No |

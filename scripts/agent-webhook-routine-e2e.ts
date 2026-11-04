@@ -472,7 +472,7 @@ try {
   const latest = await Effect.runPromise(events.listActivity({ owner, routineId: result.routineId }));
   pass(
     "The same secret still signs, and a request outside the new filter is ignored",
-    outside.status === 202 && latest[0]?.status === "ignored" && latest[0]?.reason === "filter",
+    outside.status === 200 && latest[0]?.status === "ignored" && latest[0]?.reason === "filter",
   );
   report.passed = true;
 } catch (error) {
