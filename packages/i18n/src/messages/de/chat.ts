@@ -283,6 +283,8 @@ export const messages = {
   },
   "chat.newMessages.scrollToLatest": "Zur neuesten Nachricht scrollen",
   "chat.newMessages.dismiss": "Anzahl neuer Nachrichten ausblenden",
+  "chat.routineEvent.hide": "Ganzen Text ausblenden",
+  "chat.routineEvent.show": "Ganzen Text anzeigen",
   "chat.reply.showOriginal": "Originalnachricht anzeigen",
   "chat.reply.originalUnavailable": "Originalnachricht nicht verfügbar",
   "chat.reply.back": "Zurück zur Antwort",

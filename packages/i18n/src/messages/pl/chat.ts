@@ -363,6 +363,8 @@ export const messages = {
   },
   "chat.newMessages.scrollToLatest": "Przewiń do najnowszej wiadomości",
   "chat.newMessages.dismiss": "Ukryj licznik nowych wiadomości",
+  "chat.routineEvent.hide": "Ukryj cały tekst",
+  "chat.routineEvent.show": "Pokaż cały tekst",
   "chat.reply.showOriginal": "Pokaż oryginalną wiadomość",
   "chat.reply.originalUnavailable": "Oryginalna wiadomość jest niedostępna",
   "chat.reply.back": "Wróć do odpowiedzi",

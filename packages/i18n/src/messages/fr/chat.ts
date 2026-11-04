@@ -268,6 +268,8 @@ export const messages = {
   "chat.newMessages.jump": { one: "Voir {count} nouveau message", other: "Voir {count} nouveaux messages" },
   "chat.newMessages.scrollToLatest": "Aller au dernier message",
   "chat.newMessages.dismiss": "Masquer le nombre de nouveaux messages",
+  "chat.routineEvent.hide": "Masquer le texte complet",
+  "chat.routineEvent.show": "Afficher le texte complet",
   "chat.reply.showOriginal": "Afficher le message d'origine",
   "chat.reply.originalUnavailable": "Message d'origine indisponible",
   "chat.reply.back": "Retour à la réponse",

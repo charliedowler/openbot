@@ -268,6 +268,8 @@ export const messages = {
   },
   "chat.newMessages.scrollToLatest": "Naar het laatste bericht scrollen",
   "chat.newMessages.dismiss": "Aantal nieuwe berichten negeren",
+  "chat.routineEvent.hide": "Volledige tekst verbergen",
+  "chat.routineEvent.show": "Volledige tekst tonen",
   "chat.reply.showOriginal": "Oorspronkelijk bericht tonen",
   "chat.reply.originalUnavailable": "Oorspronkelijk bericht niet beschikbaar",
   "chat.reply.back": "Terug naar het antwoord",

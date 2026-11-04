@@ -273,6 +273,8 @@ export const messages = {
   },
   "chat.newMessages.scrollToLatest": "En son mesaja kaydır",
   "chat.newMessages.dismiss": "Yeni mesaj sayacını kapat",
+  "chat.routineEvent.hide": "Tüm metni gizle",
+  "chat.routineEvent.show": "Tüm metni göster",
   "chat.reply.showOriginal": "Asıl mesajı göster",
   "chat.reply.originalUnavailable": "Asıl mesaj kullanılamıyor",
   "chat.reply.back": "Yanıta dön",

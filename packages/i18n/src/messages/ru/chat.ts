@@ -358,6 +358,8 @@ export const messages = {
   },
   "chat.newMessages.scrollToLatest": "Прокрутить к последнему сообщению",
   "chat.newMessages.dismiss": "Скрыть счётчик новых сообщений",
+  "chat.routineEvent.hide": "Скрыть весь текст",
+  "chat.routineEvent.show": "Показать весь текст",
   "chat.reply.showOriginal": "Показать исходное сообщение",
   "chat.reply.originalUnavailable": "Исходное сообщение недоступно",
   "chat.reply.back": "Вернуться к ответу",

@@ -17,6 +17,7 @@ import {
 import type { AgentMessage, AgentProfile } from "@openbot/ui/data";
 import type { ChannelWorker } from "@openbot/ui/features/channels/ChannelActivityIndicator";
 import { toAgentMessage, toAgentMessages } from "../../app-message-projection";
+import { channelRoutineEvent } from "./channel-routine-event";
 
 /** A row with no text, no attachment and no question has nothing to draw. */
 export function channelMessageHasContent(entry: ChannelMessage): boolean {
@@ -40,8 +41,16 @@ function channelConversationMessage(entry: ChannelMessage): AgentMessage {
       kind: "action-marker",
       actionMarker: { ...routing, kind: "channel-routing", timestamp: entry.message.createdAt },
     };
-  if (member)
-    return { ...row, id: entry.id, author: "you", senderMember: { id: entry.author.id, name: entry.author.name } };
+  if (member) {
+    const routineEvent = channelRoutineEvent(entry);
+    return {
+      ...row,
+      id: entry.id,
+      author: "you",
+      senderMember: { id: entry.author.id, name: entry.author.name },
+      ...(routineEvent ? { routineEvent } : {}),
+    };
+  }
   return { ...row, id: entry.id, author: "agent", senderAgentId: entry.author.id };
 }
 

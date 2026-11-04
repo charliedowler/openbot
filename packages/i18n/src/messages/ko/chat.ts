@@ -259,6 +259,8 @@ export const messages = {
   "chat.newMessages.jump": { other: "새 메시지 {count}개로 이동" },
   "chat.newMessages.scrollToLatest": "최신 메시지로 스크롤",
   "chat.newMessages.dismiss": "새 메시지 수 닫기",
+  "chat.routineEvent.hide": "전체 텍스트 숨기기",
+  "chat.routineEvent.show": "전체 텍스트 보기",
   "chat.reply.showOriginal": "원본 메시지 보기",
   "chat.reply.originalUnavailable": "원본 메시지를 볼 수 없어요",
   "chat.reply.back": "답장으로 돌아가기",

@@ -259,6 +259,8 @@ export const messages = defineMessages("chat", {
   "chat.newMessages.jump": { one: "Jump to {count} new message", other: "Jump to {count} new messages" },
   "chat.newMessages.scrollToLatest": "Scroll to latest message",
   "chat.newMessages.dismiss": "Dismiss new message count",
+  "chat.routineEvent.hide": "Hide full text",
+  "chat.routineEvent.show": "Show full text",
   "chat.reply.showOriginal": "Show the original message",
   "chat.reply.originalUnavailable": "Original message not available",
   "chat.reply.back": "Back to the reply",
