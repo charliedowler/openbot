@@ -48,6 +48,7 @@ export interface AgentWaitsHooks {
   channelWaitRequestText?(deliveryId: string): string | null;
   channelWaitAllowed?(deliveryId: string, agentId: string, turnId: string, threadId: string): boolean;
   cancelChannelWait?(wait: AgentWait): void;
+  closedChannelWait?(wait: AgentWait): void;
   channelWaitEventHandled?(wait: AgentWait, deliveryId: string): boolean;
   channelWaitState?(wait: AgentWait): "running" | "waiting" | "stale";
   resumeChannelWait?(wait: AgentWait, deliveryId: string): Effect.Effect<boolean, AgentWaitError>;
@@ -385,8 +386,10 @@ export class AgentWaits {
     const parsed = closeWaitToolSchema.safeParse(params.arguments);
     if (!parsed.success) return openBotToolFailure(z.prettifyError(parsed.error));
     const agentId = this.#waitOwner(parsed.data.agentId, caller);
+    const wait = this.#store.get(agentId, parsed.data.waitId);
     if (!this.#store.delete(agentId, parsed.data.waitId))
       return openBotToolFailure(sourceText("error.backend.agentWaitGone"));
+    if (wait?.id.startsWith("channel:")) this.#hooks.closedChannelWait?.(wait);
     this.#changed(agentId);
     return openBotToolResult({ closed: parsed.data.waitId });
   }

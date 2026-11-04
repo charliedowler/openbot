@@ -650,6 +650,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
         channelWaitAllowed: (deliveryId, agentId, turnId, threadId) =>
           this.channels.channelWaitAllowed(deliveryId, agentId, turnId, threadId),
         cancelChannelWait: (wait) => this.channels.cancelEventWait(wait),
+        closedChannelWait: (wait) => this.channels.eventWaitClosed(wait),
         channelWaitEventHandled: (wait, deliveryId) => this.channels.eventWaitHandled(wait, deliveryId),
         channelWaitState: (wait) => this.channels.channelWaitState(wait),
         resumeChannelWait: (wait, deliveryId) =>
