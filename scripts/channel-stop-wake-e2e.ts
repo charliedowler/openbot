@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import type { AgentSummary, ChannelTask } from "@openbot/contracts/ipc";
 import { Effect } from "effect";
 import { AgentStore } from "../src/backend/agent-store";
+import { ChannelImages } from "../src/backend/channel-images";
 import { ChannelService } from "../src/backend/channel-service";
 import { runCauseEffect } from "../src/backend/effect-boundary";
 import { MailboxStore } from "../src/backend/mailbox-store";
@@ -19,7 +20,7 @@ const agents = new AgentStore(join(root, "data"), join(root, "home"), database);
 const mailbox = new MailboxStore(join(root, "data"), agents.sharedRoot, database);
 const errors: unknown[] = [];
 const report: { passed: boolean; checks: string[]; error?: string } = { passed: false, checks: [] };
-const channels = new ChannelService(database, mailbox, {
+const channels = new ChannelService(database, mailbox, new ChannelImages(join(root, "channel-images")), {
   agents: () => agents.list(),
   generate: () => Effect.die(new Error("No routing model is used by this check.")),
   schedule: () => {},
