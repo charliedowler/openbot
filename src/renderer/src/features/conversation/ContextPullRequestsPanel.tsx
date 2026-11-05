@@ -5,15 +5,14 @@ import { useAgents } from "../agents/agents-context";
 import { useChannels } from "../channels/channels-context";
 import { serverSupportsCapability } from "../servers/server-capabilities";
 import { useSidebar } from "../sidebar/sidebar-context";
-import { createContextPrsView } from "./context-prs-view";
+import { createContextPrsView, prefetchContextPrs } from "./context-prs-view";
 import { conversationRuntime } from "./conversation-runtime";
 import { useConversationViewScope } from "./conversation-scope";
 
-export function ContextPullRequestsPanel() {
+function useContextPrSource() {
   const { props, channel } = useConversationViewScope();
   const { agentList } = useAgents();
   const channels = useChannels();
-  const sidebar = useSidebar();
   const { t } = useText();
   const supported = () =>
     props.runtime ? props.runtime.contextPrs !== undefined : serverSupportsCapability(props.server, "context-prs-v1");
@@ -43,22 +42,54 @@ export function ContextPullRequestsPanel() {
         }
       : null;
   });
+  const read = (refresh: boolean) => {
+    const current = target();
+    if (!current) return Promise.reject(new Error(t("conversation.pullRequests.failed")));
+    const api = props.runtime?.contextPrs ?? window.openbot.contextPrs;
+    return api.read({ scope: current.scope, refresh }, current.serverId);
+  };
+  return { props, target, supported, read };
+}
+
+export function ContextPullRequestsPrefetch() {
+  const { props, channel } = useConversationViewScope();
+  const supported = () =>
+    props.runtime ? props.runtime.contextPrs !== undefined : serverSupportsCapability(props.server, "context-prs-v1");
+  const target = () => {
+    const serverId = props.server?.id ?? "local";
+    if (channel) return channel.readOnly() ? null : { scope: { kind: "channel" as const, id: channel.id }, serverId };
+    const agentId = props.agent?.id;
+    return agentId ? { scope: { kind: "agent" as const, id: agentId }, serverId } : null;
+  };
+  prefetchContextPrs({
+    target,
+    supported,
+    read: (refresh) => {
+      const current = target();
+      const api = props.runtime?.contextPrs ?? window.openbot?.contextPrs;
+      if (!current || !api) return Promise.reject(new Error("Context PRs are unavailable."));
+      return api.read({ scope: current.scope, refresh }, current.serverId);
+    },
+  });
+  return null;
+}
+
+export function ContextPullRequestsPanel() {
+  const { props, target, supported, read } = useContextPrSource();
+  const sidebar = useSidebar();
+  const { t } = useText();
   const view = createContextPrsView({
     target,
     supported,
     revision: () => `${sidebar.watchingRevision()}:${props.messages.length}:${props.activeTurnId ?? "idle"}`,
-    read: (refresh) => {
-      const current = target();
-      if (!current) return Promise.reject(new Error(t("conversation.pullRequests.failed")));
-      const api = props.runtime?.contextPrs ?? window.openbot.contextPrs;
-      return api.read({ scope: current.scope, refresh }, current.serverId);
-    },
+    read,
   });
   return (
     <aside class="browser-panel context-pr-panel" aria-label={t("conversation.sidePanel.pane.pullRequests")}>
       <PullRequestList
         data={view.data()}
-        loading={view.state.loading}
+        loading={view.loading()}
+        updating={view.updating()}
         supported={supported()}
         error={view.state.error}
         onRefresh={view.refresh}

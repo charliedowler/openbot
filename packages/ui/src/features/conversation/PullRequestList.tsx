@@ -53,6 +53,7 @@ function PullRequestRow(props: { item: ContextPullRequest; onOpen: (url: string)
 export function PullRequestList(props: {
   data: ContextPullRequestsSnapshot | null;
   loading: boolean;
+  updating?: boolean | undefined;
   supported: boolean;
   error: string | null;
   onRefresh: () => void;
@@ -80,14 +81,21 @@ export function PullRequestList(props: {
           <h2>{t("conversation.sidePanel.pane.pullRequests")}</h2>
           <p>{t("conversation.pullRequests.description")}</p>
         </div>
-        <IconButton
-          variant="ghost"
-          label={t("conversation.pullRequests.refresh")}
-          disabled={props.loading || !props.supported}
-          onClick={props.onRefresh}
-        >
-          <RefreshCw />
-        </IconButton>
+        <div class="context-pr-actions">
+          <Show when={props.updating}>
+            <span class="context-pr-updating" role="status">
+              {t("conversation.pullRequests.updating")}
+            </span>
+          </Show>
+          <IconButton
+            variant="ghost"
+            label={t("conversation.pullRequests.refresh")}
+            disabled={props.loading || !props.supported}
+            onClick={props.onRefresh}
+          >
+            <RefreshCw />
+          </IconButton>
+        </div>
       </header>
       <Show
         when={props.supported && props.data?.status !== "unsupported"}
