@@ -41,6 +41,7 @@ import {
   type ChannelTextModel,
   type DeliveredChannelContext,
   isMemberThinking,
+  needsCompaction,
   sameRequest,
 } from "./channel-history";
 import {
@@ -89,6 +90,11 @@ export interface ChannelHooks {
   usageLimitBackup?(agentId: string): boolean;
   contextCharacters?(agentId: string, threadId: string): number;
   /**
+   * How long a channel stays quiet before its summary is compacted ahead of the next assignment.
+   * Omitted, 30 seconds. The checks set it low.
+   */
+  summaryCompactionDelayMs?: number;
+  /**
    * Whether the agent's provider reports each compaction, its own automatic ones too. Only then can a
    * packet leave out the messages that the session read: a compaction resets what it read.
    */
@@ -128,6 +134,7 @@ export interface ChannelHooks {
 }
 
 const logger = createOpenBotLogger("channel-service");
+const SUMMARY_COMPACTION_DELAY_MS = 30_000;
 
 class ChannelRoutingError extends Schema.TaggedError<ChannelRoutingError>()("ChannelRoutingError", {
   message: Schema.String,
@@ -215,6 +222,12 @@ export class ChannelService {
   readonly #acceptedContexts = new Set<string>();
   /** By delivery: the count of in-place message changes when its packet was built. */
   readonly #preparedChanges = new Map<string, number>();
+  /** Channels whose summary compaction waits for the channel to stay quiet. */
+  readonly #compactTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Channels whose summary a compaction run reads and writes now. */
+  readonly #compacting = new Set<string>();
+  /** Channels that changed while their compaction ran, so one more run follows it. */
+  readonly #compactAgain = new Set<string>();
 
   constructor(
     database: OpenBotDatabase,
@@ -3516,7 +3529,65 @@ export class ChannelService {
     if (withdrawn.length) for (const agent of this.hooks.agents()) this.hooks.schedule(agent.id);
   }
 
+  /**
+   * Compacts the channel summary once the channel has stayed quiet, so the next assignment finds at
+   * most the newest messages uncovered. `prepare` ran every pass while a delivery started, and the
+   * member's lane held its other work for a model turn of the lead per pass: 22 turns, 22 minutes,
+   * for a channel that grew by 1,800 messages between assignments. One run per channel at a time; a
+   * change during the run queues one more.
+   */
+  #compactLater(channelId: string): void {
+    if (this.#stopped || this.#deletedChannels.has(channelId) || this.#compactTimers.has(channelId)) return;
+    if (this.#compacting.has(channelId)) {
+      this.#compactAgain.add(channelId);
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.#compactTimers.delete(channelId);
+      if (this.#stopped) return;
+      this.#dispatchEvent(
+        this.#compactSummary(channelId).pipe(
+          Effect.catch((failure) =>
+            Effect.sync(() => {
+              logger.warn("A channel summary compaction did not finish. The next assignment summarizes.", {
+                channelId,
+                reason: failure.cause instanceof Error ? failure.cause.message : String(failure.cause),
+              });
+            }),
+          ),
+        ),
+      );
+    }, this.hooks.summaryCompactionDelayMs ?? SUMMARY_COMPACTION_DELAY_MS);
+    this.#compactTimers.set(channelId, timer);
+  }
+
+  readonly #compactSummary = Effect.fn("ChannelService.compactSummary")(function* (
+    this: ChannelService,
+    channelId: string,
+  ): Effect.fn.Return<void, ChannelOperationError> {
+    if (this.#stopped || this.#deletedChannels.has(channelId) || this.#compacting.has(channelId)) return;
+    if (!(yield* channelSync(() => this.store.exists(channelId)))) return;
+    const channel = yield* channelSync(() => this.store.get(channelId));
+    if (channel.archived || !channel.leadAgentId) return;
+    const leadId = channel.leadAgentId;
+    const lead = this.hooks.agents().find((agent) => agent.id === leadId);
+    // A hidden or limited lead summarizes nothing now; the next change or assignment tries again.
+    if (!lead || this.hooks.hidden?.(leadId) || this.hooks.usageLimited?.(leadId)) return;
+    if (!(yield* channelSync(() => needsCompaction(this.store, channelId)))) return;
+    this.#compacting.add(channelId);
+    const passes = yield* this.#history.compact(channelId, lead).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          this.#compacting.delete(channelId);
+          if (this.#compactAgain.delete(channelId)) this.#compactLater(channelId);
+        }),
+      ),
+    );
+    if (passes > 0) logger.info("Compacted a channel summary ahead of its next assignment.", { channelId, passes });
+  }).bind(this);
+
   private publish(channelId: string): void {
+    this.#compactLater(channelId);
     this.hooks.changed(channelId, this.store.get(channelId).revision);
     this.#syncQueueHolds(channelId);
   }
@@ -3549,6 +3620,9 @@ export class ChannelService {
     this.#stopped = true;
     for (const timer of this.#stopTimers.values()) clearTimeout(timer);
     this.#stopTimers.clear();
+    for (const timer of this.#compactTimers.values()) clearTimeout(timer);
+    this.#compactTimers.clear();
+    this.#compactAgain.clear();
     yield* Fiber.awaitAll([
       ...this.#events,
       ...this.#pumps.values(),
