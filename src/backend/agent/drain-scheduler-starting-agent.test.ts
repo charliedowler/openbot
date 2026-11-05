@@ -66,6 +66,8 @@ async function harness() {
       isReady: yes,
       isReplacingCli: () => false,
       agentClientCurrent: yes,
+      agentClientRunning: yes,
+      signInRequired: () => false,
       ensureAgentClient: () => Effect.succeed({ provider: "claude" }),
     },
     duplication: { mayDrain: yes },
@@ -79,6 +81,8 @@ async function harness() {
     tasks: { threadId: () => null, openTaskIds: () => [], limit: () => 2, oneTurnAtATime: () => false },
     hooks: {
       isStopping: () => false,
+      isDeleting: () => false,
+      deliveriesStarting: () => {},
       followUsageLimit: () => false,
       dropRequestedNewChat: () => {},
       startRequestedNewChat: () => Effect.void,
