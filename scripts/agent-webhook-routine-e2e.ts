@@ -559,7 +559,7 @@ try {
   );
   pass(
     "A Standard Webhooks request for another trigger slug is ignored by the metadata filter",
-    statuses.otherSlug === 202 && slugReceipt?.status === "ignored" && slugReceipt.reason === "filter",
+    statuses.otherSlug === 200 && slugReceipt?.status === "ignored" && slugReceipt.reason === "filter",
   );
   pass("A Standard Webhooks request with another key is refused", statuses.wrongKey === 401);
   pass("The secret that the host made stops working", statuses.oldSecret === 401);
