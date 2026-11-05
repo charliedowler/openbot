@@ -1224,7 +1224,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
                   { id: selected.id, provider: selected.provider, model: model.id },
                   background ? "channel-summary" : "channel-routing",
                 ),
-                background ? "channel-summary" : "profile",
+                background ? "channel-summary" : "channel-routing",
               ),
             )
             .pipe(

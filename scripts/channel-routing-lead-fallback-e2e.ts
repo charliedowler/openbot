@@ -30,6 +30,7 @@ const report: { passed: boolean; checks: string[]; routingTurns: number; error?:
   routingTurns: 0,
 };
 let routing: Routing = "unused";
+const purposes = new Set<string | undefined>();
 
 function routingAnswer(): Effect.Effect<string, ChannelOperationError> {
   report.routingTurns++;
@@ -44,7 +45,10 @@ function routingAnswer(): Effect.Effect<string, ChannelOperationError> {
 
 const channels = new ChannelService(database, mailbox, new ChannelImages(join(root, "channel-images")), {
   agents: () => agents.list().filter((agent) => !removed.has(agent.id)),
-  generate: () => routingAnswer(),
+  generate: (_lead, _prompt, _fallbacks, background) => {
+    purposes.add(background ? "channel-summary" : "channel-routing");
+    return routingAnswer();
+  },
   schedule: () => {},
   changed: () => {},
   busy: () => false,
@@ -196,6 +200,8 @@ try {
   assert.equal(requestTask(named)?.ownerAgentId, member.id);
   report.checks.push("A request with a named member goes to that member without a routing turn.");
 
+  assert.deepEqual([...purposes], ["channel-routing"]);
+  report.checks.push("Each routing turn asks for a channel-routing generation.");
   const unexpected = errors.filter(
     (error) => !(error instanceof Error && error.message.startsWith("The provider returned no JSON object.")),
   );

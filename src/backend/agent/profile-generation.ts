@@ -2,7 +2,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  AGENT_REASONING_EFFORTS,
   type AgentModelOption,
+  type AgentReasoningEffort,
   decodeAgentProfileDraft,
   type GenerateAgentProfileInput,
   type SidebarSection,
@@ -29,7 +31,18 @@ const logger = createOpenBotLogger("profile-generation");
 const GENERATION_TIMEOUT_MS = 120_000;
 const CHANNEL_SUMMARY_TIMEOUT_MS = 600_000;
 
-type GenerationPurpose = "profile" | "channel-summary";
+type GenerationPurpose = "profile" | "channel-summary" | "channel-routing";
+
+/**
+ * The reasoning effort of a generation. A routing turn only picks who answers, so it runs at the
+ * lowest effort the model takes; a lead on a slow model at high effort otherwise ran out of time.
+ * A model with no effort setting keeps its default.
+ */
+export function generationEffort(model: AgentModelOption, purpose: GenerationPurpose): AgentReasoningEffort {
+  if (purpose !== "channel-routing" || model.reasoningEffortConfigurable === false) return model.defaultReasoningEffort;
+  const lowest = AGENT_REASONING_EFFORTS.find((effort) => model.supportedReasoningEfforts.includes(effort));
+  return lowest ?? model.defaultReasoningEffort;
+}
 
 /** Shown when the endpoints changed under a generation that had not yet spawned its process. */
 const CANCELLED_MESSAGE = sourceText("error.agent.profileEndpointsChanged");
@@ -171,6 +184,7 @@ export const toollessTurn = Effect.fnUntraced(function* (
   purpose: GenerationPurpose = "profile",
 ) {
   const provider: ProviderErrorText = { last: null };
+  const effort = generationEffort(model, purpose);
   return yield* Effect.gen(function* () {
     const completion = yield* Effect.forkChild(profileCompletion(client, provider, observe), {
       startImmediately: true,
@@ -192,7 +206,7 @@ export const toollessTurn = Effect.fnUntraced(function* (
         {
           cwd,
           model: model.id,
-          effort: model.defaultReasoningEffort,
+          effort,
           ephemeral: true,
           persistSession: false,
           profileGeneration: true,
@@ -254,7 +268,7 @@ export const toollessTurn = Effect.fnUntraced(function* (
           threadId,
           input: [{ type: "text", text: prompt }],
           model: model.id,
-          effort: model.defaultReasoningEffort,
+          effort,
         },
         decodeRecordResponse,
       )

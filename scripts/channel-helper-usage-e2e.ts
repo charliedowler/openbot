@@ -159,14 +159,18 @@ try {
     starts.every(
       (start) =>
         start.model === lead.model &&
-        start.effort === "high" &&
         start.profileGeneration === true &&
         start.persistSession === false &&
         start.dynamicTools.length === 0,
     ),
   );
+  assert.deepEqual(
+    starts.map((start) => start.effort),
+    ["low", "high", "high", "low"],
+    "Summaries keep the lead's effort and routing turns run at the lowest effort.",
+  );
   report.checks.push(
-    "Every helper keeps the lead model and effort, creates no persistent session and has no dynamic tools.",
+    "Every helper keeps the lead model, creates no persistent session and has no dynamic tools. Summaries keep the lead's effort; routing turns run at the lowest effort.",
   );
   report.passed = true;
 } catch (error) {
