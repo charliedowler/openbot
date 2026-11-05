@@ -1157,6 +1157,11 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
         (this.#tasks.oneTurnAtATime(agentId) &&
           this.#conversation.workingTaskSnapshots(agentId).some((snapshot) => snapshot.activeTurnId)) ||
         !this.#usageLimits.mayDrain(agentId),
+      turnRunning: (agentId) =>
+        Boolean(this.#conversation.workingSnapshot(agentId)?.activeTurnId) ||
+        (this.#tasks.oneTurnAtATime(agentId) &&
+          this.#conversation.workingTaskSnapshots(agentId).some((snapshot) => snapshot.activeTurnId)) ||
+        !this.#usageLimits.mayDrain(agentId),
       usageLimited: (agentId) => !this.#usageLimits.mayDrain(agentId),
       skipAtLimit: (task) => this.#channelRoutines.skipAtLimit(task.channelId, task.requestMessageId),
       usageLimitBackup: (agentId) => this.#usageLimitBackup(agentId) !== undefined,
