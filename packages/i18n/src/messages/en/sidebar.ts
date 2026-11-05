@@ -244,7 +244,7 @@ export const messages = defineMessages("sidebar", {
   "sidebar.tasks.pickUp.with": "Pick up with: {name}",
   "sidebar.tasks.pickUp.withNone": "Pick up with: choose an agent",
   "sidebar.tasks.pickUp.message.title": "Pick this up: {kind}: {title}",
-  "sidebar.tasks.pickUp.message.detail": "Recommendation/trigger: {detail}",
+  "sidebar.tasks.pickUp.message.detail": "{detail}",
   "sidebar.tasks.pickUp.message.waitingOn": "Waiting on: {who}",
   "sidebar.tasks.pickUp.message.waitingSince": "Waiting on: {who} since {since}",
   "sidebar.tasks.pickUp.message.owner": "Owner: {name}",
