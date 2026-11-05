@@ -26,6 +26,7 @@ export function serverSupportsCapability(
   if (
     (capability === "context-prs-v1" ||
       capability === "watch-registry-v1" ||
+      capability === "watch-registry-v2" ||
       capability === "remote-desktop-setup" ||
       capability === "channel-chats-v1" ||
       capability === "channel-delete-v1" ||

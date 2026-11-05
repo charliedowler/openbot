@@ -1,6 +1,6 @@
 /** The search field, and the compact-mode button in its place. Both open the global search. */
 
-import { Button, Eye } from "@openbot/ui";
+import { Button, Eye, ListChecks } from "@openbot/ui";
 import { Show } from "solid-js";
 import { useText } from "../../text";
 import { SearchIcon } from "./SidebarIcons";
@@ -39,7 +39,7 @@ export function SidebarSearch() {
         </Button>
       </div>
       <Show when={props.onOpenWatching}>
-        <div class="sidebar-watching-trigger-wrap">
+        <div class="sidebar-watching-trigger-wrap sidebar-watching-triggers">
           <Button
             variant="ghost"
             type="button"
@@ -53,6 +53,21 @@ export function SidebarSearch() {
               <span>{t("sidebar.watching.title")}</span>
             </Show>
           </Button>
+          <Show when={props.onOpenTasks}>
+            <Button
+              variant="ghost"
+              type="button"
+              class="sidebar-watching-trigger"
+              aria-label={t("sidebar.tasks.title")}
+              aria-haspopup="dialog"
+              onClick={() => props.onOpenTasks?.()}
+            >
+              <ListChecks class="size-4" aria-hidden="true" />
+              <Show when={!props.compact}>
+                <span>{t("sidebar.tasks.title")}</span>
+              </Show>
+            </Button>
+          </Show>
         </div>
       </Show>
     </>

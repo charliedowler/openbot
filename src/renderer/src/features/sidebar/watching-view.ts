@@ -1,6 +1,6 @@
 import type { ChannelSummary, ServerSummary } from "@openbot/contracts/ipc";
 import type { AgentProfile } from "@openbot/ui/data";
-import type { SidebarWatchingData } from "@openbot/ui/features/sidebar/Sidebar";
+import { type SidebarWatchingData, watchConditionKey } from "@openbot/ui/features/sidebar/Sidebar";
 import { useText } from "@openbot/ui/text";
 import { createEffect, createMemo, createStore, onSettled, untrack } from "solid-js";
 import { serverSupportsCapability } from "../servers/server-capabilities";
@@ -16,12 +16,14 @@ export function createSidebarWatching(deps: {
   type Snapshot = Awaited<ReturnType<ReturnType<typeof sidebarPort>["agent"]["getWatchingSnapshot"]>>;
   const [state, setState] = createStore<{
     open: boolean;
+    tasksOpen: boolean;
     loading: boolean;
     error: string | null;
     snapshot: Snapshot | null;
     snapshotServerId: string | null;
-  }>({ open: false, loading: false, error: null, snapshot: null, snapshotServerId: null });
+  }>({ open: false, tasksOpen: false, loading: false, error: null, snapshot: null, snapshotServerId: null });
   const supported = () => serverSupportsCapability(deps.server(), "watch-registry-v1");
+  const tasksSupported = () => serverSupportsCapability(deps.server(), "watch-registry-v2");
   let request = 0;
   const target = createMemo(() => ({
     id: deps.server()?.id ?? "local",
@@ -29,7 +31,7 @@ export function createSidebarWatching(deps: {
     status: deps.server()?.state,
     supported: supported(),
     revision: deps.revision(),
-    open: state.open,
+    open: state.open || state.tasksOpen,
   }));
 
   async function refresh(): Promise<void> {
@@ -101,12 +103,49 @@ export function createSidebarWatching(deps: {
         title: watch.title,
         sourceKind: watch.sourceKind,
         status: watch.status,
-        condition: watch.condition,
+        condition: watch.condition ?? t(watchConditionKey(watch.sourceKind, watch.lastCheckedAt !== undefined)),
         targetUrl: watch.targetUrl,
         checkedAt: watch.lastCheckedAt,
         expiresAt: watch.expiresAt,
         error: watch.lastError,
+        summary: watch.summary,
+        purpose: watch.purpose,
+        receivers: watch.receiverAgentIds?.filter((id) => owners.has(id)).map((id) => ({ id, name: owner(id) })),
       })),
+      tasks: snapshot.tasks
+        ? {
+            generatedAt: snapshot.tasks.generatedAt,
+            items: snapshot.tasks.items
+              .filter((task) => task.ownerAgentId === undefined || owners.has(task.ownerAgentId))
+              .map((task) => ({
+                ...task,
+                ownerName: task.ownerAgentId === undefined ? undefined : owner(task.ownerAgentId),
+              })),
+            health: snapshot.tasks.health
+              ? {
+                  score: snapshot.tasks.health.score,
+                  wip: snapshot.tasks.health.wip,
+                  wipLimit: snapshot.tasks.health.wipLimit,
+                  urgent: snapshot.tasks.health.urgent,
+                  reasons: snapshot.tasks.health.reasons,
+                  oldest: snapshot.tasks.health.oldest
+                    ? {
+                        title:
+                          snapshot.tasks.items.find((task) => task.id === snapshot.tasks?.health?.oldest?.taskId)
+                            ?.title ?? snapshot.tasks.health.oldest.taskId,
+                        since: snapshot.tasks.health.oldest.since,
+                      }
+                    : undefined,
+                  longestWaiting: snapshot.tasks.health.longestWaiting
+                    ? {
+                        who: snapshot.tasks.health.longestWaiting.waitingOn,
+                        since: snapshot.tasks.health.longestWaiting.since,
+                      }
+                    : undefined,
+                }
+              : undefined,
+          }
+        : null,
       waits: snapshot.waits.filter(visible).map((wait) => ({
         id: wait.id,
         ownerId: wait.ownerAgentId,
@@ -125,6 +164,7 @@ export function createSidebarWatching(deps: {
     state,
     data,
     supported,
+    tasksSupported,
     open: () =>
       setState((state) => {
         state.open = true;
@@ -132,6 +172,14 @@ export function createSidebarWatching(deps: {
     close: () =>
       setState((state) => {
         state.open = false;
+      }),
+    openTasks: () =>
+      setState((state) => {
+        state.tasksOpen = true;
+      }),
+    closeTasks: () =>
+      setState((state) => {
+        state.tasksOpen = false;
       }),
     refresh: () => void refresh(),
   };

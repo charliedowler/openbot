@@ -1,7 +1,7 @@
 import { type ChatWindowTarget, canAdministerServer } from "@openbot/contracts/ipc";
 import { AGENT_HIDDEN_CAPABILITY } from "@openbot/contracts/team-protocol/current";
 import { computeAgentAvatarMoods } from "@openbot/ui/features/agents/agent-avatar-mood";
-import { Sidebar, SidebarWatchingDialog } from "@openbot/ui/features/sidebar/Sidebar";
+import { Sidebar, SidebarTasksDialog, SidebarWatchingDialog } from "@openbot/ui/features/sidebar/Sidebar";
 import { SidebarCommunityCard } from "@openbot/ui/features/sidebar/SidebarCommunityCard";
 import { SidebarMachineCard } from "@openbot/ui/features/sidebar/SidebarMachineCard";
 import { SidebarMobileAppCard } from "@openbot/ui/features/sidebar/SidebarMobileAppCard";
@@ -271,6 +271,7 @@ export function WorkspaceSidebar(props: { peopleEnabled: boolean }) {
     <>
       <Sidebar
         onOpenWatching={watching.open}
+        onOpenTasks={watching.tasksSupported() ? watching.openTasks : undefined}
         channels={visibleChannels()}
         deletedChannels={sidebarChannels().filter((channel) => channel.archived)}
         activeChannelId={channels.state.selectedId}
@@ -465,6 +466,16 @@ export function WorkspaceSidebar(props: { peopleEnabled: boolean }) {
           else selectAgent(ownerId);
         }}
         onOpenSource={(url) => void appPort().openUrl(url)}
+      />
+      <SidebarTasksDialog
+        open={watching.state.tasksOpen}
+        loading={watching.state.loading}
+        supported={watching.tasksSupported()}
+        error={watching.state.error}
+        data={watching.data()?.tasks ?? null}
+        onClose={watching.closeTasks}
+        onRefresh={watching.refresh}
+        onOpenLink={(url) => void appPort().openUrl(url)}
       />
     </>
   );
