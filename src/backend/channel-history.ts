@@ -15,7 +15,7 @@ import type { ChannelStore } from "./channel-store";
 export type ChannelTextModel = (
   lead: AgentSummary,
   prompt: string,
-  purpose?: "channel-summary",
+  purpose?: "channel-routing" | "channel-summary",
 ) => Effect.Effect<string, ChannelOperationError>;
 /** The part of the channel that an earlier packet gave to the member's current provider session. */
 export interface DeliveredChannelContext {
