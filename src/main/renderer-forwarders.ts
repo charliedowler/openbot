@@ -57,6 +57,7 @@ import type { AgentService } from "../backend/agent-service";
 import { runCauseEffect } from "../backend/effect-boundary";
 import type { WorkflowNotice } from "../backend/workflows/workflows";
 import type { HostAnalytics } from "./analytics";
+import { createChannelListRefresh } from "./channel-list-refresh";
 import {
   closeRetainedNotification,
   desktopAgentEventLevel,
@@ -157,8 +158,6 @@ export function createRendererForwarders({
    * change sets the baseline and its completion notifies.
    */
   const channelLists = new Map<string, ChannelSummary[]>();
-  /** The servers whose channel list is being read. True when a change came in during the read. */
-  const channelReads = new Map<string, boolean>();
   /** The shown reply notification of each channel. A newer reply replaces it. */
   const channelNotifications = new Map<string, Notification>();
 
@@ -171,31 +170,23 @@ export function createRendererForwarders({
     return server.notificationLevel;
   }
 
+  const readChannelList = createChannelListRefresh(async (serverId) => {
+    const next = await readChannels(serverId);
+    if (next) await notifyChannelReplies(serverId, next);
+  });
+
   /**
-   * One read at a time for each server. A change during a read causes one more read after it. A
-   * streaming reply changes the channels on each frame, so a server whose replies cannot notify is
-   * not read: its baseline is dropped, and the next list sets a new one. A prompt reads its channel
-   * on its own when the list has none.
+   * Reads a server's channel list after a change, through `createChannelListRefresh`. A streaming
+   * reply changes the channels on each frame, so a server whose replies cannot notify is not read:
+   * its baseline is dropped, and the next list sets a new one. A prompt reads its channel on its own
+   * when the list has none.
    */
   function refreshChannels(serverId: string): void {
     if (replyLevel(serverId) !== "all") {
       channelLists.delete(serverId);
       return;
     }
-    if (channelReads.has(serverId)) {
-      channelReads.set(serverId, true);
-      return;
-    }
-    channelReads.set(serverId, false);
-    void (async () => {
-      do {
-        channelReads.set(serverId, false);
-        const next = await readChannels(serverId);
-        if (next) await notifyChannelReplies(serverId, next);
-      } while (channelReads.get(serverId));
-    })()
-      .catch(() => undefined)
-      .finally(() => channelReads.delete(serverId));
+    readChannelList(serverId);
   }
 
   /**
