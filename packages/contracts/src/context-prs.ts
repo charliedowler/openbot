@@ -29,6 +29,8 @@ export interface ContextPullRequestsSnapshot {
   merged: ContextPullRequest[];
   failures: Array<{ url: string; reason: ContextPullRequestFailureReason }>;
   referencesLimited: boolean;
+  stale?: boolean;
+  refreshedAt?: string;
 }
 const text = (value: unknown, limit: number): value is string =>
   typeof value === "string" && value.length > 0 && value.length <= limit;
@@ -90,6 +92,8 @@ export function isContextPullRequestsSnapshot(value: unknown): value is ContextP
     ["ready", "not-connected", "unsupported"].includes(String(value.status)) &&
     instant(value.checkedAt) &&
     typeof value.referencesLimited === "boolean" &&
+    (value.stale === undefined || typeof value.stale === "boolean") &&
+    (value.refreshedAt === undefined || instant(value.refreshedAt)) &&
     Array.isArray(value.open) &&
     value.open.length <= 200 &&
     value.open.every((row) => isContextPullRequest(row) && row.state === "open") &&
