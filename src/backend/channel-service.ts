@@ -70,6 +70,7 @@ import type { OpenBotDatabase } from "./openbot-database";
 import { extractJsonObject, StructuredOutputError } from "./structured-output";
 
 const logger = createOpenBotLogger("channel-service");
+const SUMMARY_COMPACTION_DELAY_MS = 30_000;
 
 export interface ChannelHooks {
   agents(): AgentSummary[];
@@ -99,6 +100,11 @@ export interface ChannelHooks {
   /** Whether this agent switches without asking and has a backup model that is ready now. */
   usageLimitBackup?(agentId: string): boolean;
   contextCharacters?(agentId: string, threadId: string): number;
+  /**
+   * How long a channel stays quiet before its summary is compacted ahead of the next assignment.
+   * Omitted, 30 seconds. The checks set it low.
+   */
+  summaryCompactionDelayMs?: number;
   /** Whether a background generation may start and still leave one for the user's own. */
   spareGeneration?(): boolean;
   /**
@@ -263,6 +269,8 @@ export class ChannelService {
   readonly #acceptedContexts = new Map<string, string>();
   /** By delivery: the count of in-place message changes when its packet was built. */
   readonly #preparedChanges = new Map<string, number>();
+  /** Channels whose summary compaction waits for the channel to stay quiet. */
+  readonly #compactTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** By delivery: the channel facts in its packet. */
   readonly #preparedFacts = new Map<string, string>();
 
@@ -2802,7 +2810,8 @@ export class ChannelService {
     if (this.#stopped || this.#summaries.has(channelId) || this.#deletedChannels.has(channelId)) return;
     const channel = this.store.exists(channelId) ? this.store.get(channelId) : null;
     const lead = channel ? this.hooks.agents().find((agent) => agent.id === channel.leadAgentId) : undefined;
-    if (!channel || channel.archived || !lead || this.hooks.hidden?.(lead.id)) return;
+    if (!channel || channel.archived || !lead || this.hooks.hidden?.(lead.id) || this.hooks.usageLimited?.(lead.id))
+      return;
     // With no spare generation, the next packet makes the summary when it needs one.
     if (this.hooks.spareGeneration?.() === false) return;
     const fallbacks = this.hooks
@@ -4165,7 +4174,25 @@ export class ChannelService {
     if (withdrawn.length) for (const agent of this.hooks.agents()) this.hooks.schedule(agent.id);
   }
 
+  /**
+   * Compacts the channel summary once the channel stays quiet, also when no turn of the channel ends:
+   * a channel grew by 1,800 messages between assignments, and the next assignment prepared for 22
+   * summary passes before it could start. A summary that still runs takes the next quiet period.
+   */
+  #compactLater(channelId: string): void {
+    if (this.#stopped || this.#deletedChannels.has(channelId) || this.#compactTimers.has(channelId)) return;
+    const timer = setTimeout(() => {
+      this.#compactTimers.delete(channelId);
+      if (this.#stopped) return;
+      if (this.#summaries.has(channelId)) this.#compactLater(channelId);
+      else this.#summarizeAhead(channelId);
+    }, this.hooks.summaryCompactionDelayMs ?? SUMMARY_COMPACTION_DELAY_MS);
+    timer.unref?.();
+    this.#compactTimers.set(channelId, timer);
+  }
+
   private publish(channelId: string): void {
+    this.#compactLater(channelId);
     this.hooks.changed(channelId, this.store.get(channelId).revision);
     this.#syncQueueHolds(channelId);
   }
@@ -4197,6 +4224,8 @@ export class ChannelService {
   ): Effect.fn.Return<void, ChannelOperationError> {
     this.#stopped = true;
     for (const timer of this.#stopTimers.values()) clearTimeout(timer);
+    for (const timer of this.#compactTimers.values()) clearTimeout(timer);
+    this.#compactTimers.clear();
     this.#stopTimers.clear();
     yield* Fiber.awaitAll([
       ...this.#events,

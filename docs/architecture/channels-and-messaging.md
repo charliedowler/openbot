@@ -370,6 +370,12 @@ with a 4,000-character target. A summary that is still too long is cut at the la
 12,000 characters. An empty summary answer keeps the stored summary and its sequence. The packet
 then holds the newest messages that fit half the budget and names the sequences that it leaves out.
 The assignment fails only when the newest message alone does not fit.
+The summary is also compacted ahead of the next assignment (`ChannelHistory.compact`): 30 seconds
+after a channel last changed, while its uncovered messages fill more than a quarter of the budget,
+the lead's model summarizes the oldest of them, up to eight passes per run and one run per channel
+at a time. A hidden lead or one at its usage limit runs none. A `prepare` then finds at most the
+newest messages uncovered, so the member's delivery no longer holds its lane for one model turn per
+half budget of history.
 The provider acceptance cursor records context delivery. Context packets remain self-contained so
 provider replacement or compaction does not remove shared decisions. Unrelated server conversations
 are available through paginated retrieval and are not inserted automatically. Agent memories keep
