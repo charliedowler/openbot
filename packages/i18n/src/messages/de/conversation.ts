@@ -51,6 +51,7 @@ export const messages = {
   "conversation.header.modelsUnavailable": "Modelle sind verfügbar, sobald eine Agenten-CLI verbunden ist.",
   "conversation.header.modelNextTurn": "Nach diesem Durchlauf",
   "conversation.header.modelNextTurnDetail": "{running} beendet diesen Durchlauf. {next} startet mit dem nächsten.",
+  "conversation.header.showBackground": "Hintergrund anzeigen",
   "conversation.sidePanel.label": "Seitenleiste",
   "conversation.sidePanel.open": "Seitenleiste öffnen",
   "conversation.sidePanel.close": "Seitenleiste schließen",

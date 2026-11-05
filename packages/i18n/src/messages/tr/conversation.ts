@@ -51,6 +51,7 @@ export const messages = {
   "conversation.header.modelsUnavailable": "Modeller bir ajan CLI'sı bağlandıktan sonra kullanılabilir.",
   "conversation.header.modelNextTurn": "Bu turdan sonra",
   "conversation.header.modelNextTurnDetail": "{running} bu turu bitirir. {next} bir sonrakiyle başlar.",
+  "conversation.header.showBackground": "Arka planı göster",
   "conversation.sidePanel.label": "Yan panel",
   "conversation.sidePanel.open": "Yan paneli aç",
   "conversation.sidePanel.close": "Yan paneli kapat",

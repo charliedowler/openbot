@@ -33,6 +33,7 @@ export function ConversationHeader() {
   const {
     actingBrowserControl,
     agentActivity,
+    backgroundToggle,
     browserControlAgent,
     channel,
     fastMode,
@@ -108,6 +109,7 @@ export function ConversationHeader() {
       onOpenChat={openMainChat()}
       titleSelected={titleSelected()}
       pendingModel={pendingModel()}
+      backgroundToggle={backgroundToggle()}
       modelPicker={{
         provider: settingsProvider(),
         foreignProvider: props.agent ? foreignProvider(props.agent.provider) : undefined,

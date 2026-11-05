@@ -51,6 +51,7 @@ export const messages = {
   "conversation.header.modelsUnavailable": "에이전트 CLI가 연결되면 모델을 사용할 수 있어요.",
   "conversation.header.modelNextTurn": "이번 턴 이후",
   "conversation.header.modelNextTurnDetail": "{running}이(가) 이번 턴을 마치고, 다음 턴부터 {next}이(가) 시작돼요.",
+  "conversation.header.showBackground": "백그라운드 표시",
   "conversation.sidePanel.label": "사이드 패널",
   "conversation.sidePanel.open": "사이드 패널 열기",
   "conversation.sidePanel.close": "사이드 패널 닫기",

@@ -51,6 +51,7 @@ export const messages = {
   "conversation.header.modelsUnavailable": "助手 CLI 连接后即可选择模型。",
   "conversation.header.modelNextTurn": "本轮结束后",
   "conversation.header.modelNextTurnDetail": "{running} 将完成本轮。{next} 从下一轮开始。",
+  "conversation.header.showBackground": "显示后台活动",
   "conversation.sidePanel.label": "侧边面板",
   "conversation.sidePanel.open": "打开侧边面板",
   "conversation.sidePanel.close": "关闭侧边面板",

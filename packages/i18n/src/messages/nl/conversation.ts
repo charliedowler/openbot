@@ -51,6 +51,7 @@ export const messages = {
   "conversation.header.modelsUnavailable": "Modellen zijn beschikbaar nadat een agent-CLI verbinding maakt.",
   "conversation.header.modelNextTurn": "Na deze beurt",
   "conversation.header.modelNextTurnDetail": "{running} maakt deze beurt af. {next} begint bij de volgende.",
+  "conversation.header.showBackground": "Achtergrond tonen",
   "conversation.sidePanel.label": "Zijpaneel",
   "conversation.sidePanel.open": "Zijpaneel openen",
   "conversation.sidePanel.close": "Zijpaneel sluiten",

@@ -51,6 +51,7 @@ export const messages = {
   "conversation.header.modelsUnavailable": "Модели станут доступны после подключения CLI агента.",
   "conversation.header.modelNextTurn": "После этого хода",
   "conversation.header.modelNextTurnDetail": "{running} завершит этот ход. {next} начнёт со следующего.",
+  "conversation.header.showBackground": "Показывать фоновые действия",
   "conversation.sidePanel.label": "Боковая панель",
   "conversation.sidePanel.open": "Открыть боковую панель",
   "conversation.sidePanel.close": "Закрыть боковую панель",
