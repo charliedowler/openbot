@@ -30,21 +30,24 @@ export const CONTEXT_PRS_CODECS: ReadonlyMap<string, OptionalRouteCodec> = new M
     CONTEXT_PRS_ROUTES.read,
     adminRoute(
       fields({ scope }, { refresh: boolean }),
-      fields({
-        scope,
-        status: oneOf("ready", "not-connected", "unsupported"),
-        checkedAt: string(40),
-        open: list(pr, 200),
-        merged: list(pr, 3),
-        failures: list(
-          fields({
-            url: string(2048),
-            reason: oneOf("not-connected", "not-found", "forbidden", "unavailable", "invalid-response", "timeout"),
-          }),
-          200,
-        ),
-        referencesLimited: boolean,
-      }),
+      fields(
+        {
+          scope,
+          status: oneOf("ready", "not-connected", "unsupported"),
+          checkedAt: string(40),
+          open: list(pr, 200),
+          merged: list(pr, 3),
+          failures: list(
+            fields({
+              url: string(2048),
+              reason: oneOf("not-connected", "not-found", "forbidden", "unavailable", "invalid-response", "timeout"),
+            }),
+            200,
+          ),
+          referencesLimited: boolean,
+        },
+        { stale: boolean, refreshedAt: string(40) },
+      ),
     ),
   ],
 ]);

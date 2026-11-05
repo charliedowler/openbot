@@ -1,7 +1,7 @@
 # Context pull requests
 
-The desktop reads PR links for one selected agent or channel when its PR panel opens
-or the user refreshes it. It makes no model calls and starts no recurring check.
+The desktop reads PR links for one selected agent or channel when that chat opens, while
+its PR panel is open, or when the user refreshes it. It makes no model calls.
 The renderer sends only a scope and an optional refresh flag through
 `contextPrs.read(input, serverId?)`.
 
@@ -27,13 +27,25 @@ invalid merge dates and different response URLs are refused. Failed references
 have bounded reason codes and no provider body. A row's `checkedAt` is its metadata
 read time. The snapshot time is the time the response was prepared.
 
-Successes are cached in memory for two minutes. Explicit refresh bypasses the cache;
-authentication changes clear it. Each read extracts references again. A failed
-refresh removes that PR's cached metadata. All readers share three request permits.
-The whole panel read has a 12-second deadline, below the Team request timeout.
+Successes are cached in memory for two minutes. Explicit refresh bypasses the cache and
+the stored snapshot; authentication changes clear both. A failed refresh removes that PR's
+cached metadata. All readers, background refreshes included, share three request permits.
+Each panel read or refresh has a 12-second deadline, below the Team request timeout.
 It aborts HTTP or CLI work and records queued references as timeout failures.
-Each provider request also has a 15-second limit. Each HTTP body is limited to 2 MiB. There
-are no cache timers and no background repository discovery.
+Each provider request also has a 15-second limit. Each HTTP body is limited to 2 MiB.
+There is no background repository discovery.
+
+The host keeps a reference index for each chat it has read. The first read scans the stored
+rows once. Later reads and change events scan only rows added since then, messages that were
+still streaming and channel tasks whose stored text changed. The index is rebuilt from the
+stored rows after an hour, so a deleted message stops counting.
+
+A read with a stored snapshot returns it at once with `stale` and `refreshedAt`. The snapshot is
+stale when the chat's references changed or it is five minutes old, and a stale read starts a
+background refresh. The host also refreshes a chat in the background two seconds after its
+messages, channel tasks or channel change, and every five minutes for chats read in the last
+24 hours. A background refresh reads open PRs and new references again and keeps merged PRs.
+Refreshes run one chat at a time. A read without a stored snapshot waits for the provider reads.
 
 The extraction bounds are 5,000 recent messages, 5,000 channel tasks, 200,000
 characters per source text, four million scanned characters in total and 200 unique
@@ -43,7 +55,8 @@ any bound reached. It does not claim that a partial set contains all open PRs or
 the three most recent merges in the full history.
 
 `context-prs-v1` is an optional Team API capability. Its frozen route is
-`POST /v1/context-prs/read`. Older hosts return an unsupported client snapshot.
+`POST /v1/context-prs/read`. `stale` and `refreshedAt` are optional response fields; an
+older reader drops them. Older hosts return an unsupported client snapshot.
 A remote request requires the selected agent to be visible. A channel request
 requires every current member agent to be visible. The host checks access before
 provider work and again before returning data. A missing or private scope returns
@@ -55,6 +68,7 @@ Run the focused synthetic service and authenticated HTTP check with:
 
 ```sh
 npm exec --yes --package=bun@1.4.2 -- bun --preload ./scripts/team-api-routes-e2e-electron.mjs scripts/context-prs-e2e.ts
+npm exec --yes --package=bun@1.4.2 -- bun --preload ./scripts/team-api-routes-e2e-electron.mjs scripts/context-prs-fresh-e2e.ts
 ```
 
 The report is `.openbot-build/context-prs-e2e/report.json`. The fixture uses a real

@@ -492,6 +492,7 @@ const TEARDOWN_ORDER = {
   computerUsePermissionHelp: 19,
   dynamicIsland: 20,
   machineAlerts: 21,
+  contextPrs: 21.5,
   themePalettes: 22,
   // Before the browser, so no sign-in opens a tab while it stops.
   providerAccountsHost: 27,
@@ -2233,6 +2234,15 @@ export async function createApplicationServices({
       () => providerRuntimes.mcpToolRuntimes().binDirectories,
     ),
   );
+  service.on("event", (event) => {
+    if (event.type === "channels-changed") contextPrs.noteChanged({ kind: "channel", id: event.channelId });
+    else if (event.type === "conversation" || event.type === "agent-task-conversation")
+      contextPrs.noteChanged({ kind: "agent", id: event.snapshot.agentId });
+    else if (event.type === "conversation-invalidated" || event.type === "turn-completed")
+      contextPrs.noteChanged({ kind: "agent", id: event.agentId });
+  });
+  contextPrs.start();
+  teardown.push(TEARDOWN_ORDER.contextPrs, "the context PR refresh", () => contextPrs.stop());
   githubConnector.onAgentAccessChanged(() => {
     contextPrs.invalidate();
     void runCauseEffect(service.notifyGitHubConnectorChanged()).catch((error) =>

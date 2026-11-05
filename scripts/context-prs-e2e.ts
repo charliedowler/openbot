@@ -237,8 +237,14 @@ try {
       assert.equal(requests.length, before);
       assert.equal((await runCauseEffect(prs.read({ scope }))).open[0]?.checkedAt, first.open[0]?.checkedAt);
       insertMessage("New https://github.com/example/repo/pull/6");
-      await runCauseEffect(prs.read({ scope }));
+      const cached = await runCauseEffect(prs.read({ scope }));
+      assert.equal(cached.stale, true);
+      assert.ok(!cached.open.some((row) => row.number === 6));
+      await prs.whenIdle();
       assert.equal(requests.length, before + 3);
+      const updated = await runCauseEffect(prs.read({ scope }));
+      assert.equal(updated.stale, false);
+      assert.ok(updated.open.some((row) => row.number === 6));
       await runCauseEffect(prs.read({ scope, refresh: true }));
       assert.equal(requests.length, before + 15);
       prs.invalidate();
@@ -248,6 +254,8 @@ try {
   );
   await check("Merged PRs sort by actual merge time and keep only the newest three", async () => {
     insertMessage([10, 11, 12, 13].map((n) => `https://github.com/example/repo/pull/${n}`).join(" "));
+    await runCauseEffect(prs.read({ scope }));
+    await prs.whenIdle();
     const result = await runCauseEffect(prs.read({ scope }));
     assert.deepEqual(
       result.merged.map((row) => row.number),
