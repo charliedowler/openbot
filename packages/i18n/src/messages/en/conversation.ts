@@ -50,6 +50,7 @@ export const messages = defineMessages("conversation", {
   "conversation.header.modelsUnavailable": "Models are available after an agent CLI connects.",
   "conversation.header.modelNextTurn": "After this turn",
   "conversation.header.modelNextTurnDetail": "{running} finishes this turn. {next} starts with the next one.",
+  "conversation.header.showBackground": "Show background",
   "conversation.sidePanel.label": "Side panel",
   "conversation.sidePanel.open": "Open side panel",
   "conversation.sidePanel.close": "Close side panel",

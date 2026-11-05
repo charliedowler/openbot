@@ -51,6 +51,7 @@ export const messages = {
   "conversation.header.modelsUnavailable": "エージェント CLI が接続すると、モデルを選択できます。",
   "conversation.header.modelNextTurn": "このターンの後",
   "conversation.header.modelNextTurnDetail": "このターンは {running} で完了します。次のターンから {next} を使います。",
+  "conversation.header.showBackground": "バックグラウンドを表示",
   "conversation.sidePanel.label": "サイドパネル",
   "conversation.sidePanel.open": "サイドパネルを開く",
   "conversation.sidePanel.close": "サイドパネルを閉じる",

@@ -45,6 +45,11 @@ import type {
   SidePanelPane,
 } from "./conversation-types";
 import {
+  directChatBackgroundKey,
+  directChatBackgroundShown,
+  setDirectChatBackgroundShown,
+} from "./direct-chat-background";
+import {
   clearQuotedTextHighlight,
   highlightQuotedText,
   messageTextBlocks,
@@ -590,12 +595,31 @@ export function createConversationViewScope(props: ConversationProps) {
       if (target && sent) pendingSends.settle(target, drawnIds);
     },
   );
+  /** The key of the background choice of the agent's own chat. A channel has none. */
+  const backgroundKey = () => {
+    const agentId = props.agent?.id;
+    return channel || !agentId ? undefined : directChatBackgroundKey(props.server?.id ?? "local", agentId);
+  };
+  /** The background switch of the agent's own chat: off until the person turns it on. */
+  const backgroundToggle = () => {
+    const key = backgroundKey();
+    return key === undefined
+      ? undefined
+      : {
+          checked: directChatBackgroundShown(key),
+          onChange: (shown: boolean) => setDirectChatBackgroundShown(key, shown),
+        };
+  };
   const scroll = createScrollStore({
     props,
     markingRead,
     setMarkingRead,
     setComposerError: setScopedComposerError,
     pendingMessages,
+    hideBackground: () => {
+      const key = backgroundKey();
+      return key !== undefined && !directChatBackgroundShown(key);
+    },
     elements: {
       scrollElement: () => scrollElement,
       virtualRoot: () => virtualRoot,
@@ -615,6 +639,7 @@ export function createConversationViewScope(props: ConversationProps) {
     clearNewMessages,
     messageVirtualizer,
     timelineMessages,
+    backgroundStepsHidden,
     toggleRoutineRun,
     toggleAgentMessage,
     timelineIndexById,
@@ -2042,6 +2067,8 @@ export function createConversationViewScope(props: ConversationProps) {
     markingRead,
     messageVirtualizer,
     timelineMessages,
+    backgroundStepsHidden,
+    backgroundToggle,
     toggleRoutineRun,
     toggleAgentMessage,
     timelineIndexById,

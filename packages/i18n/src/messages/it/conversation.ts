@@ -51,6 +51,7 @@ export const messages = {
   "conversation.header.modelsUnavailable": "I modelli sono disponibili dopo che una CLI dell'agente si è connessa.",
   "conversation.header.modelNextTurn": "Dopo questo turno",
   "conversation.header.modelNextTurnDetail": "{running} completa questo turno. {next} inizia dal prossimo.",
+  "conversation.header.showBackground": "Mostra attività in background",
   "conversation.sidePanel.label": "Pannello laterale",
   "conversation.sidePanel.open": "Apri il pannello laterale",
   "conversation.sidePanel.close": "Chiudi il pannello laterale",

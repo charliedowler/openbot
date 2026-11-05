@@ -23,6 +23,7 @@ import type { VirtualItem } from "@tanstack/virtual-core";
 import { createEffect, createMemo, createSignal, onCleanup, untrack } from "solid-js";
 import { groupAgentMessageMarkers, markOpenAgentMessages } from "../agent-message-timeline";
 import type { ConversationProps, ConversationTarget } from "../conversation-types";
+import { backgroundTurnIds, hiddenInDirectChat } from "../direct-chat-background";
 import { summarizeHostedSiteMessages } from "../hosted-site-timeline";
 import {
   expandRoutineRunGroups,
@@ -55,6 +56,8 @@ export interface ScrollStoreDeps {
   setComposerError: (error: string | null, targetOverride?: ConversationTarget) => void;
   /** The user's messages the host has not drawn yet. They follow the transcript. */
   pendingMessages: () => AgentMessage[];
+  /** True while the agent's own chat hides its background. A channel never hides it. */
+  hideBackground: () => boolean;
   elements: ScrollElements;
   sticky: ScrollStickyState;
 }
@@ -77,13 +80,24 @@ export function createScrollStore(deps: ScrollStoreDeps) {
   const answeredTurns = createMemo(
     () => new Set(deps.props.messages.flatMap((message) => (isTurnAnswer(message) ? [message.turnId] : []))),
   );
+  const backgroundTurns = createMemo(() =>
+    deps.hideBackground() ? backgroundTurnIds(deps.props.messages) : undefined,
+  );
+  const hiddenBackground = (message: AgentMessage) => {
+    const turns = backgroundTurns();
+    return turns !== undefined && hiddenInDirectChat(message, turns);
+  };
+  /** Whether the steps of a turn stay hidden: they belong to the background that the chat hides. */
+  const backgroundStepsHidden = (turnId: string | undefined) =>
+    turnId !== undefined && backgroundTurns()?.has(turnId) === true;
   const shownMessages = createMemo(() =>
     summarizeHostedSiteMessages(
       deps.props.messages.filter(
         (message) =>
           message.kind !== "thinking" &&
           !(message.kind === "memory-changes" && answeredTurns().has(message.turnId)) &&
-          !silentAgentAnswer(message),
+          !silentAgentAnswer(message) &&
+          !hiddenBackground(message),
       ),
     ),
   );
@@ -155,7 +169,10 @@ export function createScrollStore(deps: ScrollStoreDeps) {
   );
   /* Every row anchors the count, but only some rows add to it. */
   const timelineRows = createMemo(() =>
-    deps.props.messages.map((message) => ({ id: message.id, countable: countableTimelineMessage(message) })),
+    deps.props.messages.map((message) => ({
+      id: message.id,
+      countable: countableTimelineMessage(message) && !hiddenBackground(message),
+    })),
   );
 
   function clearNewMessages(): void {
@@ -332,6 +349,7 @@ export function createScrollStore(deps: ScrollStoreDeps) {
     clearNewMessages,
     messageVirtualizer,
     timelineMessages,
+    backgroundStepsHidden,
     toggleRoutineRun,
     toggleAgentMessage,
     timelineIndexById,

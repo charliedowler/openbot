@@ -6,7 +6,11 @@ import type { AgentMessage, ChatActionMarkerModel } from "@openbot/ui/data";
 import { ChannelActivityIndicator } from "@openbot/ui/features/channels/ChannelActivityIndicator";
 import { AgentActivityIndicator } from "@openbot/ui/features/conversation/AgentActivity";
 import { AgentChatEmptyState } from "@openbot/ui/features/conversation/AgentChatEmptyState";
-import { AgentStepsDisclosure, type AgentStepsTrace } from "@openbot/ui/features/conversation/AgentSteps";
+import {
+  type AgentStep,
+  AgentStepsDisclosure,
+  type AgentStepsTrace,
+} from "@openbot/ui/features/conversation/AgentSteps";
 import { AttachmentCards } from "@openbot/ui/features/conversation/AttachmentCards";
 import { UsageLimitAskCard } from "@openbot/ui/features/conversation/BackupModels";
 import { branchPointIds } from "@openbot/ui/features/conversation/branch-points";
@@ -62,6 +66,8 @@ import { desktopChatEventRoutinesApi } from "./routine-webhooks-api";
 import { PENDING_SEND_ID_PREFIX, pendingSendRetrySafe } from "./stores/pending-send-store";
 import { createTurnSteps, SUBAGENT_SPAN_PREFIX } from "./turn-steps";
 
+const NO_STEPS: AgentStep[] = [];
+
 /**
  * A message that renders only an action marker, with no bubble of its own. A routine instruction is
  * one: its marker names the routine, and the instruction text stays in the routine settings.
@@ -115,6 +121,7 @@ export function ConversationTimeline() {
     activeChatSearchIndex,
     agentActivitySpaceReserved,
     attachmentAction,
+    backgroundStepsHidden,
     channel,
     chatSearchMatches,
     chatSearchOpen,
@@ -501,6 +508,11 @@ export function ConversationTimeline() {
     activeTurnId: () => props.activeTurnId,
   });
   const showAgentSteps = useShowAgentSteps();
+  /** The steps above an answer. A turn of the background that the chat hides shows only its answer. */
+  const stepsAbove = (message: AgentMessage | undefined) =>
+    backgroundStepsHidden(message?.turnId) ? undefined : turnSteps.stepsAbove(message?.id);
+  const activeSteps = () =>
+    backgroundStepsHidden(props.activeTurnId ?? undefined) ? NO_STEPS : turnSteps.activeSteps();
   const traceKeyboard = currentDevicePlatform() === "darwin" ? "mac" : "pc";
   /** The trace that the steps row above an answer opens. */
   const traceAbove = (messageId: string | undefined): AgentStepsTrace => ({
@@ -1183,7 +1195,7 @@ export function ConversationTimeline() {
                         }}
                       />
                     </Show>
-                    <Show when={turnSteps.stepsAbove(message()?.id)}>
+                    <Show when={stepsAbove(message())}>
                       {(steps) => (
                         <ChatRowBoundary>
                           <AgentStepsDisclosure
@@ -1403,7 +1415,7 @@ export function ConversationTimeline() {
                       label={activity().label}
                       phase={activity().phase}
                       since={activity().since}
-                      steps={turnSteps.activeSteps()}
+                      steps={activeSteps()}
                       stepsOpenByDefault={showAgentSteps()}
                       waitingFor={waitingProviderName()}
                     />

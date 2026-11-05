@@ -55,6 +55,20 @@
   height: 12px;
 }
 
+.ui-switch-field.conversation-background-toggle {
+  width: auto;
+  flex: none;
+  gap: var(--openbot-space-1-5);
+}
+
+.conversation-background-toggle .ui-switch-label {
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+  font-weight: var(--openbot-weight-regular);
+  line-height: var(--openbot-leading-sm);
+  white-space: nowrap;
+}
+
 .provider-model-picker {
   position: relative;
   min-width: 0;
