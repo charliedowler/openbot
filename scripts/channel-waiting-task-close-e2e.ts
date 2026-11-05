@@ -10,6 +10,7 @@ import { AgentStore } from "../src/backend/agent-store";
 import { AgentWaitError, AgentWaitStore } from "../src/backend/agent-waits/agent-wait-store";
 import { AgentWaits } from "../src/backend/agent-waits/agent-waits";
 import { ChannelToolInputError, channelFailure } from "../src/backend/channel-effects";
+import { ChannelImages } from "../src/backend/channel-images";
 import { ChannelService } from "../src/backend/channel-service";
 import { CHANNEL_TOOL_DEFINITIONS } from "../src/backend/channel-tools";
 import { runCauseEffect } from "../src/backend/effect-boundary";
@@ -42,7 +43,7 @@ class Harness {
     this.store = new AgentStore(join(root, "state"), join(root, "home"), this.database);
     this.mailbox = new MailboxStore(join(root, "state"), this.store.sharedRoot, this.database);
     this.waitStore = new AgentWaitStore({ database: this.database });
-    this.channels = new ChannelService(this.database, this.mailbox, {
+    this.channels = new ChannelService(this.database, this.mailbox, new ChannelImages(join(root, "channel-images")), {
       agents: () => this.store.list(),
       generate: () => Effect.die(new Error("No routing model is used by this check.")),
       schedule: () => this.changed(),
