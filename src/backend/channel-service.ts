@@ -83,6 +83,12 @@ export interface ChannelHooks {
   awaitDrain?(agentId: string): Effect.Effect<void, ChannelOperationError> | undefined;
   interrupt(agentId: string, turnId: string, threadId: string): Effect.Effect<void, ChannelOperationError>;
   busy(agentId: string): boolean;
+  /**
+   * Whether a turn of this agent runs now, or a spent plan holds it. `busy` also counts the queued
+   * messages of the agent's own chat; a fresh request of a person does not wait for those. Omitted,
+   * `busy` decides for every task.
+   */
+  turnRunning?(agentId: string): boolean;
   /** Whether a spent provider plan holds this agent, so a routing turn on its model would be refused. */
   usageLimited?(agentId: string): boolean;
   /**
@@ -1122,6 +1128,32 @@ export class ChannelService {
     };
   }
 
+  /**
+   * The queued tasks of a channel in the order the pump tries them: fresh requests of a person first,
+   * then the rest, each group oldest first. A channel lead with a queue of routine-made tasks, such
+   * as intake events and woken waits, made a new message of the person wait behind every one of them,
+   * one turn each.
+   */
+  #queuedInOrder(channelId: string): ChannelTask[] {
+    const queued = this.store.tasks(channelId).filter((item) => item.state === "queued");
+    const fresh = new Set(queued.filter((item) => this.#freshPersonRequest(item, channelId)).map((item) => item.id));
+    return [...queued.filter((item) => fresh.has(item.id)), ...queued.filter((item) => !fresh.has(item.id))];
+  }
+
+  /**
+   * Whether a person's message made this request and no assignment has carried it yet. A routine run
+   * writes its request as a member with a `routine:` id. A subtask is an agent's work under the
+   * request. A woken or resumed task keeps the request its earlier assignment carried.
+   */
+  #freshPersonRequest(task: ChannelTask, channelId: string): boolean {
+    if (task.parentTaskId !== null) return false;
+    const request = this.store.message(channelId, task.requestMessageId);
+    if (request?.author.kind !== "member" || request.author.id.startsWith("routine:")) return false;
+    return !this.store
+      .assignments(channelId)
+      .some((assignment) => assignment.taskId === task.id && assignment.requestMessageId === task.requestMessageId);
+  }
+
   /** Every task by id and every active assignment, across all channels. */
   #scheduling(): { tasks: ReadonlyMap<string, ChannelTask>; assignments: ChannelAssignment[] } {
     const ids = this.store.ids();
@@ -1398,7 +1430,8 @@ export class ChannelService {
     this: ChannelService,
     channelId: string,
   ): Effect.fn.Return<void, ChannelOperationError> {
-    for (const candidate of yield* channelSync(() => this.store.tasks(channelId))) {
+    const queued = yield* channelSync(() => this.#queuedInOrder(channelId));
+    for (const candidate of queued) {
       if (this.#stopped || this.#deletedChannels.has(channelId)) return;
       // One row each, not every task of the channel again: a long channel holds thousands of
       // finished tasks, and the whole list for each of them blocked the main process for minutes.
@@ -1723,8 +1756,13 @@ export class ChannelService {
         continue;
       }
       if (!task.ownerAgentId) continue;
+      // A fresh request of a person waits for a running turn of its owner, not for the queued
+      // messages of the owner's own chat: its delivery goes to the head of that queue.
+      const held = this.#freshPersonRequest(task, channelId)
+        ? (this.hooks.turnRunning ?? this.hooks.busy)(task.ownerAgentId)
+        : this.hooks.busy(task.ownerAgentId);
       // A hidden owner keeps the task. It waits, as for a busy owner, until the user restores the agent.
-      if (this.hooks.busy(task.ownerAgentId) || this.hooks.hidden?.(task.ownerAgentId)) {
+      if (held || this.hooks.hidden?.(task.ownerAgentId)) {
         this.#waitingForAgents.add(channelId);
         continue;
       }

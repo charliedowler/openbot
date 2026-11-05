@@ -328,7 +328,12 @@ keeps its place too. The run has its own provider session (see
 the own chat, and the own chat's messages other than channel work wait for it. A compaction of the
 chat session, the usage limit, a changing provider process, memory and turn slots hold the routine
 lane too. Two turns of the agent then work in the same workspace, so a file that both write needs
-one writer. A new channel task still waits while a turn of the own chat runs (`busy`). When the provider of the agent runs one turn at a time (`concurrentTurns:
+one writer. A new channel task still waits while a turn of the own chat runs (`busy`). The pump tries
+the queued tasks of a channel in two groups: fresh requests of a person first (a root task whose
+request a person wrote and that no assignment has carried yet), then the rest, each group oldest
+first, so a new message of the person does not wait behind every intake event and woken wait of the
+lead. A fresh request of a person waits only for a running turn of its owner (`turnRunning`), not for
+the queued messages of the owner's own chat, because its delivery goes to the head of that queue. When the provider of the agent runs one turn at a time (`concurrentTurns:
 false`), its task turns count as busy. Only declared `browser` and `workspace:<path>` resources are
 serialized: the same browser, or two workspaces where one path contains the other. An empty list,
 `none`, and `host` (from an earlier version) reserve nothing. An assignment keeps the resources it
