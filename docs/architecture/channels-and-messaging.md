@@ -271,6 +271,11 @@ context budget in one call, so they do not use the two-minute profile generation
 lead's model, provider account and reasoning setting still apply. A timeout leaves the stored
 summary at its last completed chunk. Resume retries the work that remains. Cancellation stops the
 disposable provider client and removes its temporary directory.
+A summary over 12,000 characters gets a shorten request with an 8,000-character target, then one
+with a 4,000-character target. A summary that is still too long is cut at the last line end under
+12,000 characters. An empty summary answer keeps the stored summary and its sequence. The packet
+then holds the newest messages that fit half the budget and names the sequences that it leaves out.
+The assignment fails only when the newest message alone does not fit.
 The provider acceptance cursor records context delivery. Context packets remain self-contained so
 provider replacement or compaction does not remove shared decisions. Unrelated server conversations
 are available through paginated retrieval and are not inserted automatically. Agent memories keep
