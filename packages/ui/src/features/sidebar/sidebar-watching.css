@@ -475,6 +475,7 @@
 
 .sidebar-task-pick-up {
   margin-left: auto;
+  font-size: var(--openbot-text-sm);
 }
 
 .sidebar-task-pick-up svg,
@@ -489,6 +490,13 @@
 
 .sidebar-task-pick-up-agent-trigger {
   gap: var(--openbot-space-1);
+  padding-inline: 0;
   color: var(--openbot-text-secondary);
   font-size: var(--openbot-text-sm);
+}
+
+.sidebar-task-pick-up-check {
+  width: var(--openbot-space-4);
+  height: var(--openbot-space-4);
+  margin-left: auto;
 }
