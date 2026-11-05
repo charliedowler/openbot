@@ -99,6 +99,7 @@ import { VAULT_IMPORT_CODECS } from "./vault-import-v1";
 import { VAULT_CODECS } from "./vault-v1";
 import { VAULT_V2_CODECS } from "./vault-v2";
 import { WATCH_REGISTRY_CODECS } from "./watch-registry-v1";
+import { WATCH_REGISTRY_V2_CODECS } from "./watch-registry-v2";
 import { WEBHOOK_SENDER_SECRET_CODECS } from "./webhook-sender-secret-v1";
 import { WEBHOOK_TESTS_CODECS } from "./webhook-tests-v1";
 import { WHATSAPP_CONNECTOR_CODECS } from "./whatsapp-connector-v1";
@@ -151,6 +152,7 @@ const CODECS: ReadonlyMap<string, OptionalRouteCodec> = new Map([
   ...SHARED_DIRECTORY_CODECS,
   ...CONTEXT_PRS_CODECS,
   ...WATCH_REGISTRY_CODECS,
+  ...WATCH_REGISTRY_V2_CODECS,
   ...WORKSPACE_DIRECTORY_CODECS,
   ...AGENT_HOST_SETTINGS_CODECS,
   ...AGENT_BACKUP_MODELS_CODECS,

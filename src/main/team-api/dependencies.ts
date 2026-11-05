@@ -172,6 +172,7 @@ type TeamApiAgentMethods = Pick<
 
 export type TeamApiAgents = TeamApiAgentMethods & {
   getWatchingSnapshot?: AgentService["getWatchingSnapshot"];
+  getWatchingSnapshotV2?: AgentService["getWatchingSnapshotV2"];
   on: (event: "event", listener: (event: AgentEvent) => void) => void;
   off: (event: "event", listener: (event: AgentEvent) => void) => void;
 };
