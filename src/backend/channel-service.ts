@@ -26,6 +26,7 @@ import {
 } from "@openbot/contracts/ipc";
 import { type DynamicRecord, isDynamicRecord, isString } from "@openbot/contracts/runtime-values";
 import { isFixedSourceText, matchingSourceKeys, sourceText } from "@openbot/i18n/source";
+import { createOpenBotLogger } from "@openbot/logging";
 import { Deferred, Effect, Exit, Fiber, Result, Schema, Scope } from "effect";
 import {
   type ChannelOperationError,
@@ -119,6 +120,8 @@ export interface ChannelHooks {
   eventWaitQueued?(agentId: string, waitIds: string[], deliveryId: string): void;
   error(error: unknown): void;
 }
+
+const logger = createOpenBotLogger("channel-service");
 
 class ChannelRoutingError extends Schema.TaggedError<ChannelRoutingError>()("ChannelRoutingError", {
   message: Schema.String,
@@ -1398,26 +1401,45 @@ export class ChannelService {
             continue;
           }
           channel = yield* channelSync(() => this.store.get(channelId));
-          // A cause without channel text goes to the redacted error path; without it no one could
-          // see why routing failed.
-          const shown = error instanceof ChannelRoutingError ? error.message : routingFailureText(error);
-          if (shown === null) this.hooks.error(error);
-          const detail = shown ?? sourceText("error.backend.channelRoutingFailed");
-          yield* channelSync(() =>
-            this.store.update(channel, {
-              tasks: [{ ...task, state: "paused", error: detail }],
-              messages: [
-                this.message(
-                  channelId,
-                  task.id,
-                  { kind: "coordinator", id: "coordinator", name: "Coordinator" },
-                  detail,
-                ),
-              ],
-            }),
-          );
-          this.publish(channelId);
-          continue;
+          const fallbackLead = lead;
+          if (
+            fallbackLead &&
+            !task.ownerAgentId &&
+            routingFallsBackToLead(error) &&
+            this.eligibleMembers(channel).includes(fallbackLead.id)
+          ) {
+            logger.warn("Channel routing failed. The lead takes the request.", {
+              channelId,
+              taskId: task.id,
+              reason: routingFailureReason(error),
+            });
+            task = { ...task, ownerAgentId: fallbackLead.id };
+            const assigned = task;
+            yield* channelSync(() => this.store.update(channel, { tasks: [assigned] }));
+            this.publish(channelId);
+            channel = yield* channelSync(() => this.store.get(channelId));
+          } else {
+            // A cause without channel text goes to the redacted error path; without it no one could
+            // see why routing failed.
+            const shown = error instanceof ChannelRoutingError ? error.message : routingFailureText(error);
+            if (shown === null) this.hooks.error(error);
+            const detail = shown ?? sourceText("error.backend.channelRoutingFailed");
+            yield* channelSync(() =>
+              this.store.update(channel, {
+                tasks: [{ ...task, state: "paused", error: detail }],
+                messages: [
+                  this.message(
+                    channelId,
+                    task.id,
+                    { kind: "coordinator", id: "coordinator", name: "Coordinator" },
+                    detail,
+                  ),
+                ],
+              }),
+            );
+            this.publish(channelId);
+            continue;
+          }
         }
       }
       const owner = task.ownerAgentId;
@@ -3517,6 +3539,27 @@ function routingFailureText(error: unknown): string | null {
   const keys = matchingSourceKeys(error.message);
   if (keys.some((key) => key.startsWith("error.agent.profile"))) return sourceText("error.backend.channelLeadFailed");
   return keys.some((key) => key.startsWith("error.backend.")) ? error.message : null;
+}
+
+/**
+ * Whether a failed routing turn hands the request to the lead. A timeout, a provider failure, an
+ * unreadable answer or a prompt that does not fit says nothing about who should answer, so the lead
+ * answers, as in a channel of one member. A question from the lead, a missing lead and a member the
+ * lead named who cannot take work keep their channel text.
+ */
+function routingFallsBackToLead(error: unknown): boolean {
+  if (!(error instanceof ChannelRoutingError)) return true;
+  return (
+    error.message === sourceText("error.backend.channelRoutingUnreadable") ||
+    error.message === sourceText("error.backend.channelRoutingTooLong")
+  );
+}
+
+/** The catalog key of a routing failure for the log, or the error's name. Provider text is left out. */
+function routingFailureReason(error: unknown): string {
+  if (error instanceof Error && isFixedSourceText(error.message))
+    return matchingSourceKeys(error.message)[0] ?? error.name;
+  return error instanceof Error ? error.name : typeof error;
 }
 
 const STOP_NOTICE_PREFIX = "channel-stop-notice-";
