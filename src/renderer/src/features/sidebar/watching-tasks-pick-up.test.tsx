@@ -96,7 +96,7 @@ describe("Tasks: Pick this up", () => {
       "agent-compass",
       [
         "Pick this up: Decision: Pick the rollout date",
-        "Recommendation/trigger: Recommend Monday",
+        "Recommend Monday",
         "Waiting on: Charlie since Wed, Nov 4, 09:30 AM UTC",
         "Owner: Helm",
         "Due: Fri, Nov 6, 05:00 PM UTC",
