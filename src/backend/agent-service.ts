@@ -140,7 +140,7 @@ import { CLAUDE_API_KEY_ACCOUNT_ID } from "@openbot/contracts/team-protocol/clau
 import { ContextCompactRefusedError } from "@openbot/contracts/team-protocol/context-compact-v1";
 import { ContextResetBusyError } from "@openbot/contracts/team-protocol/context-reset-v1";
 import type { QueueEditRequest } from "@openbot/contracts/team-protocol/queue-edit-v1";
-import type { WatchingSnapshot, WatchingWait } from "@openbot/contracts/watch-registry";
+import type { WatchingSnapshot, WatchingTasks, WatchingWait } from "@openbot/contracts/watch-registry";
 import { sourceText } from "@openbot/i18n/source";
 import { createOpenBotLogger } from "@openbot/logging";
 import { classifyFailure } from "@openbot/telemetry";
@@ -302,6 +302,8 @@ interface AgentServiceEvents {
 
 export interface AgentServiceOptions {
   watchRegistry?: () => WatchingSnapshot["registry"];
+  watchRegistryV2?: () => WatchingSnapshot["registry"];
+  watchTasks?: () => WatchingTasks | null;
   store: AgentStore;
   mailbox: MailboxStore;
   browser: AgentBrowserHost;
@@ -499,6 +501,8 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
   readonly #turn: TurnLifecycle;
   readonly #compaction: ContextCompaction;
   readonly #watchRegistry: () => WatchingSnapshot["registry"];
+  readonly #watchRegistryV2: () => WatchingSnapshot["registry"];
+  readonly #watchTasks: () => WatchingTasks | null;
   readonly #duplication: DuplicationGate;
   readonly #removal: AgentRemoval;
   readonly #tools: OpenBotToolRouter;
@@ -521,6 +525,8 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
   constructor(options: AgentServiceOptions) {
     super();
     this.#watchRegistry = options.watchRegistry ?? (() => null);
+    this.#watchRegistryV2 = options.watchRegistryV2 ?? this.#watchRegistry;
+    this.#watchTasks = options.watchTasks ?? (() => null);
     const {
       store,
       mailbox,
@@ -1864,6 +1870,54 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
   }
 
   getWatchingSnapshot(visibleAgents?: ReadonlySet<string>): WatchingSnapshot {
+    const { registry, waits } = this.#watching(this.#watchRegistry(), visibleAgents);
+    return {
+      registry: registry
+        ? {
+            ...registry,
+            version: 1,
+            watches: registry.watches.map(({ summary: _s, purpose: _p, receiverAgentIds: _r, ...watch }) => watch),
+          }
+        : null,
+      waits,
+    };
+  }
+
+  getWatchingSnapshotV2(
+    visibleAgents?: ReadonlySet<string>,
+    options: { includeUnowned?: boolean } = {},
+  ): WatchingSnapshot {
+    const { registry, waits, visible } = this.#watching(this.#watchRegistryV2(), visibleAgents);
+    const tasks = this.#watchTasks();
+    const includeUnowned = options.includeUnowned ?? visibleAgents === undefined;
+    return {
+      registry: registry
+        ? {
+            ...registry,
+            version: 2,
+            watches: registry.watches.map((watch) => {
+              const receivers = watch.receiverAgentIds?.filter((id) => visible.has(id));
+              const { receiverAgentIds: _receivers, ...rest } = watch;
+              return receivers?.length ? { ...rest, receiverAgentIds: receivers } : rest;
+            }),
+          }
+        : null,
+      tasks: tasks
+        ? {
+            ...tasks,
+            items: tasks.items.filter((task) =>
+              task.ownerAgentId === undefined ? includeUnowned : visible.has(task.ownerAgentId),
+            ),
+          }
+        : null,
+      waits,
+    };
+  }
+
+  #watching(
+    registry: WatchingSnapshot["registry"],
+    visibleAgents?: ReadonlySet<string>,
+  ): WatchingSnapshot & { visible: ReadonlySet<string> } {
     const visible =
       visibleAgents ??
       new Set(
@@ -1871,7 +1925,6 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
           .filter((agent) => agent.hiddenAt === undefined)
           .map((agent) => agent.id),
       );
-    const registry = this.#watchRegistry();
     const channelVisible = (channelId: string, ownerAgentId: string) => {
       try {
         return (
@@ -1913,7 +1966,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
           ];
         }),
       );
-    return { registry: registry ? { ...registry, watches } : null, waits };
+    return { registry: registry ? { ...registry, watches } : null, waits, visible };
   }
 
   notifyWatchingChanged(): void {

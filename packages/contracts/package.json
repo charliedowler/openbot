@@ -49,6 +49,7 @@
     "./team-protocol/context-prs-v1": "./src/team-protocol/context-prs-v1.ts",
     "./watch-registry": "./src/watch-registry.ts",
     "./team-protocol/watch-registry-v1": "./src/team-protocol/watch-registry-v1.ts",
+    "./team-protocol/watch-registry-v2": "./src/team-protocol/watch-registry-v2.ts",
     "./mcp-connect-flows": "./src/mcp-connect-flows.ts",
     "./ipc-events": "./src/ipc-events.ts",
     "./ipc-skills": "./src/ipc-skills.ts",
