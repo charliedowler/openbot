@@ -38,6 +38,28 @@ describe("renderer permissions", () => {
     ).toBe(false);
   });
 
+  it("lets the trusted renderer show a video full screen", () => {
+    expect(canCheckRendererPermission("fullscreen", developmentUrl, {}, developmentUrl)).toBe(true);
+    expect(
+      canRequestRendererPermission("fullscreen", { requestingUrl: developmentUrl, isMainFrame: true }, developmentUrl),
+    ).toBe(true);
+    expect(canCheckRendererPermission("fullscreen", "https://example.com", {}, developmentUrl)).toBe(false);
+    expect(
+      canRequestRendererPermission(
+        "fullscreen",
+        { requestingUrl: "https://example.com", isMainFrame: true },
+        developmentUrl,
+      ),
+    ).toBe(false);
+    expect(
+      canRequestRendererPermission(
+        "fullscreen",
+        { requestingUrl: "openbot-visual://file/attachment-1", isMainFrame: false },
+        developmentUrl,
+      ),
+    ).toBe(false);
+  });
+
   it("refuses a frame inside the trusted window, such as a visual reply", () => {
     const visualFrame = { requestingUrl: "openbot-visual://file/attachment-1", isMainFrame: false };
     expect(canRequestRendererPermission("clipboard-sanitized-write", visualFrame, developmentUrl)).toBe(false);
