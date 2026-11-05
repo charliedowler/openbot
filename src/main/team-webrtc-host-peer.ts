@@ -84,6 +84,7 @@ import {
   TEAM_LONG_CAPABILITY_LISTS_CAPABILITY,
   TEAM_PROTOCOL_V9_CAPABILITY_LIMIT,
 } from "@openbot/contracts/team-protocol/v9";
+import { WATCH_REGISTRY_V2_ROUTES } from "@openbot/contracts/team-protocol/watch-registry-v2";
 import { sourceText } from "@openbot/i18n/source";
 import { Context, Deferred, Effect, Exit, Fiber, Layer, ManagedRuntime } from "effect";
 import type * as Ws from "ws";
@@ -628,7 +629,10 @@ export class TeamWebRtcHostPeer {
         cause: new GatewayError(401, "remote_session_missing", sourceText("error.remote.sessionNotReady")),
       });
     const url = yield* remoteDecode(() => new URL(input.path, `http://127.0.0.1:${this.#localApiPort}`));
-    if (url.origin !== `http://127.0.0.1:${this.#localApiPort}` || !url.pathname.startsWith("/v1/")) {
+    if (
+      url.origin !== `http://127.0.0.1:${this.#localApiPort}` ||
+      !(url.pathname.startsWith("/v1/") || url.pathname === WATCH_REGISTRY_V2_ROUTES.snapshot)
+    ) {
       return yield* new RemoteWorkflowError({
         cause: new GatewayError(400, "invalid_operation_path", "The Team API path is invalid."),
       });

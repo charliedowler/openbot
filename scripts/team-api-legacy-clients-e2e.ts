@@ -74,6 +74,12 @@ import {
   TEAM_PROTOCOL_V9,
   TEAM_PROTOCOL_V9_CAPABILITY_LIMIT,
 } from "@openbot/contracts/team-protocol/v9";
+import {
+  WATCH_REGISTRY_V2_CAPABILITY,
+  WATCH_REGISTRY_V2_CODECS,
+  WATCH_REGISTRY_V2_ROUTES,
+} from "@openbot/contracts/team-protocol/watch-registry-v2";
+import { decodeWatchingSnapshot } from "@openbot/contracts/watch-registry";
 import { sourceText } from "@openbot/i18n/source";
 import { plugin } from "bun";
 import { Effect } from "effect";
@@ -1211,6 +1217,54 @@ try {
       "A protocol 8 peer got a protocol 9 capability.",
     );
     return { protocol9: first.capabilities.length, protocol8: v8.capabilities.length };
+  });
+
+  await step("v9 RPC: GET /v2/watch-registry over WebRTC reaches the Team API; other /v2/ paths do not", async () => {
+    const read = async (path: string, capabilities: readonly string[]) => {
+      const requestId = randomUUID();
+      const from = v2.bridge.sent.length;
+      v2.bridge.emit(
+        "data",
+        "peer-v2",
+        "rpc",
+        encodeTeamProtocolV2Frame(
+          createTeamProtocolV2Request(requestId, "http.request", {
+            method: "GET",
+            path,
+            body: {},
+            capabilities: [...capabilities],
+          }),
+        ),
+      );
+      return v2.bridge.rpcFrom(from, rpcResponse(requestId));
+    };
+    const current = teamCapabilitiesForProtocol(TEAM_PROTOCOL_V9);
+    assert.ok(current.includes(WATCH_REGISTRY_V2_CAPABILITY), "A protocol 9 client has no watch-registry-v2.");
+    const answered = await read(WATCH_REGISTRY_V2_ROUTES.snapshot, current);
+    assert.ok(
+      "result" in answered,
+      `The host refused ${WATCH_REGISTRY_V2_ROUTES.snapshot}: ${JSON.stringify(answered)}.`,
+    );
+    const result = record(answered.result, "RPC result");
+    assert.equal(result.status, 200);
+    const codec = WATCH_REGISTRY_V2_CODECS.get(WATCH_REGISTRY_V2_ROUTES.snapshot);
+    assert.ok(codec);
+    const snapshot = decodeWatchingSnapshot(codec.response(200, result.body));
+    const withoutCapability = await read(
+      WATCH_REGISTRY_V2_ROUTES.snapshot,
+      current.filter((capability) => capability !== WATCH_REGISTRY_V2_CAPABILITY),
+    );
+    assert.ok("error" in withoutCapability, "A peer without watch-registry-v2 got the v2 snapshot.");
+    assert.equal(withoutCapability.error?.status, 400);
+    assert.notEqual(withoutCapability.error?.code, "invalid_operation_path");
+    const refused: Record<string, string | undefined> = {};
+    for (const path of ["/v2/watch-registry/extra", "/v2/agents", "/v20/watch-registry"]) {
+      const frame = await read(path, current);
+      assert.ok("error" in frame, `The host forwarded ${path}.`);
+      assert.equal(frame.error?.code, "invalid_operation_path", `${path}: ${JSON.stringify(frame)}.`);
+      refused[path] = frame.error?.code;
+    }
+    return { snapshot: { registry: snapshot.registry, waits: snapshot.waits.length }, refused };
   });
 
   await step("v8 RPC: a secure authentication answer over WebRTC reaches the agent (#3949)", async () => {
