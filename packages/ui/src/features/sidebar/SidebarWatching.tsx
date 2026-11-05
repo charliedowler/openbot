@@ -1,9 +1,11 @@
 import type { AppMessages, AppTextKey } from "@openbot/i18n";
 import {
   Button,
+  buttonVariants,
   Checkbox,
   ChevronDown,
   Dialog,
+  DropdownMenu,
   ExternalLink,
   Eye,
   IconButton,
@@ -13,7 +15,7 @@ import {
   Tabs,
   X,
 } from "@openbot/ui";
-import { createMemo, createSignal, createStore, createUniqueId, For, Show } from "solid-js";
+import { createMemo, createSignal, createStore, createUniqueId, For, onCleanup, Show } from "solid-js";
 import { useText } from "../../text";
 
 export interface SidebarWatchingItem {
@@ -42,6 +44,7 @@ export interface SidebarTaskItem {
   state: "waiting-on-charlie" | "in-progress" | "waiting-on-event" | "done";
   title: string;
   detail?: string | undefined;
+  ownerId?: string | undefined;
   ownerName?: string | undefined;
   link?: string | undefined;
   updatedAt: string;
@@ -60,6 +63,13 @@ export interface SidebarTaskHealth {
   reasons: string[];
   oldest?: { title: string; since: string } | undefined;
   longestWaiting?: { who: string; since: string } | undefined;
+}
+
+export interface SidebarTaskPickUp {
+  agents: readonly { id: string; name: string }[];
+  agentId: string | null;
+  onChangeAgent: (agentId: string) => void;
+  onPickUp: (agentId: string, message: string) => Promise<boolean> | boolean;
 }
 
 export interface SidebarTasksData {
@@ -552,7 +562,153 @@ function useDuration() {
   };
 }
 
-function TaskRow(props: { item: SidebarTaskItem; onOpenLink: (url: string) => void }) {
+const TASK_PICK_UP_ASK = {
+  decision: "sidebar.tasks.pickUp.message.askDecision",
+  "follow-up": "sidebar.tasks.pickUp.message.askFollowUp",
+  dispatch: "sidebar.tasks.pickUp.message.askDispatch",
+} as const satisfies Record<SidebarTaskItem["kind"], AppTextKey>;
+
+const PICK_UP_COOLDOWN_MS = 1500;
+
+function useTaskPickUpMessage() {
+  const { t, format } = useText();
+  const date = (value: string) =>
+    format.date(new Date(value), {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZoneName: "short",
+    });
+  return (item: SidebarTaskItem): string => {
+    const owner = item.ownerName ?? item.ownerId;
+    const lines = [
+      t("sidebar.tasks.pickUp.message.title", { kind: t(TASK_KINDS[item.kind]), title: item.title }),
+      item.detail ? t("sidebar.tasks.pickUp.message.detail", { detail: item.detail }) : undefined,
+      item.waitingOn
+        ? item.waitingSince
+          ? t("sidebar.tasks.pickUp.message.waitingSince", { who: item.waitingOn, since: date(item.waitingSince) })
+          : t("sidebar.tasks.pickUp.message.waitingOn", { who: item.waitingOn })
+        : undefined,
+      owner ? t("sidebar.tasks.pickUp.message.owner", { name: owner }) : undefined,
+      item.dueAt ? t("sidebar.tasks.pickUp.message.due", { date: date(item.dueAt) }) : undefined,
+      item.link ? t("sidebar.tasks.pickUp.message.link", { url: item.link }) : undefined,
+      t("sidebar.tasks.pickUp.message.task", { id: item.id }),
+      t(TASK_PICK_UP_ASK[item.kind]),
+    ];
+    return lines.filter((line) => line !== undefined).join("\n");
+  };
+}
+
+function TaskPickUpButton(props: { item: SidebarTaskItem; pickUp: SidebarTaskPickUp }) {
+  const { t } = useText();
+  const message = useTaskPickUpMessage();
+  const [busy, setBusy] = createSignal(false);
+  let sending = false;
+  let cooldown: number | undefined;
+  onCleanup(() => window.clearTimeout(cooldown));
+  const release = () => {
+    cooldown = window.setTimeout(() => {
+      sending = false;
+      setBusy(false);
+    }, PICK_UP_COOLDOWN_MS);
+  };
+  const pickUp = (agentId: string) => {
+    if (sending) return;
+    sending = true;
+    setBusy(true);
+    void Promise.resolve()
+      .then(() => props.pickUp.onPickUp(agentId, message(props.item)))
+      .catch(() => false)
+      .finally(release);
+  };
+  return (
+    <Show
+      when={props.pickUp.agentId}
+      fallback={
+        <DropdownMenu.Root placement="bottom-start" gutter={4}>
+          <DropdownMenu.Trigger
+            class={`${buttonVariants({ variant: "secondary", size: "xs" })} sidebar-task-pick-up`}
+            disabled={busy() || props.pickUp.agents.length === 0}
+          >
+            {t("sidebar.tasks.pickUp.action")}
+            <ChevronDown aria-hidden="true" />
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content aria-label={t("sidebar.tasks.pickUp.choose")}>
+              <For each={props.pickUp.agents}>
+                {(agent) => (
+                  <DropdownMenu.Item
+                    onSelect={() => {
+                      props.pickUp.onChangeAgent(agent.id);
+                      pickUp(agent.id);
+                    }}
+                  >
+                    {agent.name}
+                  </DropdownMenu.Item>
+                )}
+              </For>
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
+      }
+    >
+      {(agentId) => (
+        <Button
+          variant="secondary"
+          size="xs"
+          class="sidebar-task-pick-up"
+          disabled={busy()}
+          onClick={() => pickUp(agentId())}
+        >
+          {t("sidebar.tasks.pickUp.action")}
+        </Button>
+      )}
+    </Show>
+  );
+}
+
+function TaskPickUpAgentMenu(props: { pickUp: SidebarTaskPickUp }) {
+  const { t } = useText();
+  const name = () => props.pickUp.agents.find((agent) => agent.id === props.pickUp.agentId)?.name;
+  return (
+    <div class="sidebar-task-pick-up-agent">
+      <DropdownMenu.Root placement="bottom-start" gutter={4}>
+        <DropdownMenu.Trigger
+          class={`${buttonVariants({ variant: "ghost", size: "xs" })} sidebar-task-pick-up-agent-trigger`}
+          disabled={props.pickUp.agents.length === 0}
+        >
+          {name() ? t("sidebar.tasks.pickUp.with", { name: name() ?? "" }) : t("sidebar.tasks.pickUp.withNone")}
+          <ChevronDown aria-hidden="true" />
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Portal>
+          <DropdownMenu.Content>
+            <DropdownMenu.RadioGroup
+              aria-label={t("sidebar.tasks.pickUp.choose")}
+              value={props.pickUp.agentId ?? ""}
+              onChange={(agentId: string) => props.pickUp.onChangeAgent(agentId)}
+            >
+              <For each={props.pickUp.agents}>
+                {(agent) => (
+                  <DropdownMenu.RadioItem value={agent.id} closeOnSelect>
+                    {agent.name}
+                  </DropdownMenu.RadioItem>
+                )}
+              </For>
+            </DropdownMenu.RadioGroup>
+          </DropdownMenu.Content>
+        </DropdownMenu.Portal>
+      </DropdownMenu.Root>
+    </div>
+  );
+}
+
+function TaskRow(props: {
+  item: SidebarTaskItem;
+  onOpenLink: (url: string) => void;
+  pickUp?: SidebarTaskPickUp | undefined;
+}) {
   const { t, format } = useText();
   const duration = useDuration();
   const date = (value: string) =>
@@ -592,6 +748,9 @@ function TaskRow(props: { item: SidebarTaskItem; onOpenLink: (url: string) => vo
               <ExternalLink class="size-3" aria-hidden="true" />
             </Button>
           )}
+        </Show>
+        <Show when={props.item.state !== "done" ? props.pickUp : undefined}>
+          {(pickUp) => <TaskPickUpButton item={props.item} pickUp={pickUp()} />}
         </Show>
       </div>
     </li>
@@ -667,6 +826,7 @@ export function SidebarTasksDialog(props: {
   onClose: () => void;
   onRefresh: () => void;
   onOpenLink: (url: string) => void;
+  pickUp?: SidebarTaskPickUp | undefined;
 }) {
   const { t, format } = useText();
   const groups = createMemo(() => {
@@ -718,6 +878,7 @@ export function SidebarTasksDialog(props: {
               fallback={<p class="sidebar-watching-notice">{t("sidebar.tasks.unsupported")}</p>}
             >
               <Show when={props.data?.health}>{(health) => <TaskHealthHeader health={health()} />}</Show>
+              <Show when={props.pickUp}>{(pickUp) => <TaskPickUpAgentMenu pickUp={pickUp()} />}</Show>
               <p class="sidebar-watching-updated" role="status">
                 {props.loading && !props.data
                   ? t("sidebar.tasks.loading")
@@ -742,7 +903,7 @@ export function SidebarTasksDialog(props: {
                         </h3>
                         <ul class="sidebar-tasks-list">
                           <For each={group.items}>
-                            {(item) => <TaskRow item={item} onOpenLink={props.onOpenLink} />}
+                            {(item) => <TaskRow item={item} onOpenLink={props.onOpenLink} pickUp={props.pickUp} />}
                           </For>
                         </ul>
                       </section>

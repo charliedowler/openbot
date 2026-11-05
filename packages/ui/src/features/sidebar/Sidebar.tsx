@@ -12,6 +12,7 @@ import "./sidebar-watching.css";
 export type {
   SidebarTaskHealth,
   SidebarTaskItem,
+  SidebarTaskPickUp,
   SidebarTasksData,
   SidebarWatchingData,
   SidebarWatchingItem,
