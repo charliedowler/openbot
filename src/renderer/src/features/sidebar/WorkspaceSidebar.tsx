@@ -1,5 +1,5 @@
-import { type ChatWindowTarget, canAdministerServer } from "@openbot/contracts/ipc";
-import { AGENT_HIDDEN_CAPABILITY } from "@openbot/contracts/team-protocol/current";
+import { type ChatWindowTarget, canAdministerServer, LOCAL_SERVER_ID } from "@openbot/contracts/ipc";
+import { AGENT_HIDDEN_CAPABILITY, TEAM_MESSAGE_CLIENT_ID_CAPABILITY } from "@openbot/contracts/team-protocol/current";
 import { computeAgentAvatarMoods } from "@openbot/ui/features/agents/agent-avatar-mood";
 import { Sidebar, SidebarTasksDialog, SidebarWatchingDialog } from "@openbot/ui/features/sidebar/Sidebar";
 import { SidebarCommunityCard } from "@openbot/ui/features/sidebar/SidebarCommunityCard";
@@ -25,6 +25,7 @@ import { agentThreadAttention } from "../agents/agent-thread-attention";
 import { useAgents } from "../agents/agents-context";
 import { useChannels } from "../channels/channels-context";
 import { useConversation } from "../conversation/conversation-context";
+import { useConversationController } from "../conversation/conversation-controller-context";
 import { useDirectMessages } from "../conversation/direct-messages-context";
 import { useServerActions } from "../servers/server-actions";
 import { serverRoleCanAdminister } from "../servers/server-capabilities";
@@ -40,6 +41,7 @@ import { createMachineCard } from "./machine-card";
 import { ServerUpgradeOffer } from "./server-upgrade-offer";
 import { useSidebar } from "./sidebar-context";
 import { createStorageCard } from "./storage-card";
+import { createTaskPickUp } from "./task-pick-up";
 import { createSidebarWatching } from "./watching-view";
 
 /** Dismissing the mobile app card is a choice of this computer, like the sidebar width. The key is
@@ -97,7 +99,8 @@ export function WorkspaceSidebar(props: { peopleEnabled: boolean }) {
     activeServerSupportsCapability(AGENT_HIDDEN_CAPABILITY) && serverRoleCanAdminister(activeServer());
   const { activeTurns, subagentTurns, queues, failedTurns, usageLimits, pendingPrompts, pendingApprovals, approvals } =
     useTurns();
-  const { unreadReplies, agentUnreadReplies, recentReplies, markAllAgentMessagesRead } = useConversation();
+  const { unreadReplies, agentUnreadReplies, recentReplies, markAllAgentMessagesRead, sendMessage } = useConversation();
+  const { pendingSends } = useConversationController();
   const { directPeople, teamPresence } = usePresence();
   const { activeDirectMember, activeDirectMemberId, directThreads } = useDirectMessages();
   const { selectAgent, selectDirectMember, setGlobalSearchVisibility, chatHistory } = useNavigation();
@@ -107,6 +110,28 @@ export function WorkspaceSidebar(props: { peopleEnabled: boolean }) {
     revision: sidebar.watchingRevision,
     agents: agentList,
     channels: () => channels.state.channels,
+  });
+  const taskPickUp = createTaskPickUp({
+    serverId: activeServerId,
+    agents: () => agentList().map((agent) => ({ id: agent.id, name: agent.name })),
+    pickUp: (agentId, text) => {
+      const target = { agentId, serverId: activeServerId() };
+      const server = activeServer();
+      const retrySafe =
+        target.serverId === LOCAL_SERVER_ID ||
+        (server?.id === target.serverId &&
+          (server.kind !== "remote" ||
+            Boolean(server.compatibility?.capabilities.includes(TEAM_MESSAGE_CLIENT_ID_CAPABILITY))));
+      const queued = Boolean(activeTurns()[agentId]);
+      watching.closeTasks();
+      selectAgent(agentId);
+      pendingSends.add(
+        target,
+        { draft: { text, attachments: [], replyToMessageId: null }, text, retrySafe, queued },
+        (pending) => sendMessage(pending.text, [], null, target, pending.clientMessageId),
+      );
+      return true;
+    },
   });
   const agentTasks = useAgentTasks();
   const agentThreads = useAgentThreads();
@@ -476,6 +501,7 @@ export function WorkspaceSidebar(props: { peopleEnabled: boolean }) {
         onClose={watching.closeTasks}
         onRefresh={watching.refresh}
         onOpenLink={(url) => void appPort().openUrl(url)}
+        pickUp={taskPickUp()}
       />
     </>
   );

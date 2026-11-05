@@ -472,3 +472,23 @@
 .sidebar-compact .sidebar-watching-triggers {
   flex-direction: column;
 }
+
+.sidebar-task-pick-up {
+  margin-left: auto;
+}
+
+.sidebar-task-pick-up svg,
+.sidebar-task-pick-up-agent-trigger svg {
+  width: var(--openbot-space-3);
+  height: var(--openbot-space-3);
+}
+
+.sidebar-task-pick-up-agent {
+  padding: 0 var(--openbot-space-6) var(--openbot-space-2);
+}
+
+.sidebar-task-pick-up-agent-trigger {
+  gap: var(--openbot-space-1);
+  color: var(--openbot-text-secondary);
+  font-size: var(--openbot-text-sm);
+}
