@@ -71,6 +71,7 @@ export const messages = defineMessages("conversation", {
   "conversation.pullRequests.draft": "Draft",
   "conversation.pullRequests.refresh": "Refresh pull requests",
   "conversation.pullRequests.loading": "Reading PR status…",
+  "conversation.pullRequests.updating": "Updating…",
   "conversation.pullRequests.failed": "Could not read the PR list. Refresh to try again.",
   "conversation.pullRequests.unsupported": "This server does not support the PR view yet. Update it to see linked PRs.",
   "conversation.pullRequests.notConnected": "Connect GitHub on this server to verify linked PRs.",

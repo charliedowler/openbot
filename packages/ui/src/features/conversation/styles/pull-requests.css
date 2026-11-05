@@ -157,3 +157,15 @@
   text-align: start;
   white-space: normal;
 }
+
+.context-pr-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--openbot-space-2);
+}
+
+.context-pr-updating {
+  color: var(--openbot-text-muted);
+  font-size: var(--openbot-text-sm);
+}

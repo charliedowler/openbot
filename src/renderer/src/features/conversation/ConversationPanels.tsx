@@ -46,7 +46,7 @@ import {
   type HostFolderPickFn,
   remoteAgentFolderCalls,
 } from "./agent-folders-port";
-import { ContextPullRequestsPanel } from "./ContextPullRequestsPanel";
+import { ContextPullRequestsPanel, ContextPullRequestsPrefetch } from "./ContextPullRequestsPanel";
 import { conversationPort } from "./conversation-port";
 
 /**
@@ -445,7 +445,7 @@ export function ConversationPanels(panelProps: { onOpenUsage?: ((trigger: HTMLBu
         </aside>
       </Show>
 
-      <Show when={activeRightPanel() === "pull-requests"}>
+      <Show when={activeRightPanel() === "pull-requests"} fallback={<ContextPullRequestsPrefetch />}>
         <ContextPullRequestsPanel />
       </Show>
 
