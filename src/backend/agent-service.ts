@@ -820,7 +820,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
         sharedRoot: () => this.#store.sharedRoot,
         isStopping: () => this.#stopping,
         isProviderBusy: (provider) => this.#isProviderBusy(provider),
-        isAgentBusy: (agentId) => this.#runsTurn(agentId),
+        isAgentBusy: (agentId) => this.#runsTurn(agentId) || this.#drain.hasStartingDeliveriesFor(agentId),
         isProviderAssigned: (provider) => this.#store.list().some((agent) => providerForAgent(agent) === provider),
         captureConfigRevision: () => this.#endpoints.committedRevision(),
         onProviderActivated: (provider, configRevision) =>

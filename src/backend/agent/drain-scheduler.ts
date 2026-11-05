@@ -205,6 +205,12 @@ export class DrainScheduler {
    * replacing the client it is about to prompt.
    */
   readonly #startingDeliveries = new Map<AgentProvider, number>();
+  /**
+   * How many deliveries are on their way to a turn, per agent. An agent's own provider process is
+   * released when it ran no turn for a while; a start that prepares a channel packet for minutes
+   * has no turn yet, and this count is what keeps that process alive until the turn starts.
+   */
+  readonly #startingAgents = new Map<string, number>();
   readonly #scheduledDrains = new Set<string>();
   readonly #drainTasks = new Map<string, Deferred.Deferred<void, DeliveryStartFailed>>();
 
@@ -750,6 +756,7 @@ export class DrainScheduler {
     let routineThreadId: string | null = null;
     const claimed = this.#deliveryProviders(delivery.recipientAgentId);
     for (const provider of claimed) this.#startingDeliveries.set(provider, this.#starting(provider) + 1);
+    this.#startingAgents.set(delivery.recipientAgentId, this.#startingFor(delivery.recipientAgentId) + 1);
     // Held from the refresh below until this start ends, because everything between them awaits the
     // provider: the session is resumed or started, and then the turn is sent on it. A refresh that
     // lands in that wait closes the session and drops the routing to it, and the turn that arrives
@@ -1150,6 +1157,9 @@ export class DrainScheduler {
           releaseRuntimeRefresh();
           if (!confirmedTurnId && !turnMayRun) releaseReservation();
           for (const provider of claimed) this.#startingDeliveries.set(provider, this.#starting(provider) - 1);
+          const remaining = this.#startingFor(delivery.recipientAgentId) - 1;
+          if (remaining > 0) this.#startingAgents.set(delivery.recipientAgentId, remaining);
+          else this.#startingAgents.delete(delivery.recipientAgentId);
         }),
       ),
     );
@@ -1220,6 +1230,15 @@ export class DrainScheduler {
 
   #starting(provider: AgentProvider): number {
     return this.#startingDeliveries.get(provider) ?? 0;
+  }
+
+  /** True while a delivery of this agent is between its first await and its turn. */
+  hasStartingDeliveriesFor(agentId: string): boolean {
+    return this.#startingFor(agentId) > 0;
+  }
+
+  #startingFor(agentId: string): number {
+    return this.#startingAgents.get(agentId) ?? 0;
   }
 
   /**
