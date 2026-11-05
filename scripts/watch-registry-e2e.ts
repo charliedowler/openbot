@@ -52,6 +52,9 @@ const browser: AgentBrowserHost = {
   endControl: () => {},
   close: () => Effect.void,
   clearAgentSession: () => Effect.void,
+  shareTab: () => undefined,
+  unshareThread: () => undefined,
+  agentTab: () => null,
 };
 const changes: AgentEvent[] = [];
 const registry = new WatchRegistryStore(path, {
