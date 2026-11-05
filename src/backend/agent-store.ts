@@ -173,6 +173,7 @@ const DEFAULT_REASONING_EFFORT: AgentReasoningEffort = "low";
 // roster write removes that event and its receipt; the roster event that write keeps is what stops the
 // legacy import running a second time. None of the three follows the bot-to-agent rename.
 const LEGACY_AGENTS_STATE_FILE = "bots.json";
+const USAGE_LIMITS_FILE = "usage-limits.json";
 const LEGACY_AGENTS_STATE_KEY = "bots";
 const LEGACY_AGENTS_IMPORT_COMMAND_ID = "legacy-import:bots:v1";
 
@@ -199,6 +200,7 @@ export class AgentStore {
   readonly #profileCreationRecovery: ProfileCreationRecovery;
   readonly #database: OpenBotDatabase;
   #state: StoredState = { version: 2, examplesInitialized: false, agents: [] };
+  readonly #usageLimitsPath: string;
   readonly #avatarUpdateQueue = Semaphore.makeUnsafe(1);
   readonly #creationQueue = Semaphore.makeUnsafe(1);
 
@@ -213,6 +215,7 @@ export class AgentStore {
     openbotRoot = join(homePath, "OpenBot"),
   ) {
     this.#statePath = join(userDataPath, LEGACY_AGENTS_STATE_FILE);
+    this.#usageLimitsPath = join(userDataPath, USAGE_LIMITS_FILE);
     this.#agentsRoot = join(openbotRoot, "Agents");
     this.#legacyAgentsRoot = join(openbotRoot, "Bots");
     this.#sharedRoot = join(openbotRoot, "Shared");
@@ -236,6 +239,11 @@ export class AgentStore {
 
   get database(): OpenBotDatabase {
     return this.#database;
+  }
+
+  /** The file where the usage limit gate keeps its limits across a restart. */
+  get usageLimitsPath(): string {
+    return this.#usageLimitsPath;
   }
 
   get sharedRoot(): string {

@@ -1393,6 +1393,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     });
     this.#usageLimits = new UsageLimitGate({
       store,
+      statePath: store.usageLimitsPath,
       ...(options.providerRetryDelayMs === undefined ? {} : { retryDelayMs: options.providerRetryDelayMs }),
       hooks: {
         emit: (event) => this.#emit(event),
@@ -3811,6 +3812,8 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     options: { heldRoutines?: RoutineHoldWindow | undefined } = {},
   ) {
     this.#stopping = false;
+    // Before any drain, so an agent does not go back at once to a model whose limit still holds.
+    this.#usageLimits.restore();
     yield* this.#store
       .initialize()
       .pipe(

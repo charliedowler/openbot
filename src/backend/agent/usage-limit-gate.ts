@@ -1,8 +1,12 @@
+import { closeSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
-import type { AccountUsage, AgentEvent, AgentRuntimeSnapshot } from "@openbot/contracts/ipc";
+import { type AccountUsage, type AgentEvent, type AgentRuntimeSnapshot, isAgentProvider } from "@openbot/contracts/ipc";
+import { isDynamicRecord } from "@openbot/contracts/runtime-values";
+import { createOpenBotLogger } from "@openbot/logging";
 import { Effect, Exit, Schema, Scope } from "effect";
 import type { AgentProvider } from "../agent-client";
 import type { AgentStore } from "../agent-store";
+import { isEmptyStoredFile, parseStoredJson } from "../atomic-json-file";
 import { causeHelpers } from "../effect-boundary";
 import { agentProviderAccount as accountOf, providerForAgent } from "./thread-items";
 
@@ -30,6 +34,10 @@ const PROVIDER_RETRY_DELAY_MS = 30_000;
 /** The longest delay `setTimeout` keeps. A longer wait is armed again when it fires. */
 const MAX_TIMER_MS = 2_147_483_647;
 
+const STATE_VERSION = 1;
+
+const logger = createOpenBotLogger("usage-limit-gate");
+
 export interface UsageLimitHooks {
   emit(event: AgentEvent): void;
   emitRuntimeSnapshot(): void;
@@ -50,6 +58,8 @@ export interface UsageLimitGateOptions {
   store: AgentStore;
   hooks: UsageLimitHooks;
   retryDelayMs?: number;
+  /** The file that keeps the limits and provider-error holds across a restart. Omitted, they stay in memory. */
+  statePath?: string | null;
 }
 
 export interface UsageLimitKey {
@@ -85,8 +95,10 @@ interface UsageLimit extends UsageLimitKey {
  * family only; an account-wide window costs each other model one refused, requeued turn.
  *
  * The entry ends at the reported reset, after a usage read that finds no spent window, or when a
- * turn on that provider and model completes. It is kept in memory only: after a restart the first
- * refused turn closes the gate again. A message from the user lets its agent try one turn before
+ * turn on that provider and model completes. The entries and the provider-error holds are also saved
+ * to `statePath` and read again by `restore`, so a restart does not send agents back to a model that
+ * is still limited. Entries whose reset or hold passed while the server was down are dropped. A
+ * message from the user lets its agent try one turn before
  * that: the user can have signed the provider in to another account, or bought more usage, and no
  * reading shows that before the reset.
  *
@@ -106,11 +118,65 @@ export class UsageLimitGate {
   readonly #tries = new Map<string, string>();
   readonly #retries = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #retryDelayMs: number;
+  readonly #statePath: string | null;
 
   constructor(options: UsageLimitGateOptions) {
     this.#store = options.store;
     this.#hooks = options.hooks;
     this.#retryDelayMs = options.retryDelayMs ?? PROVIDER_RETRY_DELAY_MS;
+    this.#statePath = options.statePath ?? null;
+  }
+
+  /**
+   * Reads the saved limits and provider-error holds, before any drain runs. A limit whose reset has
+   * passed, or a hold that has ended, is dropped. A missing or unreadable file starts with none.
+   */
+  restore(): void {
+    const path = this.#statePath;
+    if (!path) return;
+    let saved: SavedState;
+    try {
+      const contents = readFileSync(path, "utf8");
+      saved = isEmptyStoredFile(contents) ? emptyState() : parseStoredJson(path, contents, decodeState);
+    } catch (error) {
+      const missing = isDynamicRecord(error) && error.code === "ENOENT";
+      logger.warn(
+        missing
+          ? "No saved usage limits. The gate starts with none."
+          : "The saved usage limits are unreadable. The gate starts with none.",
+        { path, ...(missing ? {} : { error: error instanceof Error ? error.message : String(error) }) },
+      );
+      return;
+    }
+    const now = Date.now();
+    let dropped = 0;
+    for (const entry of saved.limits) {
+      if (entry.resetsAt !== null && entry.resetsAt * 1_000 + RESET_GRACE_MS <= now) {
+        dropped += 1;
+        continue;
+      }
+      const key = limitKey(entry.provider, entry.accountId, entry.model);
+      const previous = this.#limits.get(key);
+      if (previous?.timer) clearTimeout(previous.timer);
+      const limit: UsageLimit = { ...entry, timer: null };
+      this.#limits.set(key, limit);
+      this.#announced.add(entry.provider);
+      this.#arm(key, limit);
+    }
+    for (const entry of saved.failures) {
+      if (entry.until <= now) {
+        dropped += 1;
+        continue;
+      }
+      const key = limitKey(entry.provider, entry.accountId, entry.model);
+      this.#holdFailure(key, entry, entry.until);
+    }
+    logger.info("Restored the saved usage limits.", {
+      limits: this.#limits.size,
+      failures: this.#failures.size,
+      dropped,
+    });
+    if (dropped > 0) this.#save();
   }
 
   holdForRetry(agentId: string): void {
@@ -192,14 +258,20 @@ export class UsageLimitGate {
     const turnModel = model ?? agent.model;
     const key = limitKey(provider, accountId, turnModel);
     const previous = this.#failures.get(key);
-    if (previous) clearTimeout(previous.timer);
     // A later error with no reset, such as from another agent on the same model, keeps the named reset.
     const hold = Math.max(PROVIDER_FAILURE_HOLD_MS, (resetDelayMs ?? 0) + RESET_GRACE_MS);
     const endsAt = Math.max(previous?.endsAt ?? 0, Date.now() + hold);
+    this.#holdFailure(key, { provider, accountId, model: turnModel }, endsAt);
+    this.#save();
+  }
+
+  #holdFailure(key: string, failure: UsageLimitKey, endsAt: number): void {
+    const previous = this.#failures.get(key);
+    if (previous) clearTimeout(previous.timer);
     this.#failures.set(key, {
-      provider,
-      accountId,
-      model: turnModel,
+      provider: failure.provider,
+      accountId: failure.accountId,
+      model: failure.model,
       endsAt,
       timer: this.#armFailure(key, endsAt),
     });
@@ -265,6 +337,7 @@ export class UsageLimitGate {
     if (named !== null) limit.resetFromUsage = false;
     this.#limits.set(key, limit);
     this.#arm(key, limit);
+    this.#save();
     yield* this.#hooks.held(this.#heldAgents(limit).map((held) => held.id));
     this.#hooks.emitRuntimeSnapshot();
     if (limit.resetsAt !== null) {
@@ -393,6 +466,7 @@ export class UsageLimitGate {
     limit.resetsAt = resetsAt;
     limit.resetFromUsage = true;
     this.#arm(key, limit);
+    this.#save();
     if (changed) this.#hooks.emitRuntimeSnapshot();
     return resetsAt;
   });
@@ -407,6 +481,7 @@ export class UsageLimitGate {
     if (!limit) return;
     if (limit.timer) clearTimeout(limit.timer);
     this.#limits.delete(key);
+    this.#save();
     for (const [agentId, tryKey] of this.#tries) if (tryKey === key) this.#tries.delete(agentId);
     if (reset && ![...this.#limits.values()].some((other) => other.provider === limit.provider))
       this.#announced.delete(limit.provider);
@@ -420,8 +495,51 @@ export class UsageLimitGate {
     if (!failure) return;
     clearTimeout(failure.timer);
     this.#failures.delete(key);
+    this.#save();
     yield* this.#hooks.released({ provider: failure.provider, accountId: failure.accountId, model: failure.model });
   });
+
+  /**
+   * Replaces the saved state with the current limits and holds: a temporary file, flushed, then renamed
+   * over the old one. `dispose` does not call it, so a stop keeps the saved state for the next start.
+   */
+  #save(): void {
+    const path = this.#statePath;
+    if (!path) return;
+    const state: SavedState = {
+      version: STATE_VERSION,
+      limits: [...this.#limits.values()].map(({ provider, accountId, model, resetsAt, resetFromUsage }) => ({
+        provider,
+        accountId,
+        model,
+        resetsAt,
+        resetFromUsage,
+      })),
+      failures: [...this.#failures.values()].map(({ provider, accountId, model, endsAt }) => ({
+        provider,
+        accountId,
+        model,
+        until: endsAt,
+      })),
+    };
+    const temporaryPath = `${path}.${process.pid}.tmp`;
+    try {
+      const handle = openSync(temporaryPath, "w", 0o600);
+      try {
+        writeSync(handle, `${JSON.stringify(state)}\n`);
+        fsyncSync(handle);
+      } finally {
+        closeSync(handle);
+      }
+      renameSync(temporaryPath, path);
+    } catch (error) {
+      rmSync(temporaryPath, { force: true });
+      logger.warn("The usage limits were not saved.", {
+        path,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 
   #heldAgents(limit: UsageLimit) {
     return this.#store
@@ -437,6 +555,60 @@ export class UsageLimitGate {
 
 function limitKey(provider: AgentProvider, accountId: string | null, model: string): string {
   return `${provider}\u0000${accountId ?? ""}\u0000${model}`;
+}
+
+interface SavedLimit extends UsageLimitKey {
+  resetsAt: number | null;
+  resetFromUsage: boolean;
+}
+
+interface SavedFailure extends UsageLimitKey {
+  until: number;
+}
+
+interface SavedState {
+  version: number;
+  limits: SavedLimit[];
+  failures: SavedFailure[];
+}
+
+function emptyState(): SavedState {
+  return { version: STATE_VERSION, limits: [], failures: [] };
+}
+
+function decodeKey(value: unknown): UsageLimitKey | null {
+  if (!isDynamicRecord(value) || !isAgentProvider(value.provider) || typeof value.model !== "string" || !value.model)
+    return null;
+  if (value.accountId !== null && (typeof value.accountId !== "string" || !value.accountId)) return null;
+  return { provider: value.provider, accountId: value.accountId, model: value.model };
+}
+
+function decodeState(value: unknown): SavedState {
+  if (
+    !isDynamicRecord(value) ||
+    value.version !== STATE_VERSION ||
+    !Array.isArray(value.limits) ||
+    !Array.isArray(value.failures)
+  )
+    throw new Error("The usage limit file has an unknown shape.");
+  const limits = value.limits.map((entry: unknown): SavedLimit => {
+    const key = decodeKey(entry);
+    if (
+      !key ||
+      !isDynamicRecord(entry) ||
+      !(entry.resetsAt === null || (typeof entry.resetsAt === "number" && Number.isFinite(entry.resetsAt))) ||
+      typeof entry.resetFromUsage !== "boolean"
+    )
+      throw new Error("The usage limit file has an invalid limit.");
+    return { ...key, resetsAt: entry.resetsAt, resetFromUsage: entry.resetFromUsage };
+  });
+  const failures = value.failures.map((entry: unknown): SavedFailure => {
+    const key = decodeKey(entry);
+    if (!key || !isDynamicRecord(entry) || typeof entry.until !== "number" || !Number.isFinite(entry.until))
+      throw new Error("The usage limit file has an invalid hold.");
+    return { ...key, until: entry.until };
+  });
+  return { version: STATE_VERSION, limits, failures };
 }
 
 /** The latest future reset among the spent windows of a reading, in epoch seconds. */
