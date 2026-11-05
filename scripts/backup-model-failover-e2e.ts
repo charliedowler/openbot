@@ -9,7 +9,8 @@
 //   2. An agent with no backup models runs the turn once more after an outage, then fails with its error.
 //   3. A turn that did nothing yet runs again on the backup model, with a note and no error.
 //   4. read_agent shows the backup model, and the model to go back to with the provider error as cause.
-//   5. After a restart, the agent goes back to its own model, with a note.
+//   5. A restart keeps the provider-error hold; after a restart once the hold ended, the agent goes
+//      back to its own model, with a note.
 // Also checks continuation after a usage limit interrupts partial work, and after an outage
 // (Codex "at capacity", Claude 529) interrupts it: on a ready backup, in a channel task, and once
 // more on the same model when no backup is ready.
@@ -17,7 +18,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -545,8 +546,10 @@ async function check(name: string, run: () => Promise<unknown>) {
   report.checks.push({ name, passed: true, detail });
 }
 
+/** Restarts with no saved usage limits, so each check starts with every model free. */
 async function restart() {
   await runCauseEffect(service.stop());
+  rmSync(join(userData, "usage-limits.json"), { force: true });
   ({ store, mailbox, service } = startService());
   await runCauseEffect(service.initialize());
 }
@@ -712,9 +715,14 @@ try {
     return { model: setup.model, usageLimitReturn: setup.usageLimitReturn };
   });
 
-  await check("after a restart the agent goes back to its own model", async () => {
+  await check("after a restart once the hold ended the agent goes back to its own model", async () => {
     await runCauseEffect(service.stop());
     failing([]);
+    const savedLimits = join(userData, "usage-limits.json");
+    const saved: { failures: { until: number }[] } = JSON.parse(readFileSync(savedLimits, "utf8"));
+    assert.equal(saved.failures.length, 1, "The stop keeps the provider-error hold.");
+    const ended = saved.failures.map((hold) => ({ ...hold, until: Date.now() - 1_000 }));
+    writeFileSync(savedLimits, JSON.stringify({ ...saved, failures: ended }));
     ({ store, mailbox, service } = startService());
     await runCauseEffect(service.initialize());
     const before = turns().length;
