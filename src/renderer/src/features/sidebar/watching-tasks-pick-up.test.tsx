@@ -79,7 +79,7 @@ describe("Tasks: Pick this up", () => {
     expect(within(row("Pick the rollout date")).getByRole("button", { name: "Pick this up" })).toBeTruthy();
     expect(within(row("Reply to Sam")).getByRole("button", { name: "Pick this up" })).toBeTruthy();
     expect(within(row("Fix the legend")).getByRole("button", { name: "Pick this up" })).toBeTruthy();
-    expect(within(row("Shipped today")).queryByRole("button", { name: "Pick this up" })).toBeNull();
+    expect(screen.queryByText("Shipped today")).toBeNull();
     expect(screen.getAllByRole("button", { name: "Pick this up" })).toHaveLength(3);
   });
 
