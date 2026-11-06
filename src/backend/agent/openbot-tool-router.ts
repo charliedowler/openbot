@@ -166,6 +166,11 @@ const API_KEY_TOOLS: ReadonlySet<string> = new Set([
 /** The characters of an agent description that `list_agents` returns. `read_agent` returns all of it. */
 const LISTED_DESCRIPTION_LENGTH = 300;
 
+const NO_PERSON_TO_ASK =
+  "No person can answer a question in this turn: a routine, a webhook, another agent or a channel task that no person requested started it. Do not ask and do not wait. If a person must decide, use openbot-control request_decision or send_message to your coordinator, then finish this turn.";
+
+const QUESTION_TOOLS: ReadonlySet<string> = new Set(["ask_user", "ask_ui"]);
+
 function listedDescription(description: string): string {
   const characters = Array.from(description);
   if (characters.length <= LISTED_DESCRIPTION_LENGTH) return description;
@@ -533,6 +538,10 @@ export class OpenBotToolRouter {
             return;
           }
           if (toolRequest.params.namespace === "openbot") {
+            if (QUESTION_TOOLS.has(toolRequest.params.tool) && this.#nobodyToAsk(toolRequest.params)) {
+              client.respond(toolRequest.id, openBotToolFailure(NO_PERSON_TO_ASK));
+              return;
+            }
             if (toolRequest.params.tool === "ask_user") {
               this.#attention.surfaceDynamicPrompt(client, toolRequest);
               return;
@@ -606,6 +615,10 @@ export class OpenBotToolRouter {
           throw new Error(`Unsupported dynamic tool namespace: ${toolRequest.params.namespace}`);
         }
         case "item/tool/requestUserInput":
+          if (this.#nobodyToAsk(request.params)) {
+            client.respond(request.id, { answers: {}, refusal: NO_PERSON_TO_ASK });
+            return;
+          }
           this.#attention.surfacePrompt(client, request);
           return;
         case "mcpServer/elicitation/request":
@@ -1648,6 +1661,32 @@ export class OpenBotToolRouter {
           !this.#messaging.store.linkForThread(executionThreadId) &&
           !this.#channels.store.channelForThread(executionThreadId)))
     );
+  }
+
+  #nobodyToAsk(params: unknown): boolean {
+    if (!isRecord(params) || !isString(params.threadId) || !isString(params.turnId)) return false;
+    const { threadId, turnId } = params;
+    const agentId = this.#conversation.agentForThread(threadId);
+    if (!agentId) return false;
+    const executionThreadId = this.#conversation.publicThreadId(agentId, threadId);
+    if (
+      this.#messaging.store.linkForThread(executionThreadId) ||
+      this.#mailbox.answersMessagingRequest(agentId, turnId)
+    )
+      return false;
+    const channelId = this.#channels.store.channelForThread(executionThreadId);
+    if (channelId) return !this.#personChannelRequest(agentId, turnId, channelId);
+    return !this.#requestedByPerson(agentId, turnId, executionThreadId);
+  }
+
+  #personChannelRequest(agentId: string, turnId: string, channelId: string): boolean {
+    return this.#mailbox.findDeliveriesByTurn(agentId, turnId).some(({ delivery }) => {
+      const assignment = this.#channels.store.assignmentForDelivery(delivery.id);
+      if (!assignment?.requestMessageId) return false;
+      if (this.#channels.store.task(channelId, assignment.taskId)?.parentTaskId !== null) return false;
+      const request = this.#channels.store.message(channelId, assignment.requestMessageId);
+      return request?.author.kind === "member" && !request.author.id.startsWith("routine:");
+    });
   }
 
   /** Whether a team member on another computer sent this message. */

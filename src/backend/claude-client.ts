@@ -2109,6 +2109,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
         questions,
       })
       .pipe(toProviderClientOperationError);
+    if (isRecord(result) && isString(result.refusal)) return { behavior: "deny", message: result.refusal };
     const responseAnswers = isRecord(result) && isRecord(result.answers) ? result.answers : {};
     const answers = Object.fromEntries(
       questions.map((question) => {
