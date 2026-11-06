@@ -171,7 +171,7 @@ describe("Watching v2", () => {
 });
 
 describe("Tasks", () => {
-  it("groups by state in order, sorts by urgency then wait, and drops done tasks from other days", () => {
+  it("groups open tasks by state in order, sorts by urgency then wait, and shows no done group", () => {
     render(() => (
       <SidebarTasksDialog
         open
@@ -190,7 +190,6 @@ describe("Tasks", () => {
       "Waiting on Charlie",
       "In progress",
       "Waiting on an event",
-      "Done today",
     ]);
     const charlie = sections.find((section) => section.getAttribute("aria-label") === "Waiting on Charlie");
     if (!charlie) throw new Error("Missing group");
@@ -203,8 +202,57 @@ describe("Tasks", () => {
     expect(screen.getByText("Waiting 1 day on Charlie")).toBeTruthy();
     expect(screen.getByText("Owner: Compass")).toBeTruthy();
     expect(screen.getByText("Urgent").getAttribute("title")).toBe("Decision waiting more than 24 hours");
-    expect(screen.getByText("Shipped today")).toBeTruthy();
+    expect(screen.queryByText("Done today")).toBeNull();
+    expect(screen.queryByText("Shipped today")).toBeNull();
     expect(screen.queryByText("Shipped last week")).toBeNull();
+    expect(screen.queryByText("No open tasks.")).toBeNull();
+  });
+
+  it("hides a group with no tasks", () => {
+    render(() => (
+      <SidebarTasksDialog
+        open
+        loading={false}
+        supported
+        error={null}
+        data={{ ...tasks, items: tasks.items.filter((item) => item.state === "in-progress" || item.state === "done") }}
+        onClose={() => {}}
+        onRefresh={() => {}}
+        onOpenLink={() => {}}
+      />
+    ));
+    const titles = screen
+      .getAllByRole("region")
+      .filter((section) => section.tagName === "SECTION")
+      .map((section) => section.getAttribute("aria-label"))
+      .filter((title) => title !== "Why this score");
+    expect(titles).toEqual(["In progress"]);
+    expect(screen.getByText("Fix the legend")).toBeTruthy();
+    expect(screen.queryByText("Nothing here.")).toBeNull();
+    expect(screen.queryByText("No open tasks.")).toBeNull();
+  });
+
+  it("shows one empty line for the panel when no task is open", () => {
+    render(() => (
+      <SidebarTasksDialog
+        open
+        loading={false}
+        supported
+        error={null}
+        data={{ ...tasks, items: tasks.items.filter((item) => item.state === "done") }}
+        onClose={() => {}}
+        onRefresh={() => {}}
+        onOpenLink={() => {}}
+      />
+    ));
+    const titles = screen
+      .getAllByRole("region")
+      .filter((section) => section.tagName === "SECTION")
+      .map((section) => section.getAttribute("aria-label"))
+      .filter((title) => title !== "Why this score");
+    expect(titles).toEqual([]);
+    expect(screen.getAllByText("No open tasks.")).toHaveLength(1);
+    expect(screen.queryByText("Nothing here.")).toBeNull();
   });
 
   it("shows the health header with the score, limit, oldest, longest wait and reasons on expand", async () => {

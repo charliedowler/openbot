@@ -521,7 +521,6 @@ const TASK_GROUPS = [
   { state: "waiting-on-charlie", title: "sidebar.tasks.group.waitingOnCharlie" },
   { state: "in-progress", title: "sidebar.tasks.group.inProgress" },
   { state: "waiting-on-event", title: "sidebar.tasks.group.waitingOnEvent" },
-  { state: "done", title: "sidebar.tasks.group.doneToday" },
 ] as const satisfies readonly { state: SidebarTaskItem["state"]; title: AppTextKey }[];
 
 const TASK_KINDS = {
@@ -539,15 +538,6 @@ export function sortTasks(items: readonly SidebarTaskItem[]): SidebarTaskItem[] 
       URGENCY_RANK[a.urgency ?? "normal"] - URGENCY_RANK[b.urgency ?? "normal"] ||
       since(a) - since(b) ||
       a.title.localeCompare(b.title),
-  );
-}
-
-export function tasksDoneToday(item: SidebarTaskItem, now: Date): boolean {
-  const updated = new Date(item.updatedAt);
-  return (
-    updated.getFullYear() === now.getFullYear() &&
-    updated.getMonth() === now.getMonth() &&
-    updated.getDate() === now.getDate()
   );
 }
 
@@ -680,14 +670,11 @@ export function SidebarTasksDialog(props: {
 }) {
   const { t, format } = useText();
   const groups = createMemo(() => {
-    const now = new Date();
     const items = props.data?.items ?? [];
     return TASK_GROUPS.map((group) => ({
       ...group,
-      items: sortTasks(
-        items.filter((item) => item.state === group.state && (item.state !== "done" || tasksDoneToday(item, now))),
-      ),
-    }));
+      items: sortTasks(items.filter((item) => item.state === group.state)),
+    })).filter((group) => group.items.length > 0);
   });
   const date = (value: string) =>
     format.date(new Date(value), { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
@@ -747,17 +734,14 @@ export function SidebarTasksDialog(props: {
               </Show>
               <Show when={props.data}>
                 <div class="sidebar-watching-scroll sidebar-tasks-scroll">
-                  <For each={groups()}>
+                  <For each={groups()} fallback={<p class="sidebar-watching-empty">{t("sidebar.tasks.empty")}</p>}>
                     {(group) => (
                       <section class="sidebar-watching-section" aria-label={t(group.title)}>
                         <h3>
                           {t(group.title)} <span class="sidebar-watching-count">{group.items.length}</span>
                         </h3>
                         <ul class="sidebar-tasks-list">
-                          <For
-                            each={group.items}
-                            fallback={<li class="sidebar-watching-empty">{t("sidebar.tasks.empty")}</li>}
-                          >
+                          <For each={group.items}>
                             {(item) => <TaskRow item={item} onOpenLink={props.onOpenLink} />}
                           </For>
                         </ul>
