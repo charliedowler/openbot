@@ -189,6 +189,9 @@ interface ChannelToolArgs {
   schedule?: { kind: "daily"; time: string } | { kind: "once"; date: string; time: string };
   active?: boolean;
   text?: unknown;
+  recipientAgentIds?: readonly string[];
+  expectsReply?: boolean;
+  replyToMessageId?: string;
 }
 
 interface ToolLog {
@@ -357,6 +360,7 @@ try {
   };
   const lead = await create("Lead");
   const tester = await create("Tester");
+  const coordinator = await create("Coordinator");
   const channelId = randomUUID();
   await runCauseEffect(
     channels().command(
@@ -404,6 +408,75 @@ try {
     "A refused direct message creates no child task",
     channels().store.tasks(channelId).length === directMessageTasks + 1,
   );
+  const outsiderDeliveries = () =>
+    mailbox
+      .listQueue(coordinator.id)
+      .deliveries.filter((delivery) => delivery.sender.kind === "agent" && delivery.sender.agentId === lead.id);
+  const outsideTasks = channels().store.tasks(channelId).length;
+  const outside = await callTool(
+    "one-way message to an agent outside the channel",
+    channelId,
+    lead.id,
+    "send_message",
+    {
+      recipientAgentIds: [coordinator.id],
+      text: "Result: the synthetic release is ready.",
+      expectsReply: false,
+    },
+  );
+  pass(
+    "A one-way message to an agent outside the channel is accepted",
+    report.calls.at(-1)?.success === true,
+    outside.text,
+  );
+  await waitFor("the outside agent to receive the one-way message", () => outsiderDeliveries().length === 1);
+  pass(
+    "The outside agent receives the message as one that expects no reply",
+    outsiderDeliveries()[0]?.expectsReply === false &&
+      outsiderDeliveries()[0]?.text.includes("synthetic release") === true,
+    JSON.stringify(outsiderDeliveries()),
+  );
+  pass(
+    "A one-way message outside the channel creates no child task",
+    channels().store.tasks(channelId).length === outsideTasks + 1,
+  );
+  pass("A one-way message outside the channel raises no provider error", errorEvents.length === 0);
+  const replyTarget = outsiderDeliveries()[0]?.messageId;
+  assert.ok(replyTarget);
+  for (const [label, args] of [
+    [
+      "a message that expects a reply",
+      { recipientAgentIds: [coordinator.id], text: "Check this.", expectsReply: true },
+    ],
+    ["a message with the default expectsReply", { recipientAgentIds: [coordinator.id], text: "Check this." }],
+    [
+      "a reply to a message",
+      { recipientAgentIds: [coordinator.id], text: "Answer.", expectsReply: false, replyToMessageId: replyTarget },
+    ],
+    ["a one-way message to a member", { recipientAgentIds: [tester.id], text: "Status.", expectsReply: false }],
+    [
+      "a one-way message to a member and an outside agent",
+      { recipientAgentIds: [coordinator.id, tester.id], text: "Status.", expectsReply: false },
+    ],
+  ] as const) {
+    const tasksBefore = channels().store.tasks(channelId).length;
+    const refused = await callTool(`send_message from a channel: ${label}`, channelId, lead.id, "send_message", args);
+    pass(`send_message from a channel refuses ${label}`, report.calls.at(-1)?.success === false, refused.text);
+    pass(
+      `The refusal of ${label} names the channel handoff tools`,
+      refused.text.includes("channel_assign") && refused.text.includes("channel_transfer"),
+      refused.text,
+    );
+    pass(`The refusal of ${label} delivers nothing`, outsiderDeliveries().length === 1);
+    pass(
+      `The refusal of ${label} delivers nothing to the member`,
+      mailbox
+        .listQueue(tester.id)
+        .deliveries.every((delivery) => delivery.sender.kind !== "agent" || delivery.sender.agentId !== lead.id),
+    );
+    pass(`The refusal of ${label} creates no child task`, channels().store.tasks(channelId).length === tasksBefore + 1);
+  }
+  pass("Refused channel messages raise no provider error", errorEvents.length === 0, JSON.stringify(errorEvents));
   const beforeTasks = channels().store.tasks(channelId).length;
   const invalid = await callTool("incomplete handoff", channelId, lead.id, "channel_assign", {
     task: "Review the synthetic evidence.",

@@ -704,7 +704,7 @@ export class ChannelHistory {
           omittedMessages: omitted.length,
         };
         const rules = [
-          "Use channel_history for earlier history and attachmentId to get a channel attachment path, channel_assign for a subtask, channel_transfer for ownership, and channel_result for a requested result. Never bypass coordination with send_message. End your turn while waiting for assigned results.",
+          "Use channel_history for earlier history and attachmentId to get a channel attachment path, channel_assign for a subtask, channel_transfer for ownership, and channel_result for a requested result. Use channel_assign or channel_transfer for channel work; send_message is allowed only for a one-way message (expectsReply false) to an agent outside the channel, such as reporting a result to a coordinator. End your turn while waiting for assigned results.",
           `When you must ask another member a short question, agree on something with it, or correct it before you can finish, use channel_reply on its message: the reply shows in the chat, that member answers it in one turn, and you continue with its answer. A request allows ${CHANNEL_REPLY_LIMIT} member replies. Do not reply only to thank or acknowledge, or when you can answer the person without it.`,
           // Each search or describe step sends the whole context to the model again (#3138).
           'The channel tools need no search or describe. When one is not in your tool list, call the openbot tool_call tool (openbot.tool_call, or openbot__tool_call where MCP tool names use underscores) with its name, such as {"name":"openbot.channel_result","arguments":{"text":"<result>"}}. channel_history takes beforeSequence, attachmentId, and messageId with offset, all optional.',

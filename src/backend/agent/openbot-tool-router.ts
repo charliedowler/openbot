@@ -996,8 +996,13 @@ export class OpenBotToolRouter {
     }
     const channelId = this.#channels.store.channelForThread(executionThreadId);
     if (channelId && (params.tool.startsWith("channel_") || params.tool === "send_message")) {
-      if (params.tool === "send_message")
-        return openBotToolFailure("Use channel_assign or channel_transfer for channel work.");
+      if (params.tool === "send_message") {
+        if (this.#oneWayMessageOutsideChannel(channelId, params.arguments))
+          return yield* this.#sendMessage(params, senderAgentId);
+        return openBotToolFailure(
+          "Use channel_assign or channel_transfer for channel work. In a channel task, send_message works only for a one-way message (expectsReply false, no replyToMessageId) to agents outside this channel.",
+        );
+      }
       return openBotToolResult(
         yield* this.#channels.tool(
           channelId,
@@ -2012,6 +2017,25 @@ export class OpenBotToolRouter {
     Effect.catchDefect((cause) => Effect.fail(new ToolOperationFailed({ cause }))),
     Effect.uninterruptible,
   );
+
+  #oneWayMessageOutsideChannel(channelId: string, args: unknown): boolean {
+    if (!isRecord(args) || args.expectsReply !== false) return false;
+    const replyTo = args.replyToMessageId ?? "";
+    if (
+      !isString(replyTo) ||
+      replyTo
+        .trim()
+        .replace(/^"(.*)"$/s, "$1")
+        .trim() !== ""
+    )
+      return false;
+    const recipients = args.recipientAgentIds;
+    if (!Array.isArray(recipients) || recipients.length === 0 || !recipients.every((item) => isString(item)))
+      return false;
+    if (!this.#channels.store.exists(channelId)) return false;
+    const members = new Set(this.#channels.store.get(channelId).members.map((member) => member.agentId));
+    return recipients.every((recipient) => !members.has(recipient));
+  }
 
   readonly #sendMessage = Effect.fn("OpenBotToolRouter.sendMessage")(
     function* (
