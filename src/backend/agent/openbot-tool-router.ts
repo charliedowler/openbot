@@ -1668,7 +1668,10 @@ export class OpenBotToolRouter {
     const { threadId, turnId } = params;
     const agentId = this.#conversation.agentForThread(threadId);
     if (!agentId) return false;
-    const executionThreadId = this.#conversation.publicThreadId(agentId, threadId);
+    return this.nobodyToAnswer(agentId, turnId, this.#conversation.publicThreadId(agentId, threadId));
+  }
+
+  nobodyToAnswer(agentId: string, turnId: string, executionThreadId: string): boolean {
     if (
       this.#messaging.store.linkForThread(executionThreadId) ||
       this.#mailbox.answersMessagingRequest(agentId, turnId)

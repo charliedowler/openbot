@@ -139,6 +139,36 @@ export class ConversationQueries {
     return row ? optionalStringColumn(row, "active_turn_id") : null;
   }
 
+  readRunningTurnProgress(
+    ignoredEventTypes: readonly string[],
+  ): Array<{ agentId: string; threadId: string; turnId: string; startedAt: string; lastEventAt: string | null }> {
+    const ignored = ignoredEventTypes.map(() => "?").join(", ");
+    const lastEvent = this.#core.connection.prepare(
+      `SELECT occurred_at FROM orchestration_events INDEXED BY orchestration_events_aggregate
+       WHERE aggregate_type = 'thread' AND aggregate_id = ?${ignored ? ` AND event_type NOT IN (${ignored})` : ""}
+       ORDER BY sequence DESC LIMIT 1`,
+    );
+    return databaseRows(
+      this.#core.connection
+        .prepare(
+          `SELECT t.turn_id, t.thread_id, t.started_at, th.agent_id
+           FROM projection_turns t JOIN projection_threads th ON th.thread_id = t.thread_id
+           WHERE t.status = 'running'`,
+        )
+        .all(),
+    ).map((row) => {
+      const threadId = requiredStringColumn(row, "thread_id");
+      const event = databaseRow(lastEvent.get(threadId, ...ignoredEventTypes));
+      return {
+        agentId: requiredStringColumn(row, "agent_id"),
+        threadId,
+        turnId: requiredStringColumn(row, "turn_id"),
+        startedAt: requiredStringColumn(row, "started_at"),
+        lastEventAt: event ? optionalStringColumn(event, "occurred_at") : null,
+      };
+    });
+  }
+
   /**
    * The turns that the store still shows as running, by thread. A running turn that is not the
    * thread's active turn has no writer left: its end was never stored. Restart recovery reads this

@@ -223,6 +223,7 @@ import {
 import { ThreadLifecycle } from "./agent/thread-lifecycle";
 import { toToolOperationFailed } from "./agent/tool-operation";
 import { type AgentBrowserHost, TurnLifecycle } from "./agent/turn-lifecycle";
+import { TurnReaper, type TurnReaperStop } from "./agent/turn-reaper";
 import { channelUsageObserver, memoryReviewUsageObserver, workflowUsageObserver } from "./agent/usage-collection";
 import { toUsageReadFailed, UsageLimitGate, type UsageLimitKey } from "./agent/usage-limit-gate";
 import { WarmGenerations } from "./agent/warm-generations";
@@ -275,6 +276,13 @@ import {
 } from "./workspace-paths";
 
 const logger = createOpenBotLogger("agent-service");
+const TURN_REAPER_EVENT_TYPE = "turn.reaper-stopped";
+const TURN_REAPER_QUEUE_EVENTS = [
+  "routine.run-queued",
+  "routine.run-created",
+  "conversation.mailbox-reconciled",
+  TURN_REAPER_EVENT_TYPE,
+];
 /** Its lines also go to `main.log`, so a support report can show why channel routing failed (#3041). */
 const routingLogger = createOpenBotLogger("channel-routing");
 
@@ -506,6 +514,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
   readonly #duplication: DuplicationGate;
   readonly #removal: AgentRemoval;
   readonly #tools: OpenBotToolRouter;
+  readonly #reaper: TurnReaper;
   readonly #sidebarLayout: AgentSidebar | null;
   readonly #localSkillTools: (() => LocalSkillTools) | undefined;
   readonly #routineFlowTools: (() => RoutineFlowTools) | undefined;
@@ -1745,7 +1754,79 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
         steerAgentMessage: (recipientAgentId, deliveryId) => this.#steerAgentMessage(recipientAgentId, deliveryId),
       },
     });
+    this.#reaper = new TurnReaper({
+      runningTurns: () =>
+        this.#store.database.readRunningTurnProgress(TURN_REAPER_QUEUE_EVENTS).map((turn) => ({
+          agentId: turn.agentId,
+          threadId: turn.threadId,
+          turnId: turn.turnId,
+          startedAt: Date.parse(turn.startedAt) || 0,
+          lastThreadEventAt: turn.lastEventAt ? Date.parse(turn.lastEventAt) || null : null,
+        })),
+      lastProviderEventAt: (agentId) => this.#turn.lastEventAt(agentId),
+      providerTurnLive: (agentId, turnId) => {
+        const agent = this.#store.list().find((candidate) => candidate.id === agentId);
+        if (!agent) return false;
+        if (!this.#providers.clientForAgent(agent)?.running) return false;
+        return this.#turn.turnStartedAt(turnId) !== null || this.#turn.isCompleting(turnId);
+      },
+      pendingAttention: (agentId, turnId) => this.#attention.hasPendingForTurn(agentId, turnId),
+      nobodyToAnswer: (agentId, turnId, threadId) => this.#tools.nobodyToAnswer(agentId, turnId, threadId),
+      stop: (stop) => this.#reapTurn(stop),
+    });
   }
+
+  readonly #reapTurn = Effect.fn("AgentService.reapTurn")(function* (this: AgentService, stop: TurnReaperStop) {
+    const { agentId, threadId, turnId } = stop.turn;
+    const agent = this.#store.list().find((candidate) => candidate.id === agentId);
+    if (!agent) return;
+    const executionThreadId = threadId === agent.threadId ? undefined : threadId;
+    const interrupted = yield* Effect.result(this.interrupt(agentId, turnId, executionThreadId));
+    const stillRunning = () =>
+      this.#mailbox
+        .findDeliveriesByTurn(agentId, turnId)
+        .some(({ delivery }) => delivery.status === "starting" || delivery.status === "running");
+    let settled = false;
+    if (stop.kind === "orphaned" && stillRunning() && this.#turn.turnStartedAt(turnId) === null) {
+      yield* this.#turn.settleOrphanedTurn(agentId, threadId, turnId, "interrupted");
+      settled = true;
+    }
+    const detail = {
+      kind: stop.kind,
+      agentId,
+      turnId,
+      idleSeconds: Math.round(stop.idleMs / 1000),
+      reason: stop.reason,
+      interrupt: interrupted._tag === "Success" ? "sent" : "failed",
+      settledOrphan: settled,
+    };
+    yield* Effect.try({
+      try: () =>
+        this.#conversation.withThreadTransaction(agentId, threadId, ({ threadId: transactionThreadId, snapshot }) => {
+          snapshot.revision = this.#store.database.persistConversationChanges({
+            agentId,
+            threadId: transactionThreadId,
+            activeTurnId: snapshot.activeTurnId,
+            changedMessages: [],
+            eventType: TURN_REAPER_EVENT_TYPE,
+            detail,
+          });
+          return { result: undefined, snapshot };
+        }),
+      catch: (cause) => cause,
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.sync(() =>
+          logger.warn("Turn reaper could not store its stop event.", {
+            agentId,
+            turnId,
+            error: cause instanceof Error ? cause.message : String(cause),
+          }),
+        ),
+      ),
+    );
+    logger.warn("Turn reaper stopped a stuck turn.", { ...detail, threadId });
+  });
 
   getStatus(): AgentStatus {
     return this.#providers.status();
@@ -3924,6 +4005,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     yield* lifecycleStep("arm routines", () => {
       this.#channelRoutines.reconcileAll();
       this.#routineTimer.arm();
+      this.#reaper.start();
     });
   }).bind(this);
 
@@ -4439,6 +4521,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     this.#initialized = false;
     this.#liveVoice.dispose();
     this.#routineTimer.dispose();
+    this.#reaper.dispose();
     yield* this.#memoryHold.dispose();
     this.#hostedSites.dispose();
     this.#compaction.dispose();

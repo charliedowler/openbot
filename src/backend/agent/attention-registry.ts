@@ -526,6 +526,18 @@ export class AttentionRegistry {
     );
   }
 
+  hasPendingForTurn(agentId: string, turnId: string): boolean {
+    return (
+      [...this.#prompts.values()].some((pending) => pending.agentId === agentId && pending.turnId === turnId) ||
+      [...this.#approvals.values()].some(
+        (pending) => pending.approval.agentId === agentId && pending.approval.turnId === turnId,
+      ) ||
+      [...this.#takeovers.values()].some(
+        (pending) => pending.request.agentId === agentId && pending.params.turnId === turnId,
+      )
+    );
+  }
+
   /** Full details for one agent; the UI snapshot has a separate size budget. */
   localAttention(agentId: string) {
     return {
