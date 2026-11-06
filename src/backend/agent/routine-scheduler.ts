@@ -401,16 +401,22 @@ export class RoutineScheduler implements RoutineDueSource {
     routineId: string,
     event: ReceivedWebhookEvent,
   ) {
-    if (!this.mayDrain(agentId)) return { kind: "unavailable" } as const;
+    const runAgentId = event.forward?.agentId ?? agentId;
+    if (!this.mayDrain(agentId) || !this.mayDrain(runAgentId)) return { kind: "unavailable" } as const;
     const result = yield* routineStep(() => this.#routines.receiveWebhook(agentId, routineId, event));
     if (result.kind === "started") {
       const fiber = yield* this.#webhookRunOrder
-        .withPermit(this.#enqueueRunEffect(result.run, event.waitId ?? null, true))
+        .withPermit(this.#enqueueRunEffect(result.run, event.forward ? null : (event.waitId ?? null), true))
         .pipe(
           Effect.catch((failure) =>
             Effect.sync(() => this.#hooks.emitError("routine_delivery_failed", failure.cause, agentId)),
           ),
-          Effect.ensuring(Effect.sync(() => this.stateChanged(agentId))),
+          Effect.ensuring(
+            Effect.sync(() => {
+              this.stateChanged(agentId);
+              if (runAgentId !== agentId) this.stateChanged(runAgentId);
+            }),
+          ),
           Effect.asVoid,
           Effect.forkIn(this.#scope()),
         );

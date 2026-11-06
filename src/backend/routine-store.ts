@@ -155,6 +155,7 @@ export interface ReceivedWebhookEvent {
   occurredAt: string;
   receivedAt: string;
   waitId?: string;
+  forward?: { agentId: string; instruction: string | null };
 }
 
 export type WebhookReceiveResult<Run = OwnedRoutineRun> =
@@ -525,7 +526,7 @@ export class RoutineStore {
       return { kind: "ignored", reason };
     }
     const runId = randomUUID();
-    const instruction = webhookRunInstruction(routine.instruction, {
+    const instruction = webhookRunInstruction(event.forward?.instruction ?? routine.instruction, {
       version: 1,
       id: event.deliveryId,
       routineId,
@@ -549,7 +550,15 @@ export class RoutineStore {
       ],
       (db, sequences): WebhookReceiveResult => {
         insertWebhookReceipt(db, { ...receipt, status: "started", reason: null, runId });
-        this.#insertRun(db, runId, { ...routine, instruction }, null, "webhook", event.receivedAt, sequences[0] ?? 0);
+        this.#insertRun(
+          db,
+          runId,
+          { ...routine, ownerId: event.forward?.agentId ?? routine.ownerId, instruction },
+          null,
+          "webhook",
+          event.receivedAt,
+          sequences[0] ?? 0,
+        );
         return { kind: "started", run: this.#requireRun(runId) };
       },
     );

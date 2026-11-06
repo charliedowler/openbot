@@ -117,6 +117,8 @@ export class RoutineRecords {
     event: ReceivedWebhookEvent,
   ): Effect.Effect<WebhookReceiveResult<unknown> | { kind: "unavailable" }, RoutineRecordFailed> {
     if (this.#options.routinesHeld()) return Effect.succeed({ kind: "unavailable" });
+    if (event.forward && (owner.kind !== "agent" || !this.#options.agentExists(event.forward.agentId)))
+      return Effect.succeed({ kind: "gone" });
     return owner.kind === "agent"
       ? this.#options.agentRoutines.receiveWebhook(owner.id, routineId, event).pipe(Effect.mapError(failed("receive")))
       : this.#options.channelRoutines

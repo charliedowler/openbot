@@ -45,6 +45,14 @@ import {
   WebhookRouteConflict,
 } from "./host-events-api";
 import type { SecretCipher } from "./provider-credential-store";
+import {
+  forwardAllowed,
+  parseRoutineForwardAllowlist,
+  ROUTINE_FORWARD_ALLOWLIST_ENV,
+  type RoutineForwardAllowlist,
+  readWebhookForward,
+  type WebhookForward,
+} from "./routine-forward-allowlist";
 import type { WebhookIngressDelivery } from "./signal-ingress";
 import type { WatchRegistryStore } from "./watch-registry-store";
 import { signWebhookBody, verifyStandardWebhookSignature, verifyWebhookSignature } from "./webhook-security";
@@ -81,6 +89,7 @@ export interface HostEventsServiceOptions {
   cipher: SecretCipher;
   relay: HostWebhookRelay;
   accountPrincipal: () => string | null;
+  forwardAllowlist?: RoutineForwardAllowlist;
 }
 
 const { sync: eventStep, rewrap: toHostEventsFailure } = causeHelpers(HostEventsFailure);
@@ -165,6 +174,7 @@ interface DecodedWebhookBody {
   occurredAt: string | null;
   data: EventJsonValue;
   waitId?: string;
+  forward?: WebhookForward | "invalid";
 }
 
 /** The body as a JSON object, or null when it is not UTF-8 JSON or not an object. */
@@ -189,11 +199,13 @@ export function decodeWebhookBody(body: Uint8Array): DecodedWebhookBody | null {
   const data = value.data ?? null;
   if (!isEventJsonValue(data)) return null;
   if (value.waitId !== undefined && !isWebhookWaitId(value.waitId)) return null;
+  const forward = readWebhookForward(value);
   return {
     type: value.type,
     occurredAt: value.occurredAt ?? null,
     data,
     ...(value.waitId === undefined ? {} : { waitId: value.waitId }),
+    ...(forward === undefined ? {} : { forward }),
   };
 }
 
@@ -211,7 +223,8 @@ function decodeStandardWebhookBody(body: Uint8Array): DecodedWebhookBody | null 
     isString(value.timestamp) && ISO_DATE_PREFIX.test(value.timestamp) && !Number.isNaN(Date.parse(value.timestamp))
       ? value.timestamp
       : null;
-  return { type: value.type, occurredAt, data: value };
+  const forward = readWebhookForward(value);
+  return { type: value.type, occurredAt, data: value, ...(forward === undefined ? {} : { forward }) };
 }
 
 /**
@@ -221,6 +234,7 @@ function decodeStandardWebhookBody(body: Uint8Array): DecodedWebhookBody | null 
  */
 export class HostEventsService implements HostEventsApi {
   readonly #options: HostEventsServiceOptions;
+  readonly #forwardAllowlist: RoutineForwardAllowlist;
   #accountPrincipal: string | null;
   #accountGeneration = 0;
   /** Serializes routine writes, so the route limit check and the write are one step. */
@@ -231,6 +245,13 @@ export class HostEventsService implements HostEventsApi {
   constructor(options: HostEventsServiceOptions) {
     this.#options = options;
     this.#accountPrincipal = options.accountPrincipal();
+    this.#forwardAllowlist =
+      options.forwardAllowlist ?? parseRoutineForwardAllowlist(process.env[ROUTINE_FORWARD_ALLOWLIST_ENV]);
+    if (this.#forwardAllowlist.size > 0)
+      logger.info("Webhook forward allowlist loaded.", {
+        sources: [...this.#forwardAllowlist.keys()],
+        targets: [...new Set([...this.#forwardAllowlist.values()].flatMap((targets) => [...targets]))],
+      });
   }
 
   getStatus() {
@@ -556,6 +577,25 @@ export class HostEventsService implements HostEventsApi {
       );
       return { status, received: null };
     }
+    const { owner } = route;
+    const forward = body.forward;
+    if (forward === "invalid") return { status: 400, received: null };
+    const forwarded = forward !== undefined && !(owner.kind === "agent" && forward.agentId === owner.id);
+    if (forward && forwarded) {
+      if (
+        owner.kind !== "agent" ||
+        !forwardAllowed(this.#forwardAllowlist, { routineId: route.routineId, ownerAgentId: owner.id }, forward.agentId)
+      ) {
+        logger.warn("A webhook forward was refused: the target is not on the forward allowlist.", {
+          routeId: route.routeId,
+          routineId: route.routineId,
+          targetAgentId: forward.agentId,
+        });
+        return { status: 400, received: null };
+      }
+      if (!this.#options.routines.ownerExists({ kind: "agent", id: forward.agentId }))
+        return { status: 404, received: null };
+    }
     const receivedAt = new Date().toISOString();
     const event = {
       deliveryId: input.deliveryId,
@@ -564,8 +604,8 @@ export class HostEventsService implements HostEventsApi {
       occurredAt: body.occurredAt ?? receivedAt,
       receivedAt,
       ...(body.waitId === undefined ? {} : { waitId: body.waitId }),
+      ...(forward && forwarded ? { forward } : {}),
     };
-    const { owner } = route;
     const received: ReceivedDelivery =
       owner.kind === "workflow"
         ? yield* this.#receiveWorkflow({ workflowId: owner.id, nodeId: route.routineId, event })
