@@ -2,7 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { randomUUID, type UUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -913,13 +913,12 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
     const stateDirectory = this.#stateDirectory;
     const skillPlugin =
       config.workspaceOnly && stateDirectory ? yield* claudeWorkspaceSkillPlugin(stateDirectory, config.cwd) : null;
+    const configDirectory =
+      this.#agentEnvironment?.().CLAUDE_CONFIG_DIR ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+    const helperEnvironment = config.profileGeneration ? yield* claudeSettingsProxyEnvironment(configDirectory) : {};
     const homeSkillPlugin =
       stateDirectory && !config.profileGeneration
-        ? yield* claudeHomeSkillPlugin(
-            stateDirectory,
-            this.#agentEnvironment?.().CLAUDE_CONFIG_DIR ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"),
-            config.cwd,
-          ).pipe(
+        ? yield* claudeHomeSkillPlugin(stateDirectory, configDirectory, config.cwd).pipe(
             // The home skills are an addition: a state folder that cannot hold the links must not stop the session.
             Effect.catch((error) =>
               Effect.sync(() => {
@@ -1016,6 +1015,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
             // tools when Finder starts OpenBot. An `env.PATH` in the Claude settings still wins.
             ...(launchPath ? { PATH: launchPath } : {}),
             ...this.#environment(this.#onApiKey),
+            ...helperEnvironment,
             CLAUDE_AGENT_SDK_CLIENT_APP: "openbot/0.1.0",
             // Without a terminal, the CLI gives the newer models no TodoWrite or task tools, so the
             // agent has no plan for OpenBot to show as a task list.
@@ -2270,6 +2270,25 @@ function spawnClaudeWrapper({ command, args, cwd, env, signal }: SpawnOptions): 
   child.once("error", release);
   if (signal.aborted) abort();
   return child;
+}
+
+const CLAUDE_SETTINGS_PROXY_KEYS = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"] as const;
+
+function claudeSettingsProxyEnvironment(configDirectory: string): Effect.Effect<Record<string, string>> {
+  return Effect.promise(async () => {
+    try {
+      const settings = JSON.parse(await readFile(join(configDirectory, "settings.json"), "utf8"));
+      const env = isRecord(settings) && isRecord(settings.env) ? settings.env : {};
+      return Object.fromEntries(
+        CLAUDE_SETTINGS_PROXY_KEYS.flatMap((key) => {
+          const value = env[key];
+          return typeof value === "string" && value ? [[key, value]] : [];
+        }),
+      );
+    } catch {
+      return {};
+    }
+  });
 }
 
 function claudeEnvironment(cli: ClaudeCliInfo): NodeJS.ProcessEnv {

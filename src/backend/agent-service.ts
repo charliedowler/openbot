@@ -1216,6 +1216,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     this.channels = new ChannelService(store.database, mailbox, new ChannelImages(store.channelImagesRoot), {
       agents: () => this.listAgents(),
       hidden: (agentId) => this.#store.isHidden(agentId),
+      failureCause: (error) => failureMessages(error).map((message) => this.#mcp.redact(message)),
       generate: (lead, prompt, fallbacks = [], background = false) =>
         Effect.gen({ self: this }, function* () {
           const modelOf = (agent: AgentSummary) =>

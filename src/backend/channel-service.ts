@@ -80,6 +80,7 @@ export interface ChannelHooks {
    */
   hidden?(agentId: string): boolean;
   generate: ChannelTextModel;
+  failureCause?(error: unknown): string[];
   schedule(agentId: string): void;
   awaitDrain?(agentId: string): Effect.Effect<void, ChannelOperationError> | undefined;
   interrupt(agentId: string, turnId: string, threadId: string): Effect.Effect<void, ChannelOperationError>;
@@ -282,7 +283,12 @@ export class ChannelService {
   ) {
     this.store = new ChannelStore(database, (channel, tasks) => this.#tasksStopped(channel, tasks));
     this.memories = new ChannelMemoryStore(database);
-    this.#history = new ChannelHistory(this.store, hooks.generate, this.memories);
+    this.#history = new ChannelHistory(
+      this.store,
+      hooks.generate,
+      this.memories,
+      (error) => hooks.failureCause?.(error) ?? [],
+    );
   }
 
   /**
@@ -2831,6 +2837,7 @@ export class ChannelService {
               logger.warn("A channel summary after a turn failed.", {
                 channelId,
                 reason: failure.cause instanceof Error ? failure.cause.message : String(failure.cause),
+                cause: this.hooks.failureCause?.(failure.cause),
               }),
             ),
           ),

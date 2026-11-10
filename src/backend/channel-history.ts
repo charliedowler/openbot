@@ -447,6 +447,7 @@ class ChannelHistoryDependencies extends Context.Service<
     store: ChannelStore;
     generate: ChannelTextModel;
     memories: ChannelMemoryStore;
+    failureCause: ((error: unknown) => string[]) | undefined;
   }
 >()("openbot/ChannelHistory/Dependencies") {}
 export class ChannelHistory {
@@ -456,8 +457,9 @@ export class ChannelHistory {
     readonly store: ChannelStore,
     readonly generate: ChannelTextModel,
     readonly memories: ChannelMemoryStore,
+    failureCause?: (error: unknown) => string[],
   ) {
-    this.#layer = Layer.succeed(ChannelHistoryDependencies, { store, generate, memories });
+    this.#layer = Layer.succeed(ChannelHistoryDependencies, { store, generate, memories, failureCause });
   }
 
   /**
@@ -516,6 +518,7 @@ export class ChannelHistory {
             logger.warn("A channel summary failed. The packet gives the newest messages that fit.", {
               channelId: channel.id,
               reason: failure.cause instanceof Error ? failure.cause.message : String(failure.cause),
+              cause: dependencies.failureCause?.(failure.cause),
             });
             const messages = conversation(yield* channelSync(() => dependencies.store.messages(channel.id)));
             const summary = yield* channelSync(() => dependencies.store.summary(channel.id));
