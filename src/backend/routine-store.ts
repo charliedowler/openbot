@@ -148,6 +148,8 @@ export interface RoutineRecordInput {
     | { kind: "webhook"; eventType: string | null; filters: EventFilter[]; secretCiphertext: string | null };
 }
 
+export const WEBHOOK_TEST_DELIVERY_PREFIX = "openbot-test-";
+
 export interface ReceivedWebhookEvent {
   deliveryId: string;
   eventType: string;
@@ -161,6 +163,7 @@ export interface ReceivedWebhookEvent {
 export type WebhookReceiveResult<Run = OwnedRoutineRun> =
   | { kind: "started"; run: Run }
   | { kind: "ignored"; reason: "event-type" | "filter" | "inactive" }
+  | { kind: "coalesced"; runId: string }
   | { kind: "duplicate" }
   | { kind: "gone" }
   | { kind: "too-large" };
@@ -506,7 +509,12 @@ export class RoutineStore {
    * transaction. The caller starts the run after the commit; a crash before that leaves a run that
    * `pendingRunRows` resumes. The event stays in the run instruction only, as framed data.
    */
-  protected receiveWebhookRow(ownerId: string, routineId: string, event: ReceivedWebhookEvent): WebhookReceiveResult {
+  protected receiveWebhookRow(
+    ownerId: string,
+    routineId: string,
+    event: ReceivedWebhookEvent,
+    queuedRun: (runOwnerId: string) => string | null = () => null,
+  ): WebhookReceiveResult {
     const routine = this.getRecord(ownerId, routineId);
     if (routine?.trigger.kind !== "webhook") return { kind: "gone" };
     const db = this.database.connection;
@@ -524,6 +532,14 @@ export class RoutineStore {
     if (reason) {
       insertWebhookReceipt(db, { ...receipt, status: "ignored", reason, runId: null });
       return { kind: "ignored", reason };
+    }
+    const waitingRunId =
+      event.waitId === undefined && !event.deliveryId.startsWith(WEBHOOK_TEST_DELIVERY_PREFIX)
+        ? queuedRun(event.forward?.agentId ?? routine.ownerId)
+        : null;
+    if (waitingRunId) {
+      insertWebhookReceipt(db, { ...receipt, status: "started", reason: null, runId: waitingRunId });
+      return { kind: "coalesced", runId: waitingRunId };
     }
     const runId = randomUUID();
     const instruction = webhookRunInstruction(event.forward?.instruction ?? routine.instruction, {

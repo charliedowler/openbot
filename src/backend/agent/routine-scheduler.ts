@@ -22,6 +22,7 @@ import { routineConversationEventItemType, routineRunConversationEventItemType }
 import type { EventRoutine } from "@openbot/contracts/ipc-events";
 import { type DynamicRecord, isBoolean } from "@openbot/contracts/runtime-values";
 import { sourceText } from "@openbot/i18n/source";
+import { createOpenBotLogger } from "@openbot/logging";
 import { collapseMissedOccurrences, RoutineInputError } from "@openbot/team-client/routine-schedule";
 import { Effect, Fiber, Schema, Scope, Semaphore } from "effect";
 import { AgentRoutineStore } from "../agent-routine-store";
@@ -113,6 +114,12 @@ export interface RoutineHooks {
 
 /** Enough for every message a busy host queues between restarts; each entry is a few bytes. */
 const DELIVERY_TIMEZONE_LIMIT = 10_000;
+export const ROUTINE_COALESCE_LOG_MS = 60 * 60_000;
+
+export function routineCoalesceEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return !["0", "false", "off", "no", "disabled"].includes((env.OPENBOT_ROUTINE_COALESCE ?? "").trim().toLowerCase());
+}
+const logger = createOpenBotLogger("routine-scheduler");
 /**
  * Enough for every routine run a busy host starts between restarts; each entry holds two previews of
  * at most `AGENT_PREVIEW_MAX_LENGTH` characters.
@@ -190,6 +197,7 @@ export class RoutineScheduler implements RoutineDueSource {
   readonly #scope: () => Scope.Scope;
   /** Webhook runs whose delivery is still being queued. They queue one at a time, in the order the requests came. */
   readonly #webhookRuns = new Set<Fiber.Fiber<void>>();
+  readonly #coalesced = new Map<string, { loggedAt: number; since: number }>();
   readonly #webhookRunOrder = Semaphore.makeUnsafe(1);
 
   constructor(options: RoutineSchedulerOptions) {
@@ -403,7 +411,12 @@ export class RoutineScheduler implements RoutineDueSource {
   ) {
     const runAgentId = event.forward?.agentId ?? agentId;
     if (!this.mayDrain(agentId) || !this.mayDrain(runAgentId)) return { kind: "unavailable" } as const;
-    const result = yield* routineStep(() => this.#routines.receiveWebhook(agentId, routineId, event));
+    const result = yield* routineStep(() =>
+      this.#routines.receiveWebhook(agentId, routineId, event, (runAgentId) =>
+        this.#queuedRunId(runAgentId, routineId),
+      ),
+    );
+    if (result.kind === "coalesced") this.#noteCoalesced(runAgentId, routineId, result.runId);
     if (result.kind === "started") {
       const fiber = yield* this.#webhookRunOrder
         .withPermit(this.#enqueueRunEffect(result.run, event.forward ? null : (event.waitId ?? null), true))
@@ -426,6 +439,33 @@ export class RoutineScheduler implements RoutineDueSource {
     yield* routineStep(() => this.stateChanged(agentId));
     return result;
   }, Effect.uninterruptible);
+
+  #queuedRunId(agentId: string, routineId: string): string | null {
+    if (!routineCoalesceEnabled() || this.#waits.hasRoutineWaits(agentId, routineId)) return null;
+    const run = this.#routines.activeRuns(agentId, routineId).find((candidate) => {
+      if (candidate.status !== "queued") return false;
+      if (!candidate.deliveryId) return true;
+      return this.#mailbox.getDelivery(candidate.deliveryId)?.delivery.status === "queued";
+    });
+    return run?.id ?? null;
+  }
+
+  #noteCoalesced(agentId: string, routineId: string, queuedRunId: string): void {
+    const key = `${agentId}:${routineId}`;
+    const now = Date.now();
+    const last = this.#coalesced.get(key);
+    if (last && now - last.loggedAt < ROUTINE_COALESCE_LOG_MS) {
+      last.since += 1;
+      return;
+    }
+    logger.info("A routine run was not queued: the same routine has a queued run for the agent.", {
+      agentId,
+      routineId,
+      queuedRunId,
+      notQueuedSinceLastLine: (last?.since ?? 0) + 1,
+    });
+    this.#coalesced.set(key, { loggedAt: now, since: 0 });
+  }
 
   /** The webhook runs that still queue their delivery, so a stop can let them finish. */
   pendingWebhookRuns(): Effect.Effect<void>[] {

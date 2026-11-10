@@ -20,6 +20,8 @@ import type { ReceivedWebhookEvent } from "../src/backend/routine-store";
 import { RoutineTimer } from "../src/backend/routine-timer";
 import { StoredStateFailure } from "../src/backend/stored-state-effects";
 
+process.env.OPENBOT_ROUTINE_COALESCE = "0";
+
 /** Signal answers the sender 503 when the host has not answered a delivery in this time. */
 const SIGNAL_DELIVERY_TIMEOUT_MS = 2_500;
 

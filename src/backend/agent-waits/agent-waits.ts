@@ -265,6 +265,10 @@ export class AgentWaits {
   }
 
   /** The waits that the run of this delivery continues, read when the run starts. */
+  hasRoutineWaits(agentId: string, routineId: string): boolean {
+    return this.#store.forRoutineRun(agentId, routineId).length > 0;
+  }
+
   wokenBy(deliveryId: string): AgentWait[] {
     return this.#store.wokenBy(deliveryId).filter((wait) => !wait.id.startsWith("channel:"));
   }

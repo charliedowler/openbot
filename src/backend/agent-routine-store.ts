@@ -107,8 +107,13 @@ export class AgentRoutineStore extends RoutineStore {
     return toRun(this.createRunRow(runSource(routine), triggerId, start, scheduledFor));
   }
 
-  receiveWebhook(agentId: string, routineId: string, event: ReceivedWebhookEvent): WebhookReceiveResult<RoutineRun> {
-    const result = this.receiveWebhookRow(agentId, routineId, event);
+  receiveWebhook(
+    agentId: string,
+    routineId: string,
+    event: ReceivedWebhookEvent,
+    queuedRun?: (runAgentId: string) => string | null,
+  ): WebhookReceiveResult<RoutineRun> {
+    const result = this.receiveWebhookRow(agentId, routineId, event, queuedRun);
     return result.kind === "started" ? { kind: "started", run: toRun(result.run) } : result;
   }
 

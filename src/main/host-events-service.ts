@@ -34,7 +34,12 @@ import { RoutineOperationFailed } from "../backend/agent/routine-scheduler";
 import type { WebhookRoutineWriter } from "../backend/agent/webhook-routine-tool";
 import { causeHelpers } from "../backend/effect-boundary";
 import type { RoutineRecords } from "../backend/routine-records";
-import type { OwnedRoutineRecord, RoutineRecordInput, WebhookReceiveResult } from "../backend/routine-store";
+import {
+  type OwnedRoutineRecord,
+  type RoutineRecordInput,
+  WEBHOOK_TEST_DELIVERY_PREFIX,
+  type WebhookReceiveResult,
+} from "../backend/routine-store";
 import type { WebhookRouteOwner } from "../backend/webhook-route-store";
 import { isWebhookWaitId, WEBHOOK_EVENT_TYPE_MAX_LENGTH } from "../backend/webhook-trigger";
 import type { WorkflowWebhookDelivery, WorkflowWebhookResult } from "../backend/workflows/workflows";
@@ -152,6 +157,7 @@ type ReceivedDelivery = WebhookReceiveResult<unknown> | WorkflowWebhookResult | 
 function deliveryStatus(result: ReceivedDelivery) {
   switch (result.kind) {
     case "started":
+    case "coalesced":
       return 202;
     case "ignored":
     case "duplicate":
@@ -402,7 +408,7 @@ export class HostEventsService implements HostEventsApi {
     );
     const timestamp = String(Math.floor(Date.now() / 1000));
     // A new ID for each test, so the receipt check never takes it for a redelivery.
-    const deliveryId = `openbot-test-${randomUUID()}`;
+    const deliveryId = `${WEBHOOK_TEST_DELIVERY_PREFIX}${randomUUID()}`;
     const { status, received } = yield* this.#process({
       routeId: route.routeId,
       deliveryId,
