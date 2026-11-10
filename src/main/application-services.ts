@@ -3713,6 +3713,7 @@ export async function createApplicationServices({
           return { ...work, idle: readiness.safeToRestart, reasons: readiness.reasons };
         },
         usageLimits: service,
+        agents: service,
         onError: (message, error) => logger.warn(message, toLogValue(error)),
       })
     : null;

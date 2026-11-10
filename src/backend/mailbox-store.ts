@@ -812,6 +812,20 @@ export class MailboxStore {
     };
   }
 
+  queuedByAgent(): Map<string, { count: number; oldestCreatedAt: string }> {
+    const queued = new Map<string, { count: number; oldestCreatedAt: string }>();
+    for (const delivery of this.#state.deliveries) {
+      if (delivery.status !== "queued") continue;
+      const current = queued.get(delivery.recipientAgentId);
+      if (!current) queued.set(delivery.recipientAgentId, { count: 1, oldestCreatedAt: delivery.createdAt });
+      else {
+        current.count += 1;
+        if (delivery.createdAt < current.oldestCreatedAt) current.oldestCreatedAt = delivery.createdAt;
+      }
+    }
+    return queued;
+  }
+
   /**
    * The queued channel, messaging and task work of this agent, in queue order. `listQueue` hides it, so a
    * caller that reorders the queue the user sees has to put these ids back before the mailbox reads

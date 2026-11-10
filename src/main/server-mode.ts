@@ -8,8 +8,9 @@
  * (mode 0700). Only that user and root can connect. Agents run as the same user and already have
  * full access to its files, so the socket gives them nothing new. The socket answers a closed list
  * of requests: status, the email-code sign-in, the sign-in with an operator's one-time claim, the
- * server name, sign-out, a Mobile Connect code and the end of the usage limits that hold a provider's
- * agents. It never sends the session token, the sign-in code
+ * server name, sign-out, a Mobile Connect code, the end of the usage limits that hold a provider's
+ * agents, the Stop of an agent's running turn, an agent's model and backup models, and each agent's
+ * queue. It never sends the session token, the sign-in code
  * or the claim back. The Mobile Connect code signs one phone
  * in to the account of the server; the account service lets it work for one sign-in, for two minutes.
  *
@@ -23,7 +24,7 @@ import type { Socket } from "node:net";
 import { dirname, isAbsolute, join } from "node:path";
 import { parseHostedServerName } from "@openbot/contracts/hosted-servers";
 import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
-import { type CentralAuthState, isAgentProvider, isProviderAccountId } from "@openbot/contracts/ipc";
+import { type AgentSummary, type CentralAuthState, isAgentProvider, isProviderAccountId } from "@openbot/contracts/ipc";
 import { sourceText } from "@openbot/i18n/source";
 import { Deferred, Effect } from "effect";
 import QRCode from "qrcode";
@@ -79,6 +80,7 @@ export interface ServerModeOptions {
   memory: Pick<ServerMemory, "level" | "sample" | "turnLimit"> | null;
   nativeWork?: () => { idle: boolean; compactions: number; providerOperations: number; reasons: string[] };
   usageLimits?: Pick<AgentService, "releaseUsageLimits">;
+  agents?: Pick<AgentService, "listAgents" | "interruptRunningTurn" | "updateAgentRuntime" | "agentQueues">;
   onError: (message: string, error: unknown) => void;
   /** Tests only. */
   uid?: number;
@@ -222,6 +224,12 @@ export class ServerMode {
         return runCauseEffect(this.#mobileConnect());
       case "POST /v1/usage/reset":
         return this.#resetUsage(body.get("provider") ?? "", body.get("accountId"));
+      case "POST /v1/turns/interrupt":
+        return this.#interruptTurn(body);
+      case "POST /v1/agents/update":
+        return this.#updateAgent(body);
+      case "GET /v1/agents/queue":
+        return this.#agentQueue();
       case "POST /v1/logout":
         await runCauseEffect(
           this.#options.centralAuth.logout().pipe(Effect.mapError(({ cause }) => new RemoteWorkflowError({ cause }))),
@@ -273,6 +281,99 @@ export class ServerMode {
       lines: {
         released: released.length,
         limits: released.map((limit) => `${limit.provider}/${limit.accountId ?? "default"}/${limit.model}`).join(" "),
+      },
+    };
+  }
+
+  async #interruptTurn(body: URLSearchParams): Promise<Answer> {
+    const agents = this.#options.agents;
+    if (!agents) return failure(404, "not_found");
+    const agentId = body.get("agentId")?.trim() ?? "";
+    const turnId = body.get("turnId")?.trim() || null;
+    if (!agentId || agentId.length > INPUT_LIMITS.identifier) return failure(400, "invalid_agent");
+    if (turnId !== null && turnId.length > INPUT_LIMITS.identifier) return failure(400, "invalid_turn");
+    const outcome = await runCauseEffect(agents.interruptRunningTurn(agentId, turnId));
+    switch (outcome.kind) {
+      case "unknown-agent":
+        return failure(404, "unknown_agent");
+      case "no-running-turn":
+        return failure(409, "no_running_turn");
+      case "turn-mismatch":
+      case "turn-ambiguous":
+        return {
+          status: 409,
+          lines: {
+            error: outcome.kind === "turn-mismatch" ? "turn_mismatch" : "turn_ambiguous",
+            running: outcome.running.map((turn) => turn.turnId).join(" "),
+          },
+        };
+      case "stopped":
+        return {
+          status: 200,
+          lines: {
+            stopped: outcome.turn.turnId,
+            threadId: outcome.turn.threadId,
+            ownChat: String(outcome.turn.ownChat),
+          },
+        };
+    }
+  }
+
+  async #updateAgent(body: URLSearchParams): Promise<Answer> {
+    const agents = this.#options.agents;
+    if (!agents) return failure(404, "not_found");
+    for (const key of new Set(body.keys())) {
+      if (!AGENT_UPDATE_FIELDS.has(key)) return failure(400, "unknown_field", key);
+      if (body.getAll(key).length > 1) return failure(400, "repeated_field", key);
+    }
+    const agentId = body.get("agentId")?.trim() ?? "";
+    if (!agentId || agentId.length > INPUT_LIMITS.identifier) return failure(400, "invalid_agent");
+    if (!agents.listAgents().some((agent) => agent.id === agentId)) return failure(404, "unknown_agent");
+    const provider = body.get("provider");
+    const model = body.get("model");
+    const account = body.get("providerAccountId");
+    const backupText = body.get("backupModels");
+    let backupModels: unknown;
+    try {
+      backupModels = backupText === null ? undefined : JSON.parse(backupText);
+    } catch {
+      return failure(400, "invalid_backup_models");
+    }
+    const request = {
+      agentId,
+      ...(provider === null ? {} : { provider }),
+      ...(model === null ? {} : { model }),
+      ...(account === null ? {} : { providerAccountId: account === DEFAULT_ACCOUNT_FIELD ? null : account }),
+      ...(backupText === null ? {} : { backupModels }),
+    };
+    let updated: AgentSummary;
+    try {
+      updated = await runCauseEffect(agents.updateAgentRuntime(request));
+    } catch (error) {
+      return failure(400, "invalid_update", error instanceof Error ? error.message : String(error));
+    }
+    return {
+      status: 200,
+      lines: {
+        agentId: updated.id,
+        provider: updated.provider,
+        model: updated.model,
+        providerAccountId: updated.providerAccountId ?? DEFAULT_ACCOUNT_FIELD,
+        backupModels: JSON.stringify(updated.backupModels ?? null),
+        pendingRuntime: updated.pendingRuntime ? JSON.stringify(updated.pendingRuntime) : null,
+      },
+    };
+  }
+
+  #agentQueue(): Answer {
+    const agents = this.#options.agents;
+    if (!agents) return failure(404, "not_found");
+    const rows = agents.agentQueues();
+    return {
+      status: 200,
+      lines: {
+        agents: rows.length,
+        ...Object.fromEntries(rows.map(({ agentId, ...row }) => [`agent.${agentId}`, JSON.stringify(row)])),
       },
     };
   }
@@ -404,6 +505,9 @@ async function readBody(request: IncomingMessage): Promise<URLSearchParams | nul
   const body = await readBodyWithin(request, MAX_BODY_BYTES);
   return body === null ? null : new URLSearchParams(body.toString("utf8"));
 }
+
+const AGENT_UPDATE_FIELDS = new Set(["agentId", "provider", "model", "providerAccountId", "backupModels"]);
+const DEFAULT_ACCOUNT_FIELD = "default";
 
 function failure(status: number, error: string, message: string | null = null): Answer {
   return { status, lines: { error, message } };

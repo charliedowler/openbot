@@ -198,6 +198,10 @@ export class OpenBotDatabase {
     return this.#conversations.readRunningTurnIds();
   }
 
+  readRunningTurns() {
+    return this.#conversations.readRunningTurns();
+  }
+
   readRunningTurnProgress(ignoredEventTypes: readonly string[]) {
     return this.#conversations.readRunningTurnProgress(ignoredEventTypes);
   }

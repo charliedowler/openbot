@@ -139,6 +139,23 @@ export class ConversationQueries {
     return row ? optionalStringColumn(row, "active_turn_id") : null;
   }
 
+  readRunningTurns(): Array<{ agentId: string; threadId: string; turnId: string; startedAt: string }> {
+    return databaseRows(
+      this.#core.connection
+        .prepare(
+          `SELECT t.turn_id, t.thread_id, t.started_at, th.agent_id
+           FROM projection_turns t JOIN projection_threads th ON th.thread_id = t.thread_id
+           WHERE t.status = 'running'`,
+        )
+        .all(),
+    ).map((row) => ({
+      agentId: requiredStringColumn(row, "agent_id"),
+      threadId: requiredStringColumn(row, "thread_id"),
+      turnId: requiredStringColumn(row, "turn_id"),
+      startedAt: requiredStringColumn(row, "started_at"),
+    }));
+  }
+
   readRunningTurnProgress(
     ignoredEventTypes: readonly string[],
   ): Array<{ agentId: string; threadId: string; turnId: string; startedAt: string; lastEventAt: string | null }> {

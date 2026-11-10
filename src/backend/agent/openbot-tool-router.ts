@@ -7,6 +7,7 @@ import { ATTACHMENT_LIMITS, INPUT_LIMITS } from "@openbot/contracts/input-limits
 import type {
   AgentModelChoice,
   AgentModelOption,
+  AgentReasoningEffort,
   AgentSummary,
   AvatarImageInput,
   ConversationMessage,
@@ -113,6 +114,8 @@ import {
 } from "./model-tools";
 import {
   createAgentToolSchema,
+  type HostAgentUpdate,
+  hostAgentUpdateSchema,
   listModelsToolSchema,
   PROFILE_TOOL_NAMES,
   profileToolErrorMessage,
@@ -196,7 +199,7 @@ export interface OpenBotToolRouterHooks {
     configure?: (agent: AgentSummary) => Effect.Effect<AgentSummary, ToolOperationFailed>,
   ): Effect.Effect<AgentSummary, ToolOperationFailed>;
   /** `initiatingAgentId` is the calling agent, recorded with a model change. */
-  updateAgent(input: UpdateAgentInput, initiatingAgentId: string): Effect.Effect<AgentSummary, ToolOperationFailed>;
+  updateAgent(input: UpdateAgentInput, initiatingAgentId?: string): Effect.Effect<AgentSummary, ToolOperationFailed>;
   setAvatar(agentId: string, image: AvatarImageInput | null): Effect.Effect<AgentSummary, ToolOperationFailed>;
   /** The MCP servers of this computer that are turned on, before the Computer Use setting of one agent. */
   enabledMcpServers(): McpServerConfig[];
@@ -1959,24 +1962,7 @@ export class OpenBotToolRouter {
       }
       // Checked before anything is written, so a model the provider does not list leaves the name
       // and every other field of the same call unchanged.
-      const runtime = requestedRuntime(target, runtimeRequest, this.#hooks.listModels());
-      // The model and account the agent has after this call. A provider change without an account
-      // moves the agent to the new provider's own sign-in.
-      const ownProvider = runtime.provider ?? target.provider;
-      const own: AgentModelChoice = {
-        provider: ownProvider,
-        model: runtime.model ?? target.model,
-        providerAccountId:
-          providerAccountId !== undefined
-            ? (providerAccountId ?? undefined)
-            : ownProvider === target.provider
-              ? target.providerAccountId
-              : undefined,
-      };
-      const backups =
-        backupModels === undefined
-          ? undefined
-          : requestedBackupModels(backupModels, this.#hooks.listModels(), this.#hooks.providerAccounts, own);
+      const runtime = this.#runtimeInput(target, { ...runtimeRequest, providerAccountId, backupModels });
       const image =
         avatarPath === undefined
           ? undefined
@@ -1989,9 +1975,6 @@ export class OpenBotToolRouter {
         ...(fields.avatarSeed === undefined ? {} : { avatarSeed: fields.avatarSeed }),
         ...(fields.notifications === undefined ? {} : { notifications: fields.notifications }),
         ...runtime,
-        // The agent service checks that the account exists for the agent's provider after this change.
-        ...(providerAccountId === undefined ? {} : { providerAccountId }),
-        ...(backups === undefined ? {} : { backupModels: backups }),
         ...restrictionInput(access, computerUse),
         ...(avatarHue === undefined ? {} : { avatarHue }),
       };
@@ -2027,6 +2010,56 @@ export class OpenBotToolRouter {
           },
         ],
       };
+    },
+    Effect.catchDefect((cause) => Effect.fail(new ToolOperationFailed({ cause }))),
+    Effect.uninterruptible,
+  );
+
+  #runtimeInput(
+    target: AgentSummary,
+    request: Pick<HostAgentUpdate, "provider" | "model" | "providerAccountId" | "backupModels"> & {
+      reasoningEffort?: AgentReasoningEffort | undefined;
+    },
+  ): Pick<UpdateAgentInput, "provider" | "model" | "reasoningEffort" | "providerAccountId" | "backupModels"> {
+    const { providerAccountId, backupModels } = request;
+    const runtime = requestedRuntime(
+      target,
+      { provider: request.provider, model: request.model, reasoningEffort: request.reasoningEffort },
+      this.#hooks.listModels(),
+    );
+    // The model and account the agent has after this call. A provider change without an account
+    // moves the agent to the new provider's own sign-in.
+    const ownProvider = runtime.provider ?? target.provider;
+    const own: AgentModelChoice = {
+      provider: ownProvider,
+      model: runtime.model ?? target.model,
+      providerAccountId:
+        providerAccountId !== undefined
+          ? (providerAccountId ?? undefined)
+          : ownProvider === target.provider
+            ? target.providerAccountId
+            : undefined,
+    };
+    const backups =
+      backupModels === undefined
+        ? undefined
+        : requestedBackupModels(backupModels, this.#hooks.listModels(), this.#hooks.providerAccounts, own);
+    return {
+      ...runtime,
+      // The agent service checks that the account exists for the agent's provider after this change.
+      ...(providerAccountId === undefined ? {} : { providerAccountId }),
+      ...(backups === undefined ? {} : { backupModels: backups }),
+    };
+  }
+
+  readonly updateAgentRuntime = Effect.fn("OpenBotToolRouter.updateAgentRuntime")(
+    function* (this: OpenBotToolRouter, request: unknown): Effect.fn.Return<AgentSummary, ToolOperationFailed> {
+      const { agentId, ...fields } = hostAgentUpdateSchema.parse(request, { reportInput: true });
+      if (Object.values(fields).every((value) => value === undefined)) {
+        throw new Error("At least one profile field is required.");
+      }
+      const target = this.#requireAgent(agentId);
+      return yield* this.#hooks.updateAgent({ agentId, ...this.#runtimeInput(target, fields) });
     },
     Effect.catchDefect((cause) => Effect.fail(new ToolOperationFailed({ cause }))),
     Effect.uninterruptible,

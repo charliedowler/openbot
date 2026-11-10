@@ -221,7 +221,7 @@ import {
   type ToolUsageSignal,
 } from "./agent/thread-items";
 import { ThreadLifecycle } from "./agent/thread-lifecycle";
-import { toToolOperationFailed } from "./agent/tool-operation";
+import { type ToolOperationFailed, toToolOperationFailed } from "./agent/tool-operation";
 import { type AgentBrowserHost, TurnLifecycle } from "./agent/turn-lifecycle";
 import { TurnReaper, type TurnReaperStop } from "./agent/turn-reaper";
 import { channelUsageObserver, memoryReviewUsageObserver, workflowUsageObserver } from "./agent/usage-collection";
@@ -276,6 +276,34 @@ import {
 } from "./workspace-paths";
 
 const logger = createOpenBotLogger("agent-service");
+
+export interface HostRunningTurn {
+  turnId: string;
+  threadId: string;
+  startedAt: string | null;
+  ownChat: boolean;
+}
+
+export type HostInterruptOutcome =
+  | { kind: "stopped"; turn: HostRunningTurn }
+  | { kind: "unknown-agent" }
+  | { kind: "no-running-turn" }
+  | { kind: "turn-mismatch"; running: HostRunningTurn[] }
+  | { kind: "turn-ambiguous"; running: HostRunningTurn[] };
+
+export interface HostAgentQueue {
+  agentId: string;
+  name: string;
+  provider: string;
+  model: string;
+  providerAccountId: string | null;
+  backupModels: AgentSummary["backupModels"] | null;
+  queued: number;
+  oldestQueuedAt: string | null;
+  runningTurnId: string | null;
+  runningTurnStartedAt: string | null;
+  runningTurns: number;
+}
 const TURN_REAPER_EVENT_TYPE = "turn.reaper-stopped";
 const TURN_REAPER_QUEUE_EVENTS = [
   "routine.run-queued",
@@ -4161,6 +4189,83 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
       yield* this.#usageLimits.accountReset(provider, accountId === DEFAULT_PROVIDER_ACCOUNT_ID ? null : accountId);
     return outcome;
   }).bind(this);
+
+  #runningTurnsOf(agent: AgentSummary, stored = this.#store.database.readRunningTurns()): HostRunningTurn[] {
+    const turns = new Map<string, HostRunningTurn>();
+    for (const row of stored)
+      if (row.agentId === agent.id)
+        turns.set(row.turnId, {
+          turnId: row.turnId,
+          threadId: row.threadId,
+          startedAt: row.startedAt,
+          ownChat: row.threadId === agent.threadId,
+        });
+    for (const [agentId, snapshot] of this.#conversation.activeSnapshots()) {
+      const turnId = snapshot.activeTurnId;
+      if (agentId !== agent.id || !turnId || !snapshot.threadId || turns.has(turnId)) continue;
+      const startedAt = this.#turn.turnStartedAt(turnId);
+      turns.set(turnId, {
+        turnId,
+        threadId: snapshot.threadId,
+        startedAt: startedAt === null ? null : new Date(startedAt).toISOString(),
+        ownChat: snapshot.threadId === agent.threadId,
+      });
+    }
+    return [...turns.values()].sort(
+      (left, right) =>
+        Number(right.ownChat) - Number(left.ownChat) || (left.startedAt ?? "").localeCompare(right.startedAt ?? ""),
+    );
+  }
+
+  readonly interruptRunningTurn = Effect.fn("AgentService.interruptRunningTurn")(function* (
+    this: AgentService,
+    agentId: string,
+    turnId: string | null,
+  ): Effect.fn.Return<HostInterruptOutcome, AgentLifecycleFailed> {
+    const agent = this.listAgents().find((candidate) => candidate.id === agentId);
+    if (!agent) return { kind: "unknown-agent" };
+    const running = this.#runningTurnsOf(agent);
+    let turn: HostRunningTurn | undefined;
+    if (turnId !== null) {
+      turn = running.find((candidate) => candidate.turnId === turnId);
+      if (!turn) return { kind: "turn-mismatch", running };
+    } else {
+      const ownChat = running.filter((candidate) => candidate.ownChat);
+      const choices = ownChat.length > 0 ? ownChat : running;
+      if (choices.length === 0) return { kind: "no-running-turn" };
+      if (choices.length > 1) return { kind: "turn-ambiguous", running };
+      turn = choices[0];
+    }
+    if (!turn) return { kind: "no-running-turn" };
+    yield* this.interrupt(agentId, turn.turnId, turn.ownChat ? undefined : turn.threadId);
+    return { kind: "stopped", turn };
+  }).bind(this);
+
+  agentQueues(): HostAgentQueue[] {
+    const queued = this.#mailbox.queuedByAgent();
+    const stored = this.#store.database.readRunningTurns();
+    return this.listAgents().map((agent) => {
+      const waiting = queued.get(agent.id);
+      const running = this.#runningTurnsOf(agent, stored);
+      return {
+        agentId: agent.id,
+        name: agent.name,
+        provider: agent.provider,
+        model: agent.model,
+        providerAccountId: agent.providerAccountId ?? null,
+        backupModels: agent.backupModels ?? null,
+        queued: waiting?.count ?? 0,
+        oldestQueuedAt: waiting?.oldestCreatedAt ?? null,
+        runningTurnId: running[0]?.turnId ?? null,
+        runningTurnStartedAt: running[0]?.startedAt ?? null,
+        runningTurns: running.length,
+      };
+    });
+  }
+
+  updateAgentRuntime(request: unknown): Effect.Effect<AgentSummary, ToolOperationFailed> {
+    return this.#tools.updateAgentRuntime(request);
+  }
 
   readonly releaseUsageLimits = Effect.fn("AgentService.releaseUsageLimits")(function* (
     this: AgentService,

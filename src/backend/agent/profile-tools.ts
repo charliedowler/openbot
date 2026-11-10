@@ -151,6 +151,12 @@ export const updateProfileToolSchema = z
   })
   .strict();
 
+export const hostAgentUpdateSchema = updateProfileToolSchema
+  .pick({ agentId: true, provider: true, model: true, providerAccountId: true, backupModels: true })
+  .strict();
+
+export type HostAgentUpdate = z.infer<typeof hostAgentUpdateSchema>;
+
 /** One `update_agents` call reaches at most this many agents. */
 const UPDATE_AGENTS_LIMIT = 100;
 
