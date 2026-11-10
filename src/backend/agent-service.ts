@@ -324,6 +324,7 @@ export interface AgentServiceOptions {
   /** The pause with no turn before a conversation's memory review runs early. Tests make it short. */
   memoryReviewIdleMs?: number;
   providerRetryDelayMs?: number;
+  usageLimitProbeMs?: number;
   preferredProvider?: AgentProvider;
   /** The model chosen beside `preferredProvider`, or `null` for that provider's own default. */
   preferredModel?: AgentModelId | null;
@@ -1410,10 +1411,13 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
       store,
       statePath: store.usageLimitsPath,
       ...(options.providerRetryDelayMs === undefined ? {} : { retryDelayMs: options.providerRetryDelayMs }),
+      ...(options.usageLimitProbeMs === undefined ? {} : { probeIntervalMs: options.usageLimitProbeMs }),
       hooks: {
         emit: (event) => this.#emit(event),
         emitRuntimeSnapshot: () => this.#emitRuntimeSnapshot(),
         scheduleDrain: (agentId) => this.#drain.scheduleDrain(agentId),
+        waiting: (agentId) => this.#mailbox.nextQueued(agentId) !== null,
+        busy: (agentId) => this.#runsTurn(agentId) || this.#drain.hasStartingDeliveriesFor(agentId),
         readUsage: (provider, model, accountId) =>
           this.#providers.usage({ provider, model, ...(accountId ? { accountId } : {}) }).pipe(toUsageReadFailed),
         // The refused turn's drain must not wait for the queues, so the owned scope settles them. An
@@ -4156,6 +4160,28 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     if (outcome === "reset" || outcome === "nothingToReset")
       yield* this.#usageLimits.accountReset(provider, accountId === DEFAULT_PROVIDER_ACCOUNT_ID ? null : accountId);
     return outcome;
+  }).bind(this);
+
+  readonly releaseUsageLimits = Effect.fn("AgentService.releaseUsageLimits")(function* (
+    this: AgentService,
+    provider: AgentProvider,
+    accountId: string | null,
+  ) {
+    const accounts =
+      accountId === null
+        ? [
+            ...new Set(
+              this.#usageLimits
+                .limitedModels()
+                .filter((limit) => limit.provider === provider)
+                .map((limit) => limit.providerAccountId ?? null),
+            ),
+          ]
+        : [accountId === DEFAULT_PROVIDER_ACCOUNT_ID ? null : accountId];
+    const released: UsageLimitKey[] = [];
+    for (const account of accounts)
+      released.push(...(yield* this.#usageLimits.accountReset(provider, account, "host-reset")));
+    return released;
   }).bind(this);
 
   /**

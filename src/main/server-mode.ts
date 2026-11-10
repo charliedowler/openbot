@@ -8,7 +8,8 @@
  * (mode 0700). Only that user and root can connect. Agents run as the same user and already have
  * full access to its files, so the socket gives them nothing new. The socket answers a closed list
  * of requests: status, the email-code sign-in, the sign-in with an operator's one-time claim, the
- * server name, sign-out and a Mobile Connect code. It never sends the session token, the sign-in code
+ * server name, sign-out, a Mobile Connect code and the end of the usage limits that hold a provider's
+ * agents. It never sends the session token, the sign-in code
  * or the claim back. The Mobile Connect code signs one phone
  * in to the account of the server; the account service lets it work for one sign-in, for two minutes.
  *
@@ -22,10 +23,11 @@ import type { Socket } from "node:net";
 import { dirname, isAbsolute, join } from "node:path";
 import { parseHostedServerName } from "@openbot/contracts/hosted-servers";
 import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
-import type { CentralAuthState } from "@openbot/contracts/ipc";
+import { type CentralAuthState, isAgentProvider, isProviderAccountId } from "@openbot/contracts/ipc";
 import { sourceText } from "@openbot/i18n/source";
 import { Deferred, Effect } from "effect";
 import QRCode from "qrcode";
+import type { AgentService } from "../backend/agent-service";
 import { runCauseEffect } from "../backend/effect-boundary";
 import type { CentralAuthManager } from "./central-auth-manager";
 import type { HostService } from "./host-service";
@@ -76,6 +78,7 @@ export interface ServerModeOptions {
   /** The memory guard, so that `status` shows the memory ceiling and the turn limit. */
   memory: Pick<ServerMemory, "level" | "sample" | "turnLimit"> | null;
   nativeWork?: () => { idle: boolean; compactions: number; providerOperations: number; reasons: string[] };
+  usageLimits?: Pick<AgentService, "releaseUsageLimits">;
   onError: (message: string, error: unknown) => void;
   /** Tests only. */
   uid?: number;
@@ -217,6 +220,8 @@ export class ServerMode {
         return runCauseEffect(this.#rename(body.get("name") ?? ""));
       case "POST /v1/mobile-connect":
         return runCauseEffect(this.#mobileConnect());
+      case "POST /v1/usage/reset":
+        return this.#resetUsage(body.get("provider") ?? "", body.get("accountId"));
       case "POST /v1/logout":
         await runCauseEffect(
           this.#options.centralAuth.logout().pipe(Effect.mapError(({ cause }) => new RemoteWorkflowError({ cause }))),
@@ -253,6 +258,21 @@ export class ServerMode {
         server_name: host.serverName ?? this.#pendingName,
         server_message: this.#publishError ?? host.message,
         ...this.#memoryLines(),
+      },
+    };
+  }
+
+  async #resetUsage(provider: string, accountId: string | null): Promise<Answer> {
+    const usageLimits = this.#options.usageLimits;
+    if (!usageLimits) return failure(404, "not_found");
+    if (!isAgentProvider(provider)) return failure(400, "invalid_provider");
+    if (accountId !== null && !isProviderAccountId(accountId)) return failure(400, "invalid_account");
+    const released = await runCauseEffect(usageLimits.releaseUsageLimits(provider, accountId));
+    return {
+      status: 200,
+      lines: {
+        released: released.length,
+        limits: released.map((limit) => `${limit.provider}/${limit.accountId ?? "default"}/${limit.model}`).join(" "),
       },
     };
   }

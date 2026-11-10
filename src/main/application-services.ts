@@ -3712,6 +3712,7 @@ export async function createApplicationServices({
           const readiness = describeRestartReadiness();
           return { ...work, idle: readiness.safeToRestart, reasons: readiness.reasons };
         },
+        usageLimits: service,
         onError: (message, error) => logger.warn(message, toLogValue(error)),
       })
     : null;

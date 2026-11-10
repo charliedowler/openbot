@@ -31,6 +31,8 @@ const PROVIDER_FAILURE_HOLD_MS = 10 * 60_000;
 
 const PROVIDER_RETRY_DELAY_MS = 30_000;
 
+export const USAGE_LIMIT_PROBE_MS = 15 * 60_000;
+
 /** The longest delay `setTimeout` keeps. A longer wait is armed again when it fires. */
 const MAX_TIMER_MS = 2_147_483_647;
 
@@ -52,6 +54,8 @@ export interface UsageLimitHooks {
   held(agentIds: readonly string[]): Effect.Effect<void>;
   /** A limit ended, after its agents' drains were scheduled. Must not wait for the work it starts. */
   released(limit: UsageLimitKey): Effect.Effect<void>;
+  waiting?(agentId: string): boolean;
+  busy?(agentId: string): boolean;
 }
 
 export interface UsageLimitGateOptions {
@@ -60,6 +64,7 @@ export interface UsageLimitGateOptions {
   retryDelayMs?: number;
   /** The file that keeps the limits and provider-error holds across a restart. Omitted, they stay in memory. */
   statePath?: string | null;
+  probeIntervalMs?: number;
 }
 
 export interface UsageLimitKey {
@@ -84,6 +89,27 @@ interface UsageLimit extends UsageLimitKey {
    */
   resetFromUsage: boolean;
   timer: ReturnType<typeof setTimeout> | null;
+  probeTimer: ReturnType<typeof setTimeout> | null;
+  agentId: string | null;
+  lastProbeAgentId: string | null;
+}
+
+interface UsageLimitProbe {
+  agentId: string;
+  started: boolean;
+}
+
+type UsageLimitReleaseReason =
+  | "turn-completed"
+  | "probe-completed"
+  | "reset-passed"
+  | "usage-reading"
+  | "account-reset"
+  | "host-reset";
+
+interface UsageLimitRelease {
+  reason: UsageLimitReleaseReason;
+  agentId?: string;
 }
 
 /**
@@ -119,12 +145,15 @@ export class UsageLimitGate {
   readonly #retries = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #retryDelayMs: number;
   readonly #statePath: string | null;
+  readonly #probes = new Map<string, UsageLimitProbe>();
+  readonly #probeMs: number;
 
   constructor(options: UsageLimitGateOptions) {
     this.#store = options.store;
     this.#hooks = options.hooks;
     this.#retryDelayMs = options.retryDelayMs ?? PROVIDER_RETRY_DELAY_MS;
     this.#statePath = options.statePath ?? null;
+    this.#probeMs = options.probeIntervalMs ?? USAGE_LIMIT_PROBE_MS;
   }
 
   /**
@@ -158,10 +187,12 @@ export class UsageLimitGate {
       const key = limitKey(entry.provider, entry.accountId, entry.model);
       const previous = this.#limits.get(key);
       if (previous?.timer) clearTimeout(previous.timer);
-      const limit: UsageLimit = { ...entry, timer: null };
+      const limit: UsageLimit = { ...entry, timer: null, probeTimer: null, agentId: null, lastProbeAgentId: null };
       this.#limits.set(key, limit);
       this.#announced.add(entry.provider);
       this.#arm(key, limit);
+      this.#armProbe(key, limit);
+      logger.info("A usage limit holds a model.", { ...describeLimit(limit), cause: "restored" });
     }
     for (const entry of saved.failures) {
       if (entry.until <= now) {
@@ -223,7 +254,10 @@ export class UsageLimitGate {
 
   /** A turn of this agent starts, so a try that let it start ends. */
   tryStarted(agentId: string): void {
+    const key = this.#tries.get(agentId);
     this.#tries.delete(agentId);
+    const probe = key === undefined ? undefined : this.#probes.get(key);
+    if (probe?.agentId === agentId) probe.started = true;
   }
 
   /** Whether a limit holds this provider account and model. */
@@ -322,14 +356,21 @@ export class UsageLimitGate {
     const turnModel = model ?? agent.model;
     const accountId = accountOf(agent);
     const key = limitKey(provider, accountId, turnModel);
-    const limit = this.#limits.get(key) ?? {
+    const existing = this.#limits.get(key);
+    const limit = existing ?? {
       provider,
       accountId,
       model: turnModel,
       resetsAt: null,
       resetFromUsage: false,
       timer: null,
+      probeTimer: null,
+      agentId: null,
+      lastProbeAgentId: null,
     };
+    const probeRefused = this.#probes.get(key)?.agentId === agentId;
+    if (probeRefused) this.#probes.delete(key);
+    limit.agentId = agentId;
     // A reset already past would release the queue at once into the same refusal.
     const future = (value: number | null) => (value !== null && value * 1_000 > Date.now() ? value : null);
     const named = future(resetsAt);
@@ -337,8 +378,23 @@ export class UsageLimitGate {
     if (named !== null) limit.resetFromUsage = false;
     this.#limits.set(key, limit);
     this.#arm(key, limit);
+    const probeArmed = !existing || probeRefused;
+    if (probeArmed) this.#armProbe(key, limit);
     this.#save();
-    yield* this.#hooks.held(this.#heldAgents(limit).map((held) => held.id));
+    const heldAgents = this.#heldAgents(limit);
+    logger.info(
+      probeRefused
+        ? "A usage limit probe was refused. The limit holds the model again."
+        : "A usage limit holds a model.",
+      {
+        ...describeLimit(limit),
+        agentId,
+        cause: probeRefused ? "probe-refused" : "refused",
+        heldAgents: heldAgents.length,
+        ...(probeArmed ? { nextProbeInSeconds: Math.round(this.#probeMs / 1_000) } : {}),
+      },
+    );
+    yield* this.#hooks.held(heldAgents.map((held) => held.id));
     this.#hooks.emitRuntimeSnapshot();
     if (limit.resetsAt !== null) {
       this.#announce(agentId, limit);
@@ -365,7 +421,11 @@ export class UsageLimitGate {
     if (!agent) return;
     const provider = providerForAgent(agent);
     const key = limitKey(provider, accountOf(agent), model ?? agent.model);
-    if (this.#limits.has(key)) yield* this.#release(key);
+    if (this.#limits.has(key))
+      yield* this.#release(key, false, {
+        reason: this.#probes.get(key)?.agentId === agentId ? "probe-completed" : "turn-completed",
+        agentId,
+      });
     if (this.#failures.has(key)) yield* this.#releaseFailure(key);
     if (![...this.#limits.values()].some((limit) => limit.provider === provider)) this.#announced.delete(provider);
   }).bind(this);
@@ -378,14 +438,24 @@ export class UsageLimitGate {
     this: UsageLimitGate,
     provider: AgentProvider,
     accountId: string | null,
+    reason: "account-reset" | "host-reset" = "account-reset",
   ) {
-    for (const [key, limit] of [...this.#limits])
-      if (limit.provider === provider && limit.accountId === accountId) yield* this.#release(key, true);
+    const released: UsageLimitKey[] = [];
+    for (const [key, limit] of [...this.#limits]) {
+      if (limit.provider !== provider || limit.accountId !== accountId) continue;
+      released.push({ provider: limit.provider, accountId: limit.accountId, model: limit.model });
+      yield* this.#release(key, true, { reason });
+    }
+    return released;
   }).bind(this);
 
   readonly dispose = Effect.fn("UsageLimitGate.dispose")(function* (this: UsageLimitGate) {
-    for (const limit of this.#limits.values()) if (limit.timer) clearTimeout(limit.timer);
+    for (const limit of this.#limits.values()) {
+      if (limit.timer) clearTimeout(limit.timer);
+      if (limit.probeTimer) clearTimeout(limit.probeTimer);
+    }
     this.#limits.clear();
+    this.#probes.clear();
     for (const failure of this.#failures.values()) clearTimeout(failure.timer);
     this.#failures.clear();
     for (const timer of this.#retries.values()) clearTimeout(timer);
@@ -423,11 +493,41 @@ export class UsageLimitGate {
     );
   }
 
+  #armProbe(key: string, limit: UsageLimit): void {
+    if (limit.probeTimer) clearTimeout(limit.probeTimer);
+    limit.probeTimer = setTimeout(() => this.#probe(key, limit), Math.max(0, Math.min(this.#probeMs, MAX_TIMER_MS)));
+  }
+
+  #probe(key: string, limit: UsageLimit): void {
+    if (this.#limits.get(key) !== limit) return;
+    this.#armProbe(key, limit);
+    const current = this.#probes.get(key);
+    if (current) {
+      if (current.started && (this.#hooks.busy?.(current.agentId) ?? false)) return;
+      this.#probes.delete(key);
+      if (this.#tries.get(current.agentId) === key) this.#tries.delete(current.agentId);
+    }
+    const waiting = this.#heldAgents(limit).filter((agent) => this.#hooks.waiting?.(agent.id) ?? false);
+    if (waiting.length === 0) return;
+    const after = waiting.findIndex((agent) => agent.id === limit.lastProbeAgentId);
+    const agent = waiting[(after + 1) % waiting.length];
+    if (!agent) return;
+    limit.lastProbeAgentId = agent.id;
+    this.#probes.set(key, { agentId: agent.id, started: false });
+    this.#tries.set(agent.id, key);
+    logger.info("A usage limit lets one waiting turn try.", {
+      ...describeLimit(limit),
+      agentId: agent.id,
+      waitingAgents: waiting.length,
+    });
+    this.#hooks.scheduleDrain(agent.id);
+  }
+
   readonly #fire = Effect.fn("UsageLimitGate.fire")(function* (this: UsageLimitGate, key: string, limit: UsageLimit) {
     if (this.#limits.get(key) !== limit) return;
     limit.timer = null;
     if (limit.resetsAt !== null && limit.resetsAt * 1_000 + RESET_GRACE_MS <= Date.now()) {
-      yield* this.#release(key, true);
+      yield* this.#release(key, true, { reason: "reset-passed" });
       return;
     }
     if (limit.resetsAt !== null && !limit.resetFromUsage) {
@@ -439,7 +539,7 @@ export class UsageLimitGate {
     const known = limit.resetsAt !== null;
     const resetsAt = yield* this.#readReset(key, limit);
     if (this.#limits.get(key) !== limit || typeof resetsAt === "number") return;
-    if (resetsAt === null || !known) yield* this.#release(key);
+    if (resetsAt === null || !known) yield* this.#release(key, false, { reason: "usage-reading" });
     else this.#arm(key, limit);
   });
 
@@ -476,12 +576,26 @@ export class UsageLimitGate {
    * again. A probe of a limit with no known reset keeps the announcement: the next refused turn may
    * only close the same limit again.
    */
-  readonly #release = Effect.fn("UsageLimitGate.release")(function* (this: UsageLimitGate, key: string, reset = false) {
+  readonly #release = Effect.fn("UsageLimitGate.release")(function* (
+    this: UsageLimitGate,
+    key: string,
+    reset: boolean,
+    cause: UsageLimitRelease,
+  ) {
     const limit = this.#limits.get(key);
     if (!limit) return;
     if (limit.timer) clearTimeout(limit.timer);
+    if (limit.probeTimer) clearTimeout(limit.probeTimer);
     this.#limits.delete(key);
+    this.#probes.delete(key);
     this.#save();
+    logger.info("A usage limit ended.", {
+      ...describeLimit(limit),
+      reason: cause.reason,
+      ...(cause.agentId ? { agentId: cause.agentId } : {}),
+      heldBy: limit.agentId,
+      heldAgents: this.#heldAgents(limit).length,
+    });
     for (const [agentId, tryKey] of this.#tries) if (tryKey === key) this.#tries.delete(agentId);
     if (reset && ![...this.#limits.values()].some((other) => other.provider === limit.provider))
       this.#announced.delete(limit.provider);
@@ -551,6 +665,16 @@ export class UsageLimitGate {
           agent.model === limit.model,
       );
   }
+}
+
+function describeLimit(limit: UsageLimit) {
+  return {
+    provider: limit.provider,
+    accountId: limit.accountId,
+    model: limit.model,
+    resetsAt: limit.resetsAt,
+    resetsAtIso: limit.resetsAt === null ? null : new Date(limit.resetsAt * 1_000).toISOString(),
+  };
 }
 
 function limitKey(provider: AgentProvider, accountId: string | null, model: string): string {
