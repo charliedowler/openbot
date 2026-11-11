@@ -282,6 +282,18 @@ export class MailboxStore {
     revision: number;
     byMessage: Map<string, string | undefined>;
   } | null = null;
+  #recipientIndex: {
+    deliveries: StoredDelivery[];
+    deliveryCount: number;
+    messages: StoredMessage[];
+    messageCount: number;
+    byRecipient: Map<string, StoredDelivery[]>;
+    senders: Map<string, string[]>;
+  } | null = null;
+  #messagePositions: { source: StoredMessage[]; length: number; byId: Map<string, number> } | null = null;
+  #syncVersion = 0;
+  #wholeSyncVersion = 0;
+  readonly #agentSyncVersions = new Map<string, number>();
   /** Counts the changes made in place to `#state.idempotency`, which keep the same object. */
   #idempotencyRevision = 0;
   /** The rows changed, added or removed, since the last committed write. `#persist` writes only these. */
@@ -1441,9 +1453,8 @@ export class MailboxStore {
     const deliveriesByMessage = this.#deliveriesByMessage();
     const selectedStoredMessages: StoredMessage[] = [];
     let completedCount = 0;
-    for (let index = this.#state.messages.length - 1; index >= 0; index -= 1) {
-      const message = this.#state.messages[index];
-      if (!message || message.channelId || message.messaging) continue;
+    const consider = (message: StoredMessage | undefined) => {
+      if (!message || message.channelId || message.messaging) return;
       const ownMessage = message.sender.kind === "agent" && message.sender.agentId === agentId;
       // A task message runs in a side thread of its recipient. A teammate's answer to that thread
       // still shows in the teammate's own chat; the brief of a thread the agent started does not.
@@ -1451,10 +1462,10 @@ export class MailboxStore {
         message.taskId &&
         (!ownMessage || !deliveriesByMessage.get(message.id)?.some((delivery) => delivery.recipientAgentId !== agentId))
       )
-        continue;
+        return;
       // A request the agent sent from a Slack thread or a side thread belongs to that thread, not to
       // its own chat. The teammate it went to still sees it.
-      if ((message.messagingReturn || message.senderTaskId) && ownMessage) continue;
+      if ((message.messagingReturn || message.senderTaskId) && ownMessage) return;
       const deliveries = deliveriesByMessage.get(message.id) ?? [];
       let relevant = ownMessage;
       let active = false;
@@ -1463,18 +1474,40 @@ export class MailboxStore {
         relevant = true;
         if (isActiveDelivery(delivery)) active = true;
       }
-      if (!relevant) continue;
+      if (!relevant) return;
       const conversationTime = ownMessage
         ? message.createdAt
         : (deliveries.find((delivery) => delivery.recipientAgentId === agentId)?.steeredAt ?? message.createdAt);
-      if (!active && options.fromCreatedAt && conversationTime < options.fromCreatedAt) continue;
-      if (!active && completedCount >= limit) continue;
+      if (!active && options.fromCreatedAt && conversationTime < options.fromCreatedAt) return;
+      if (!active && completedCount >= limit) return;
       selectedStoredMessages.push(message);
       if (!active) completedCount += 1;
+    };
+    let rest = -1;
+    for (let index = this.#state.messages.length - 1; index >= 0; index -= 1) {
+      if (completedCount >= limit) {
+        rest = index;
+        break;
+      }
+      consider(this.#state.messages[index]);
+    }
+    if (rest >= 0) {
+      const positionsById = this.#messagePositionsById();
+      const older = new Set<number>();
+      for (const delivery of this.#state.deliveries) {
+        if (!isActiveDelivery(delivery)) continue;
+        const position = positionsById.get(delivery.messageId);
+        if (position !== undefined && position <= rest) older.add(position);
+      }
+      for (const position of [...older].sort((a, b) => b - a)) consider(this.#state.messages[position]);
     }
     selectedStoredMessages.reverse();
     const messages: ConversationMessage[] = [];
-    const positions = this.#queuedPositions();
+    let queuedPositions: Map<string, number> | undefined;
+    const positions = () => {
+      queuedPositions ??= this.#queuedPositions();
+      return queuedPositions;
+    };
     const turnIds = this.#sourceTurnIds();
     for (const message of selectedStoredMessages) {
       const deliveries = deliveriesByMessage.get(message.id) ?? [];
@@ -1495,7 +1528,7 @@ export class MailboxStore {
             replyToMessageId: message.replyToMessageId,
             ...(message.expectsReply === false ? { expectsReply: false } : {}),
             deliveries: deliveries.map((item) => {
-              const delivery = this.#publicDelivery(item, positions, message);
+              const delivery = this.#publicDelivery(item, item.status === "queued" ? positions() : undefined, message);
               return {
                 id: delivery.id,
                 recipientAgentId: delivery.recipientAgentId,
@@ -1513,7 +1546,11 @@ export class MailboxStore {
 
       for (const storedDelivery of deliveries) {
         if (storedDelivery.recipientAgentId !== agentId) continue;
-        const delivery = this.#publicDelivery(storedDelivery, positions, message);
+        const delivery = this.#publicDelivery(
+          storedDelivery,
+          storedDelivery.status === "queued" ? positions() : undefined,
+          message,
+        );
         messages.push({
           id: delivery.id,
           // A plan continuation keeps the request in its first turn, like `syncDeliveryMessage`.
@@ -1543,7 +1580,11 @@ export class MailboxStore {
                   replyToMessageId: message.replyToMessageId,
                   ...(message.expectsReply === false ? { expectsReply: false } : {}),
                   deliveries: deliveries.map((item) => {
-                    const publicItem = this.#publicDelivery(item, positions, message);
+                    const publicItem = this.#publicDelivery(
+                      item,
+                      item.status === "queued" ? positions() : undefined,
+                      message,
+                    );
                     return {
                       id: publicItem.id,
                       recipientAgentId: publicItem.recipientAgentId,
@@ -1664,14 +1705,114 @@ export class MailboxStore {
   }
 
   senderAgentIdsForRecipient(agentId: string): string[] {
-    const result = new Set<string>();
-    const messages = this.#messagesById();
-    for (const delivery of this.#state.deliveries) {
-      if (delivery.recipientAgentId !== agentId) continue;
-      const sender = this.#requireMessage(delivery.messageId, messages).sender;
-      if (sender.kind === "agent") result.add(sender.agentId);
+    return [...(this.#recipients().senders.get(agentId) ?? [])];
+  }
+
+  syncVersion(): number {
+    this.#noteSyncChanges();
+    return this.#syncVersion;
+  }
+
+  changedForAgentSince(agentId: string, version: number): boolean {
+    this.#noteSyncChanges();
+    return this.#wholeSyncVersion > version || (this.#agentSyncVersions.get(agentId) ?? 0) > version;
+  }
+
+  #recipients(): { byRecipient: Map<string, StoredDelivery[]>; senders: Map<string, string[]> } {
+    const deliveries = this.#state.deliveries;
+    const messages = this.#state.messages;
+    const index = this.#recipientIndex;
+    if (
+      index?.deliveries === deliveries &&
+      index.deliveryCount === deliveries.length &&
+      index.messages === messages &&
+      index.messageCount === messages.length
+    )
+      return index;
+    const byId = this.#messagesById();
+    const byRecipient = new Map<string, StoredDelivery[]>();
+    const senderSets = new Map<string, Set<string>>();
+    for (const delivery of deliveries) {
+      const list = byRecipient.get(delivery.recipientAgentId);
+      if (list) list.push(delivery);
+      else byRecipient.set(delivery.recipientAgentId, [delivery]);
+      const sender = this.#requireMessage(delivery.messageId, byId).sender;
+      if (sender.kind !== "agent") continue;
+      const senders = senderSets.get(delivery.recipientAgentId);
+      if (senders) senders.add(sender.agentId);
+      else senderSets.set(delivery.recipientAgentId, new Set([sender.agentId]));
     }
-    return [...result];
+    const senders = new Map<string, string[]>();
+    for (const [recipient, set] of senderSets) senders.set(recipient, [...set]);
+    const next = {
+      deliveries,
+      deliveryCount: deliveries.length,
+      messages,
+      messageCount: messages.length,
+      byRecipient,
+      senders,
+    };
+    this.#recipientIndex = next;
+    return next;
+  }
+
+  #noteSyncChanges(): void {
+    const { deliveryIds, messageIds, reactionKeys } = this.#changes;
+    if (deliveryIds.size === 0 && messageIds.size === 0 && reactionKeys.size === 0) return;
+    const version = ++this.#syncVersion;
+    const byMessage = this.#deliveriesByMessage();
+    const messages = this.#messagesById();
+    const deliveries =
+      deliveryIds.size > 16
+        ? new Map(this.#state.deliveries.map((delivery) => [delivery.id, delivery] as const))
+        : null;
+    const agents = new Set<string>();
+    const recipients = new Set<string>();
+    let whole = false;
+    const noteMessage = (messageId: string, queueChanged = true) => {
+      const message = messages.get(messageId);
+      if (!message) {
+        whole = true;
+        return;
+      }
+      if (message.sender.kind === "agent") agents.add(message.sender.agentId);
+      for (const delivery of byMessage.get(messageId) ?? []) {
+        agents.add(delivery.recipientAgentId);
+        if (queueChanged) recipients.add(delivery.recipientAgentId);
+      }
+    };
+    for (const id of deliveryIds) {
+      const delivery = deliveries
+        ? deliveries.get(id)
+        : this.#state.deliveries.find((candidate) => candidate.id === id);
+      if (delivery) noteMessage(delivery.messageId);
+      else whole = true;
+    }
+    for (const id of messageIds) noteMessage(id);
+    for (const key of reactionKeys) {
+      const parsed = JSON.parse(key);
+      const agentId = Array.isArray(parsed) ? parsed[0] : undefined;
+      if (typeof agentId === "string") agents.add(agentId);
+      else whole = true;
+    }
+    if (whole) {
+      this.#wholeSyncVersion = version;
+      return;
+    }
+    const byRecipient = recipients.size ? this.#recipients().byRecipient : null;
+    for (const recipient of recipients)
+      for (const delivery of byRecipient?.get(recipient) ?? [])
+        if (delivery.status === "queued") noteMessage(delivery.messageId, false);
+    for (const agentId of agents) this.#agentSyncVersions.set(agentId, version);
+  }
+
+  #messagePositionsById(): ReadonlyMap<string, number> {
+    const source = this.#state.messages;
+    const index = this.#messagePositions;
+    if (index?.source === source && index.length === source.length) return index.byId;
+    const byId = new Map(source.map((message, position) => [message.id, position] as const));
+    this.#messagePositions = { source, length: source.length, byId };
+    return byId;
   }
 
   /**
@@ -2258,6 +2399,7 @@ export class MailboxStore {
     const persisted = toCurrentMailboxState(this.#database.readMailboxState());
     if (!persisted || !isStoredState(persisted)) throw new Error("Stored mailbox projection is invalid.");
     this.#state = normalizeStoredState(persisted);
+    this.#wholeSyncVersion = ++this.#syncVersion;
     // Inside a transaction this read sees rows that a later ROLLBACK can still undo, so the keys stay.
     if (!this.#database.connection.isTransaction) this.#clearChanges();
   }
@@ -3005,6 +3147,7 @@ export class MailboxStore {
       this.#changes,
       "attachment.generated-batch",
     );
+    this.#noteSyncChanges();
     this.#state = nextState;
     this.#clearChanges();
     for (const id of attachmentIds) this.#stagedGeneratedAttachments.delete(id);
@@ -3035,6 +3178,7 @@ export class MailboxStore {
       for (const attachment of staged) this.#changes.generatedAttachmentIds.delete(attachment.id);
       throw error;
     }
+    this.#noteSyncChanges();
     this.#state = nextState;
     this.#clearChanges();
     for (const id of attachmentIds) this.#stagedGeneratedAttachments.delete(id);
@@ -3339,6 +3483,8 @@ export class MailboxStore {
     fileDeletions: string[] = [],
     replaceAll = false,
   ): void {
+    if (replaceAll) this.#wholeSyncVersion = ++this.#syncVersion;
+    else this.#noteSyncChanges();
     const ownsTransaction = !this.#database.connection.isTransaction;
     const wrote = replaceAll
       ? this.#database.replaceMailboxState(commandId, this.#state, eventType, fileDeletions, true)

@@ -59,6 +59,13 @@ export class MailboxSync {
   readonly #routines: Pick<RoutineScheduler, "reconcileDelivery" | "stateChanged">;
   readonly #scope: () => Scope.Scope;
   readonly #hooks: MailboxSyncHooks;
+  readonly #synced = new WeakMap<
+    ConversationSnapshot,
+    { version: number; messages: ConversationMessage[]; first: string | undefined }
+  >();
+  readonly #syncedThisTick = new Set<string>();
+  readonly #trailing = new Set<string>();
+  #tickScheduled = false;
 
   constructor(options: MailboxSyncOptions) {
     this.#database = options.database;
@@ -198,12 +205,48 @@ export class MailboxSync {
     if (routinesChanged) this.#routines.stateChanged(agentId);
     const affectedAgents = new Set([agentId, ...this.#mailbox.senderAgentIdsForRecipient(agentId)]);
     for (const affectedAgentId of affectedAgents) {
-      const snapshot = this.#conversation.snapshotToUpdate(affectedAgentId);
-      if (!snapshot) continue;
-      if (this.syncMailboxMessages(snapshot)) this.#conversation.emitConversation(snapshot);
-      else if (!this.#conversation.hasPublishedConversation(affectedAgentId))
-        this.#conversation.publishConversation(snapshot);
+      if (affectedAgentId !== agentId && this.#syncedThisTick.has(affectedAgentId)) {
+        this.#trailing.add(affectedAgentId);
+        continue;
+      }
+      this.#syncedThisTick.add(affectedAgentId);
+      this.#syncAgent(affectedAgentId);
     }
+    if (this.#tickScheduled) return;
+    this.#tickScheduled = true;
+    queueMicrotask(() => this.#endTick());
+  }
+
+  #endTick(): void {
+    this.#tickScheduled = false;
+    this.#syncedThisTick.clear();
+    const trailing = [...this.#trailing];
+    this.#trailing.clear();
+    for (const agentId of trailing) {
+      try {
+        this.#syncAgent(agentId);
+      } catch (error) {
+        this.#hooks.emitError("mailbox_sync_failed", error, agentId);
+      }
+    }
+  }
+
+  #syncAgent(agentId: string): void {
+    const snapshot = this.#conversation.snapshotToUpdate(agentId);
+    if (!snapshot) return;
+    const record = this.#synced.get(snapshot);
+    if (
+      record &&
+      record.messages === snapshot.messages &&
+      record.first === snapshot.messages[0]?.createdAt &&
+      this.#conversation.hasPublishedConversation(agentId) &&
+      !this.#mailbox.changedForAgentSince(agentId, record.version)
+    )
+      return;
+    const version = this.#mailbox.syncVersion();
+    if (this.syncMailboxMessages(snapshot)) this.#conversation.emitConversation(snapshot);
+    else if (!this.#conversation.hasPublishedConversation(agentId)) this.#conversation.publishConversation(snapshot);
+    this.#synced.set(snapshot, { version, messages: snapshot.messages, first: snapshot.messages[0]?.createdAt });
   }
 
   retryDeliveryReconciliation(agentId: string, turnId?: string, deliveryIds: readonly string[] = []): void {
