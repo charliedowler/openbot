@@ -11,6 +11,7 @@ import { Effect, type Scope } from "effect";
 import { isMailboxMessageCopy } from "../conversation-snapshots";
 import type { MailboxStore } from "../mailbox-store";
 import type { OpenBotDatabase } from "../openbot-database";
+import { noteCallTime } from "../slow-calls";
 import type { ConversationRuntime } from "./conversation-runtime";
 import { conversationContentSignature } from "./delivery-content";
 import type { RoutineScheduler } from "./routine-scheduler";
@@ -195,6 +196,7 @@ export class MailboxSync {
   }
 
   emitQueue(agentId: string): void {
+    const startedAt = performance.now();
     const queue = this.queueSnapshot(agentId);
     let routinesChanged = false;
     // A run in a routine's side thread is not in the queue of the chat, but its run still follows it.
@@ -204,17 +206,33 @@ export class MailboxSync {
     this.#hooks.emit({ type: "queue-changed", snapshot: queue });
     if (routinesChanged) this.#routines.stateChanged(agentId);
     const affectedAgents = new Set([agentId, ...this.#mailbox.senderAgentIdsForRecipient(agentId)]);
+    let synced = 0;
+    let deferred = 0;
+    let snapshotMessages = 0;
     for (const affectedAgentId of affectedAgents) {
       if (affectedAgentId !== agentId && this.#syncedThisTick.has(affectedAgentId)) {
         this.#trailing.add(affectedAgentId);
+        deferred += 1;
         continue;
       }
       this.#syncedThisTick.add(affectedAgentId);
-      this.#syncAgent(affectedAgentId);
+      const messages = this.#syncAgent(affectedAgentId);
+      if (messages !== null) {
+        synced += 1;
+        snapshotMessages += messages;
+      }
     }
-    if (this.#tickScheduled) return;
-    this.#tickScheduled = true;
-    queueMicrotask(() => this.#endTick());
+    if (!this.#tickScheduled) {
+      this.#tickScheduled = true;
+      queueMicrotask(() => this.#endTick());
+    }
+    noteCallTime("MailboxSync.emitQueue", startedAt, () => ({
+      queuedDeliveries: queue.deliveries.length,
+      agents: affectedAgents.size,
+      synced,
+      deferred,
+      snapshotMessages,
+    }));
   }
 
   #endTick(): void {
@@ -231,9 +249,9 @@ export class MailboxSync {
     }
   }
 
-  #syncAgent(agentId: string): void {
+  #syncAgent(agentId: string): number | null {
     const snapshot = this.#conversation.snapshotToUpdate(agentId);
-    if (!snapshot) return;
+    if (!snapshot) return null;
     const record = this.#synced.get(snapshot);
     if (
       record &&
@@ -242,11 +260,12 @@ export class MailboxSync {
       this.#conversation.hasPublishedConversation(agentId) &&
       !this.#mailbox.changedForAgentSince(agentId, record.version)
     )
-      return;
+      return null;
     const version = this.#mailbox.syncVersion();
     if (this.syncMailboxMessages(snapshot)) this.#conversation.emitConversation(snapshot);
     else if (!this.#conversation.hasPublishedConversation(agentId)) this.#conversation.publishConversation(snapshot);
     this.#synced.set(snapshot, { version, messages: snapshot.messages, first: snapshot.messages[0]?.createdAt });
+    return snapshot.messages.length;
   }
 
   retryDeliveryReconciliation(agentId: string, turnId?: string, deliveryIds: readonly string[] = []): void {

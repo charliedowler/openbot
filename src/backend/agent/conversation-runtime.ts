@@ -14,6 +14,7 @@ import type { AgentClient } from "../agent-client";
 import type { AgentStore } from "../agent-store";
 import { MAILBOX_CONVERSATION_MESSAGE_LIMIT } from "../mailbox-store";
 import type { OpenBotDatabase } from "../openbot-database";
+import { noteCallTime } from "../slow-calls";
 import { conversationContentSignature } from "./delivery-content";
 
 interface TransactionScope {
@@ -652,6 +653,20 @@ export class ConversationRuntime {
     detail: unknown,
     replacedMessageId?: string,
   ): void {
+    const startedAt = performance.now();
+    try {
+      this.#emitConversationNow(snapshot, eventType, detail, replacedMessageId);
+    } finally {
+      noteCallTime("ConversationRuntime.emitConversation", startedAt, () => snapshotCounts(snapshot));
+    }
+  }
+
+  #emitConversationNow(
+    snapshot: ConversationSnapshot,
+    eventType: string,
+    detail: unknown,
+    replacedMessageId?: string,
+  ): void {
     if (snapshot.threadId && this.#forgottenExecutionThreads.has(snapshot.threadId)) return;
     this.#dropDeletedMessages(snapshot);
     sortConversationMessages(snapshot.messages);
@@ -764,10 +779,12 @@ export class ConversationRuntime {
 
   publishConversation(snapshot: ConversationSnapshot, signature?: string): void {
     if (snapshot.threadId && this.#forgottenExecutionThreads.has(snapshot.threadId)) return;
+    const startedAt = performance.now();
     if (this.#dropDeletedMessages(snapshot) || signature === undefined)
       signature = conversationContentSignature(snapshot);
     this.#conversationSignatures.set(snapshot.threadId ?? snapshot.agentId, signature);
     this.#emit({ type: "conversation", snapshot: structuredClone(snapshot) });
+    noteCallTime("ConversationRuntime.publishConversation", startedAt, () => snapshotCounts(snapshot));
   }
 
   rememberConversationSignature(snapshot: ConversationSnapshot): void {
@@ -1204,6 +1221,14 @@ function copySnapshotContents(target: ConversationSnapshot, source: Conversation
 
 function conversationSnapshotBytes(snapshot: ConversationSnapshot): number {
   return Buffer.byteLength(JSON.stringify(snapshot), "utf8");
+}
+
+function snapshotCounts(snapshot: ConversationSnapshot) {
+  return {
+    messages: snapshot.messages.length,
+    activeTurn: snapshot.activeTurnId !== null,
+    bytes: conversationSnapshotBytes(snapshot),
+  };
 }
 
 /**

@@ -29,6 +29,7 @@ import {
   requiredStringColumn,
 } from "./database/database-rows";
 import type { OpenBotDatabase } from "./openbot-database";
+import { noteCallTime } from "./slow-calls";
 import { revokeRoutineWebhooks } from "./webhook-route-store";
 
 /**
@@ -173,6 +174,7 @@ export class ChannelStore {
     // it arrives. One query returns every summary: the previous per-channel latest-message, unread,
     // and task queries made this O(channels x queries) per stream frame. A member's thinking is not
     // unread, as in an agent chat: it folds into the steps of the member's answer.
+    const startedAt = performance.now();
     const excludedId = signedOutMessagesAreTheirs ? SIGNED_OUT_CHANNEL_MEMBER_ID : memberId;
     const rows = databaseRows(
       this.database.connection
@@ -222,7 +224,7 @@ export class ChannelStore {
       };
       threads.set(channelId, [...(threads.get(channelId) ?? []), thread]);
     }
-    return rows.map((row) => {
+    const summaries = rows.map((row) => {
       const channel = decodeChannel(JSON.parse(requiredStringColumn(row, "channel_json")));
       const latestJson = row.latest_json;
       const latest =
@@ -254,6 +256,19 @@ export class ChannelStore {
         ),
       };
     });
+    noteCallTime("ChannelStore.list", startedAt, () => ({
+      channels: rows.length,
+      threads: [...threads.values()].reduce((total, list) => total + list.length, 0),
+      unreadMessages: summaries.reduce((total, summary) => total + summary.unreadCount, 0),
+      bytes: rows.reduce(
+        (total, row) =>
+          total +
+          (typeof row.channel_json === "string" ? row.channel_json.length : 0) +
+          (typeof row.latest_json === "string" ? row.latest_json.length : 0),
+        0,
+      ),
+    }));
+    return summaries;
   }
 
   create(channelId: string, draft: ChannelDraft): Channel {

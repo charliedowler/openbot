@@ -55,6 +55,7 @@ import { MailboxDeliveryGate } from "./mailbox-delivery-gate";
 import { OpenBotDatabase } from "./openbot-database";
 import { isRecord } from "./protocol";
 import { recordRestartActivity } from "./restart-activity";
+import { noteCallTime } from "./slow-calls";
 
 const MAX_ATTACHMENTS = INPUT_LIMITS.attachments;
 /** How much of a delivery's error the note for a failed request quotes. */
@@ -1446,6 +1447,7 @@ export class MailboxStore {
     agentId: string,
     options: { fromCreatedAt?: string; limit?: number } = {},
   ): ConversationMessage[] {
+    const startedAt = performance.now();
     const limit = Math.max(
       1,
       Math.min(options.limit ?? MAILBOX_CONVERSATION_MESSAGE_LIMIT, MAILBOX_CONVERSATION_MESSAGE_LIMIT),
@@ -1453,7 +1455,9 @@ export class MailboxStore {
     const deliveriesByMessage = this.#deliveriesByMessage();
     const selectedStoredMessages: StoredMessage[] = [];
     let completedCount = 0;
+    let scanned = 0;
     const consider = (message: StoredMessage | undefined) => {
+      scanned += 1;
       if (!message || message.channelId || message.messaging) return;
       const ownMessage = message.sender.kind === "agent" && message.sender.agentId === agentId;
       // A task message runs in a side thread of its recipient. A teammate's answer to that thread
@@ -1615,6 +1619,14 @@ export class MailboxStore {
         });
       }
     }
+    noteCallTime("MailboxStore.conversationMessages", startedAt, () => ({
+      mailboxMessages: this.#state.messages.length,
+      deliveries: this.#state.deliveries.length,
+      messagesRead: scanned,
+      selected: selectedStoredMessages.length,
+      returned: messages.length,
+      queuedPositions: queuedPositions !== undefined,
+    }));
     return messages;
   }
 

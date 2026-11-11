@@ -15,6 +15,7 @@ import { channelWorkOwners } from "./channel-management";
 import type { ChannelMemoryStore } from "./channel-memory-store";
 import { CHANNEL_REPLY_ID_PREFIX, CHANNEL_REPLY_LIMIT, channelReplySender, isReplyTask } from "./channel-replies";
 import type { ChannelStore } from "./channel-store";
+import { noteCallTime } from "./slow-calls";
 
 /**
  * Runs `prompt` on the lead's model. When that model is not available, on the model of the first
@@ -512,9 +513,12 @@ export class ChannelHistory {
    * after a turn: that summary starts below this limit, and a turn under it has no need of it.
    */
   needsSummary(channelId: string, requestedBudget = CONTEXT_CHARACTERS): boolean {
+    const startedAt = performance.now();
     const limit = Math.floor(Math.min(CONTEXT_CHARACTERS, requestedBudget) * TRANSCRIPT_SHARE);
     const recent = recentMessages(this.store, channelId, this.store.summary(channelId).throughSequence);
-    return render(recent).length > limit && recent.length > 1;
+    const characters = render(recent).length;
+    noteCallTime("ChannelHistory.needsSummary", startedAt, () => ({ messagesRead: recent.length, characters }));
+    return characters > limit && recent.length > 1;
   }
 
   /**
@@ -544,6 +548,7 @@ export class ChannelHistory {
       ChannelOperationError,
       ChannelHistoryDependencies
     > {
+      const startedAt = performance.now();
       const dependencies = yield* ChannelHistoryDependencies;
       const characterBudget = Math.min(CONTEXT_CHARACTERS, requestedBudget);
       const channel = yield* channelSync(() => dependencies.store.get(task.channelId));
@@ -895,6 +900,15 @@ export class ChannelHistory {
         deltaCharacters: delta?.length ?? null,
         deltaParts: update?.parts ?? null,
       });
+      noteCallTime("ChannelHistory.prepare", startedAt, () => ({
+        recentMessages: recent.length,
+        messagesReadById: known.size,
+        recentCharacters: render(recent).length,
+        packetCharacters: text.length,
+        deltaCharacters: delta?.length ?? null,
+        summaryPasses,
+        tasks: tasks.length,
+      }));
       // The delta has less history than the complete packet, so it fits when that one fits.
       if (text.length > characterBudget)
         return yield* channelFailure(new Error(sourceText("error.backend.channelContextTooLong")));
