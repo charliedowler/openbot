@@ -255,6 +255,14 @@ export interface CommittedChannelAttachments {
 
 /** The most completed messages that one `conversationMessages` read returns. */
 export const MAILBOX_CONVERSATION_MESSAGE_LIMIT = 100;
+export const QUEUE_WINDOW_COMPLETED_LIMIT = 100;
+export const QUEUE_WINDOW_ENDED_LIMIT = 100;
+
+export interface QueueDeliveryState {
+  id: string;
+  status: QueueDelivery["status"];
+  error: QueueDelivery["error"];
+}
 
 export class MailboxStore {
   readonly #statePath: string;
@@ -823,6 +831,61 @@ export class MailboxStore {
           this.#publicDelivery(delivery, positions, this.#requireMessage(delivery.messageId, messages)),
         ),
     };
+  }
+
+  listQueueWindow(agentId: string, settledIds: ReadonlySet<string> = new Set()): QueueSnapshot {
+    const executionMessageIds = this.#executionMessageIds();
+    const active: StoredDelivery[] = [];
+    const settled: StoredDelivery[] = [];
+    const completed: StoredDelivery[] = [];
+    const ended: StoredDelivery[] = [];
+    for (const delivery of this.#state.deliveries) {
+      if (delivery.recipientAgentId !== agentId || executionMessageIds.has(delivery.messageId)) continue;
+      if (isActiveDelivery(delivery)) active.push(delivery);
+      else if (settledIds.has(delivery.id)) settled.push(delivery);
+      else if (delivery.status === "completed") completed.push(delivery);
+      else ended.push(delivery);
+    }
+    const kept = [
+      ...active,
+      ...settled,
+      ...newestDeliveries(completed, QUEUE_WINDOW_COMPLETED_LIMIT),
+      ...newestDeliveries(ended, QUEUE_WINDOW_ENDED_LIMIT),
+    ].sort(compareQueueOrder);
+    const positions = active.some((delivery) => delivery.status === "queued")
+      ? this.#queuedPositions()
+      : new Map<string, number>();
+    const messages = this.#messagesById();
+    return {
+      agentId,
+      deliveries: kept.map((delivery) =>
+        this.#publicDelivery(delivery, positions, this.#requireMessage(delivery.messageId, messages)),
+      ),
+    };
+  }
+
+  routineQueueDeliveries(agentId: string, keep: (delivery: QueueDeliveryState) => boolean): QueueDelivery[] {
+    const messages = this.#messagesById();
+    const chat: StoredDelivery[] = [];
+    const tasks: StoredDelivery[] = [];
+    for (const delivery of this.#state.deliveries) {
+      if (delivery.recipientAgentId !== agentId) continue;
+      const message = messages.get(delivery.messageId);
+      if (message?.sender.kind !== "routine") continue;
+      const inChat = !message.channelId && !message.messaging && !message.taskId;
+      if (!inChat && !message.taskId) continue;
+      const status = waitsForPlanContinuation(delivery) ? "running" : delivery.status;
+      if (!keep({ id: delivery.id, status, error: delivery.error })) continue;
+      (inChat ? chat : tasks).push(delivery);
+    }
+    const kept = [...chat.sort(compareQueueOrder), ...tasks];
+    if (kept.length === 0) return [];
+    const positions = kept.some((delivery) => delivery.status === "queued")
+      ? this.#queuedPositions()
+      : new Map<string, number>();
+    return kept.map((delivery) =>
+      this.#publicDelivery(delivery, positions, this.#requireMessage(delivery.messageId, messages)),
+    );
   }
 
   queuedByAgent(): Map<string, { count: number; oldestCreatedAt: string }> {
@@ -3558,6 +3621,13 @@ function normalizeStoredState(value: StoredState): StoredState {
       actor: reaction.actor ?? { kind: "user" },
     })),
   };
+}
+
+function newestDeliveries(deliveries: StoredDelivery[], limit: number): StoredDelivery[] {
+  if (deliveries.length <= limit) return deliveries;
+  return deliveries
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || compareQueueOrder(right, left))
+    .slice(0, limit);
 }
 
 function compareQueueOrder(left: StoredDelivery, right: StoredDelivery): number {

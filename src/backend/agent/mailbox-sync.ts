@@ -9,7 +9,7 @@ import type {
 } from "@openbot/contracts/ipc";
 import { Effect, type Scope } from "effect";
 import { isMailboxMessageCopy } from "../conversation-snapshots";
-import type { MailboxStore } from "../mailbox-store";
+import type { MailboxStore, QueueDeliveryState } from "../mailbox-store";
 import type { OpenBotDatabase } from "../openbot-database";
 import { noteCallTime } from "../slow-calls";
 import type { ConversationRuntime } from "./conversation-runtime";
@@ -66,6 +66,8 @@ export class MailboxSync {
   >();
   readonly #syncedThisTick = new Set<string>();
   readonly #trailing = new Set<string>();
+  readonly #reconciledEnded = new Map<string, string>();
+  readonly #windowActive = new Map<string, ReadonlySet<string>>();
   #tickScheduled = false;
 
   constructor(options: MailboxSyncOptions) {
@@ -195,13 +197,26 @@ export class MailboxSync {
     return hold ? { ...queue, hold } : queue;
   }
 
+  #queueWindow(agentId: string): QueueSnapshot {
+    const queue = this.#mailbox.listQueueWindow(agentId, this.#windowActive.get(agentId));
+    this.#windowActive.set(
+      agentId,
+      new Set(queue.deliveries.filter((delivery) => ACTIVE_STATUSES.has(delivery.status)).map(({ id }) => id)),
+    );
+    if (!queue.deliveries.some((delivery) => delivery.status === "queued")) return queue;
+    const hold = this.#hooks.queueHold(agentId);
+    return hold ? { ...queue, hold } : queue;
+  }
+
   emitQueue(agentId: string): void {
     const startedAt = performance.now();
-    const queue = this.queueSnapshot(agentId);
+    const queue = this.#queueWindow(agentId);
     let routinesChanged = false;
     // A run in a routine's side thread is not in the queue of the chat, but its run still follows it.
-    for (const delivery of [...queue.deliveries, ...this.#mailbox.taskRoutineDeliveries(agentId)]) {
+    const reconciling = this.#mailbox.routineQueueDeliveries(agentId, (delivery) => this.#needsReconcile(delivery));
+    for (const delivery of reconciling) {
       if (this.#routines.reconcileDelivery(delivery)) routinesChanged = true;
+      if (!ACTIVE_STATUSES.has(delivery.status)) this.#reconciledEnded.set(delivery.id, endedKey(delivery));
     }
     this.#hooks.emit({ type: "queue-changed", snapshot: queue });
     if (routinesChanged) this.#routines.stateChanged(agentId);
@@ -228,11 +243,16 @@ export class MailboxSync {
     }
     noteCallTime("MailboxSync.emitQueue", startedAt, () => ({
       queuedDeliveries: queue.deliveries.length,
+      reconciled: reconciling.length,
       agents: affectedAgents.size,
       synced,
       deferred,
       snapshotMessages,
     }));
+  }
+
+  #needsReconcile(delivery: QueueDeliveryState): boolean {
+    return ACTIVE_STATUSES.has(delivery.status) || this.#reconciledEnded.get(delivery.id) !== endedKey(delivery);
   }
 
   #endTick(): void {
@@ -337,4 +357,10 @@ function messagesChanged(before: MessagesState, after: readonly ConversationMess
     } else if (!previous || JSON.stringify(previous) !== JSON.stringify(message)) return true;
   }
   return false;
+}
+
+const ACTIVE_STATUSES: ReadonlySet<QueueDeliveryState["status"]> = new Set(["queued", "starting", "running"]);
+
+function endedKey(delivery: QueueDeliveryState): string {
+  return `${delivery.status}\u0000${delivery.error ?? ""}`;
 }

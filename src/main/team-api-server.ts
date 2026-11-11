@@ -1448,8 +1448,17 @@ export class TeamApiServer {
       return resolved;
     };
 
+    let fullQueue: AgentEvent | undefined;
+    const fullQueueEvent = (agentId: string): AgentEvent => {
+      fullQueue ??= { type: "queue-changed", snapshot: this.#options.agents.listQueue(agentId) };
+      return fullQueue;
+    };
     for (const [client, connection] of this.#eventClients) {
-      const event = this.#eventFor(connection, broadcast);
+      const shown = this.#eventFor(connection, broadcast);
+      const event =
+        shown.type === "queue-changed" && !connection.capabilities.has("agent-runtime-snapshots")
+          ? fullQueueEvent(shown.snapshot.agentId)
+          : shown;
       // Only accounts after the first: a client reads an empty reading as no provider reporting.
       if (event !== broadcast && event.type === "usage-changed" && event.usage.limits.length === 0) continue;
       if (event.type === "conversation") {
