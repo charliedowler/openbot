@@ -452,6 +452,36 @@ try {
     assert.equal(hasWait("channel:retry-wait"), false);
     assert.equal(JSON.parse(response.body ?? "null")?.results[0]?.cancelledDeliveries, 1);
   });
+  await check("retry closes assignment after mailbox cancellation commits", async () => {
+    await work("committed-cancel-work", "committed-cancel-dispatch", channelInbox);
+    await until(() => Boolean(taskFor("committed-cancel-work")));
+    const rootTask = taskFor("committed-cancel-work");
+    assert.ok(rootTask);
+    const assignment = await assignmentFor(rootTask, "committed-cancel-assignment", "queued");
+    openWait(assignment, "channel:committed-cancel-wait");
+    const store = agents.channels.store;
+    const original = store.update.bind(store);
+    let failed = false;
+    store.update = (channel, changes) => {
+      if (changes?.assignments?.some((item) => item.id === assignment.id && item.state === "interrupted") && !failed) {
+        failed = true;
+        throw new Error("Fixture assignment update failed after mailbox cancellation.");
+      }
+      return original(channel, changes);
+    };
+    try {
+      await assert.rejects(cancel("committed-cancel-key", { dispatchId: "committed-cancel-dispatch" }));
+    } finally {
+      store.update = original;
+    }
+    assert.equal(failed, true);
+    assert.equal(mailbox.getDelivery(assignment.deliveryId ?? "")?.delivery.status, "cancelled");
+    assert.equal(store.assignments(channelId).find((item) => item.id === assignment.id)?.state, "queued");
+    const response = await cancel("committed-cancel-key", { dispatchId: "committed-cancel-dispatch" });
+    assert.equal(JSON.parse(response.body ?? "null")?.duplicate, true);
+    assert.equal(store.assignments(channelId).find((item) => item.id === assignment.id)?.state, "interrupted");
+    assert.equal(hasWait("channel:committed-cancel-wait"), false);
+  });
   await check("historical assignments and legacy ambiguity", async () => {
     await work("history-work", "history-dispatch", channelInbox);
     await until(() => Boolean(taskFor("history-work")));

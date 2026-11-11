@@ -4120,9 +4120,13 @@ export class ChannelService {
         }
       } else if (assignment.deliveryId) {
         const delivery = this.mailbox.getDelivery(assignment.deliveryId);
-        if (delivery?.delivery.status === "queued") {
-          const deliveryId = assignment.deliveryId;
-          yield* this.mailbox.cancel(assignment.agentId, deliveryId).pipe(Effect.mapError(channelFailure));
+        const queued = delivery?.delivery.status === "queued";
+        const cancelledByRequest = options.requestMessageId !== undefined && delivery?.delivery.status === "cancelled";
+        if (queued || cancelledByRequest) {
+          if (queued) {
+            const deliveryId = assignment.deliveryId;
+            yield* this.mailbox.cancel(assignment.agentId, deliveryId).pipe(Effect.mapError(channelFailure));
+          }
           yield* channelSync(() =>
             this.store.update(this.store.get(channelId), { assignments: [{ ...assignment, state: "interrupted" }] }),
           );
