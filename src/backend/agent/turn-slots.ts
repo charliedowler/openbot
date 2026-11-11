@@ -1,4 +1,5 @@
 import type { QueueDelivery } from "@openbot/contracts/ipc";
+import { personWork } from "./person-priority";
 
 export interface TurnSlotsOptions {
   /** The most turns that run at the same time, or null for no limit. */
@@ -54,14 +55,14 @@ export class TurnSlots {
       if (!otherHead || !startsBefore(otherHead, other, head, lane)) continue;
       if (!this.#options.isWaiting(other)) continue;
       ahead += 1;
-      if (otherHead.sender.kind !== "user") backgroundAhead += 1;
+      if (!personWork(otherHead)) backgroundAhead += 1;
       if (ahead >= free || (backgroundFree !== null && backgroundAhead >= backgroundFree)) return false;
     }
     return true;
   }
 
   #backgroundFree(head: QueueDelivery, limit: number, running: readonly string[]): number | null {
-    if (head.sender.kind === "user") return null;
+    if (personWork(head)) return null;
     const backgroundLimit = this.#options.backgroundLimit?.(limit) ?? null;
     if (backgroundLimit === null) return null;
     const personLanes = this.#options.personLanes?.() ?? new Set<string>();
@@ -70,8 +71,8 @@ export class TurnSlots {
 }
 
 function startsBefore(left: QueueDelivery, leftLane: string, right: QueueDelivery, rightLane: string): boolean {
-  const leftPerson = left.sender.kind === "user";
-  const rightPerson = right.sender.kind === "user";
+  const leftPerson = personWork(left);
+  const rightPerson = personWork(right);
   if (leftPerson !== rightPerson) return leftPerson;
   if (left.createdAt !== right.createdAt) return left.createdAt < right.createdAt;
   return leftLane < rightLane;

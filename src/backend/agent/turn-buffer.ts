@@ -40,7 +40,7 @@ export function turnBufferSettings(environment: NodeJS.ProcessEnv): TurnBufferSe
   return {
     limit,
     personReservedSlots: reserved ?? (limit === null ? 0 : DEFAULT_PERSON_RESERVED_SLOTS),
-    shed: shed === "0" ? false : shed === "1" || limit !== null,
+    shed: shed === "1",
     shedP99Ms: positiveInteger(environment.OPENBOT_SHED_P99_MS) ?? DEFAULT_SHED_P99_MS,
   };
 }

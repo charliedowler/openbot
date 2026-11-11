@@ -32,6 +32,7 @@ import { type DynamicRecord, isDynamicRecord, isString } from "@openbot/contract
 import { isFixedSourceText, matchingSourceKeys, sourceText } from "@openbot/i18n/source";
 import { createOpenBotLogger } from "@openbot/logging";
 import { Deferred, Effect, Exit, Fiber, Result, Schema, Scope } from "effect";
+import { relayedPersonRequest } from "./agent/person-priority";
 import {
   type ChannelOperationError,
   ChannelToolInputError,
@@ -1188,7 +1189,8 @@ export class ChannelService {
   ): boolean {
     if (task.parentTaskId !== null) return false;
     const request = this.store.message(channelId, task.requestMessageId);
-    if (request?.author.kind !== "member" || request.author.id.startsWith("routine:")) return false;
+    if (request?.author.kind !== "member") return false;
+    if (request.author.id.startsWith("routine:") && !relayedPersonRequest(request.message.text)) return false;
     return !assignments.some(
       (assignment) => assignment.taskId === task.id && assignment.requestMessageId === task.requestMessageId,
     );

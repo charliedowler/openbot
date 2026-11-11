@@ -3,9 +3,10 @@
 // person's message waited behind them, and the main thread stalled while they ran.
 //
 // OPENBOT_TURN_LIMIT caps the turn limit that the memory gives. OPENBOT_PERSON_RESERVED_SLOTS (3 when
-// the limit is set) keeps slots that only a person's message may use. While the main loop p99 of two
-// samples is over OPENBOT_SHED_P99_MS (2000), background turns get half of their slots, until three
-// samples are under it. The control socket shows the effective limits.
+// the limit is set) keeps slots that only a person's message may use. With OPENBOT_SHED=1, while the
+// main loop p99 of two samples is over OPENBOT_SHED_P99_MS (2000), background turns get half of their
+// slots, until three samples are under it (0062: off unless OPENBOT_SHED=1). The control socket shows
+// the effective limits.
 //
 // Runs the real ServerMemory with a fixed 12 GiB sample and the real ServerMode on a temporary socket
 // for the limits. The drain runs in the real agent service with a stand-in Claude CLI whose turns run
@@ -322,7 +323,7 @@ function assert(condition: unknown, message: string): asserts condition {
 }
 
 const turnBuffer = bufferModule
-  ? new bufferModule.TurnBuffer(bufferModule.turnBufferSettings({ OPENBOT_TURN_LIMIT: "10" }))
+  ? new bufferModule.TurnBuffer(bufferModule.turnBufferSettings({ OPENBOT_TURN_LIMIT: "10", OPENBOT_SHED: "1" }))
   : null;
 const serverMemory = (environment: NodeJS.ProcessEnv) => {
   const buffer = bufferModule ? new bufferModule.TurnBuffer(bufferModule.turnBufferSettings(environment)) : null;

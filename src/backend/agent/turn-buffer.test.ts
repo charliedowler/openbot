@@ -22,13 +22,14 @@ describe("turnBufferSettings", () => {
     expect(turnBuffer.status(16).shed).toBe("disabled");
   });
 
-  it("reserves 3 person slots and sheds by default when the limit is set", () => {
+  it("reserves 3 person slots when the limit is set and sheds only when OPENBOT_SHED is 1", () => {
     expect(turnBufferSettings({ OPENBOT_TURN_LIMIT: "10" })).toEqual({
       limit: 10,
       personReservedSlots: 3,
-      shed: true,
+      shed: false,
       shedP99Ms: 2_000,
     });
+    expect(turnBufferSettings({ OPENBOT_TURN_LIMIT: "10", OPENBOT_SHED: "1" }).shed).toBe(true);
     expect(
       turnBufferSettings({
         OPENBOT_TURN_LIMIT: "10",
@@ -66,7 +67,7 @@ describe("TurnBuffer", () => {
   });
 
   it("halves the background slots after two slow samples and restores them after three fast ones", () => {
-    const { turnBuffer, lines } = buffer({ OPENBOT_TURN_LIMIT: "10" });
+    const { turnBuffer, lines } = buffer({ OPENBOT_TURN_LIMIT: "10", OPENBOT_SHED: "1" });
     turnBuffer.observeMainLoop(2_500);
     expect(turnBuffer.shedding()).toBe(false);
     turnBuffer.observeMainLoop(800);
@@ -91,7 +92,7 @@ describe("TurnBuffer", () => {
   });
 
   it("sheds with no reservation down to one slot", () => {
-    const { turnBuffer } = buffer({ OPENBOT_TURN_LIMIT: "2", OPENBOT_PERSON_RESERVED_SLOTS: "0" });
+    const { turnBuffer } = buffer({ OPENBOT_TURN_LIMIT: "2", OPENBOT_PERSON_RESERVED_SLOTS: "0", OPENBOT_SHED: "1" });
     expect(turnBuffer.backgroundLimit(2)).toBeNull();
     turnBuffer.observeMainLoop(5_000);
     turnBuffer.observeMainLoop(5_000);
@@ -99,16 +100,18 @@ describe("TurnBuffer", () => {
     expect(turnBuffer.backgroundLimit(1)).toBe(1);
   });
 
-  it("does not shed when OPENBOT_SHED is 0", () => {
-    const { turnBuffer, lines } = buffer({ OPENBOT_TURN_LIMIT: "10", OPENBOT_SHED: "0" });
-    for (let index = 0; index < 5; index += 1) turnBuffer.observeMainLoop(10_000);
-    expect(turnBuffer.shedding()).toBe(false);
-    expect(lines).toEqual([]);
-    expect(turnBuffer.status(16)).toMatchObject({ shed: "disabled", mainLoopP99Ms: 10_000, backgroundLimit: 7 });
+  it("does not shed when OPENBOT_SHED is 0 or not set", () => {
+    for (const environment of [{ OPENBOT_TURN_LIMIT: "10", OPENBOT_SHED: "0" }, { OPENBOT_TURN_LIMIT: "10" }]) {
+      const { turnBuffer, lines } = buffer(environment);
+      for (let index = 0; index < 5; index += 1) turnBuffer.observeMainLoop(10_000);
+      expect(turnBuffer.shedding()).toBe(false);
+      expect(lines).toEqual([]);
+      expect(turnBuffer.status(16)).toMatchObject({ shed: "disabled", mainLoopP99Ms: 10_000, backgroundLimit: 7 });
+    }
   });
 
   it("reports the effective limits", () => {
-    const { turnBuffer } = buffer({ OPENBOT_TURN_LIMIT: "10" });
+    const { turnBuffer } = buffer({ OPENBOT_TURN_LIMIT: "10", OPENBOT_SHED: "1" });
     expect(turnBuffer.status(16)).toEqual({
       memoryLimit: 16,
       limit: 10,

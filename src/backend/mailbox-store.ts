@@ -48,6 +48,7 @@ import { StoredStateFailure, storedIO, storedSync, toStoredStateFailure } from "
 
 export type { ExportedAttachmentFile, GeneratedAttachmentSource } from "./attachment-files";
 
+import { personWork } from "./agent/person-priority";
 import { isEmptyStoredFile, parseStoredJson } from "./atomic-json-file";
 import { routineNameInLimit } from "./database/legacy-conversation-message";
 import { mailboxReactionRowKey } from "./database/mailbox-projection";
@@ -1115,7 +1116,7 @@ export class MailboxStore {
       if (delivery.status !== "starting" && delivery.status !== "running") continue;
       if (this.#besideDeliveries.has(delivery.id)) continue;
       const message = messages.get(delivery.messageId);
-      if (message?.sender.kind !== "user") continue;
+      if (!message || !personWork(message)) continue;
       lanes.push({ agentId: delivery.recipientAgentId, taskId: message.taskId ?? null });
     }
     return lanes;
@@ -1174,7 +1175,7 @@ export class MailboxStore {
           continue;
         }
         add(index.active, agentId, taskId);
-        if (message?.sender.kind === "user") index.person.push({ agentId, taskId });
+        if (message && personWork(message)) index.person.push({ agentId, taskId });
       }
       return index;
     });
