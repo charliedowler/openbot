@@ -37,6 +37,40 @@ import { revokeRoutineWebhooks } from "./webhook-route-store";
  * so that read, summary and context cursors stay correct. Every read skips it.
  */
 const SHOWN_MESSAGE_SQL = "json_extract(message_json, '$.deleted') IS NOT 1";
+const LISTED_MESSAGE_SQL = `${SHOWN_MESSAGE_SQL}
+  AND COALESCE(json_extract(message_json, '$.message.itemType'), '') != 'plan'
+  AND COALESCE(json_extract(message_json, '$.message.itemType'), '') != 'subagents'`;
+const UNREAD_MESSAGE_SQL = `${LISTED_MESSAGE_SQL}
+  AND COALESCE(json_extract(message_json, '$.message.itemType'), '') != 'channel-change'
+  AND COALESCE(json_extract(message_json, '$.message.itemType'), '') != 'commentary'
+  AND COALESCE(json_extract(message_json, '$.message.itemType'), '') NOT LIKE ?1`;
+const MESSAGE_FLAGS_SQL = `SELECT message_id, sequence, json_extract(message_json, '$.author.id') AS author_id,
+  (${LISTED_MESSAGE_SQL}) AS listed, (${UNREAD_MESSAGE_SQL}) AS counted
+  FROM projection_channel_messages WHERE channel_id = ?2`;
+const ROUTING_EVENT_PATTERN = `${CHANNEL_ROUTING_EVENT_ITEM_TYPE_PREFIX}%`;
+
+interface MessageFlags {
+  messageId: string;
+  sequence: number;
+  authorId: unknown;
+  latest: boolean;
+  counted: boolean;
+}
+
+function messageFlags(row: DynamicRecord): MessageFlags {
+  return {
+    messageId: requiredStringColumn(row, "message_id"),
+    sequence: requiredNumberColumn(row, "sequence"),
+    authorId: row.author_id ?? null,
+    latest: Number(row.listed) === 1,
+    counted: Number(row.counted) === 1,
+  };
+}
+
+function laterMessage(candidate: MessageFlags, current: MessageFlags): boolean {
+  if (candidate.sequence !== current.sequence) return candidate.sequence > current.sequence;
+  return Buffer.compare(Buffer.from(candidate.messageId), Buffer.from(current.messageId)) > 0;
+}
 
 /** The row that replaces a deleted channel message. `deleted` is internal and never sent. */
 function deletedChannelMessage(entry: ChannelMessage): ChannelMessage & { deleted: true } {
@@ -116,6 +150,10 @@ interface ChannelChange {
 export class ChannelStore {
   /** By channel: how many times a message changed in place after it was complete, in this process. */
   readonly #completedMessageChanges = new Map<string, number>();
+  readonly #tasks = new Map<string, readonly ChannelTask[]>();
+  readonly #assignments = new Map<string, readonly ChannelAssignment[]>();
+  readonly #messageFlags = new Map<string, Map<string, MessageFlags>>();
+  readonly #agentAssignments = new Map<string, { assignment: ChannelAssignment; channelId: string } | null>();
 
   constructor(
     readonly database: OpenBotDatabase,
@@ -176,39 +214,46 @@ export class ChannelStore {
     // unread, as in an agent chat: it folds into the steps of the member's answer.
     const startedAt = performance.now();
     const excludedId = signedOutMessagesAreTheirs ? SIGNED_OUT_CHANNEL_MEMBER_ID : memberId;
-    const rows = databaseRows(
+    const cursors = new Map<string, number>();
+    for (const row of databaseRows(
       this.database.connection
-        .prepare(
-          `SELECT c.channel_json AS channel_json,
-            (SELECT m.message_json FROM projection_channel_messages AS m
-              WHERE m.channel_id = c.channel_id
-                AND ${SHOWN_MESSAGE_SQL.replaceAll("message_json", "m.message_json")}
-                AND COALESCE(json_extract(m.message_json, '$.message.itemType'), '') != 'plan'
-                AND COALESCE(json_extract(m.message_json, '$.message.itemType'), '') != 'subagents'
-              ORDER BY m.sequence DESC, m.message_id DESC LIMIT 1) AS latest_json,
-            (SELECT COUNT(*) FROM projection_channel_messages AS m
-              WHERE m.channel_id = c.channel_id
-                AND m.sequence > COALESCE(
-                  (SELECT r.through_sequence FROM projection_channel_reads AS r
-                    WHERE r.channel_id = c.channel_id AND r.member_id = ?), 0)
-                AND ${SHOWN_MESSAGE_SQL.replaceAll("message_json", "m.message_json")}
-                AND json_extract(m.message_json, '$.author.id') IS NOT ?
-                AND json_extract(m.message_json, '$.author.id') IS NOT ?
-                AND COALESCE(json_extract(m.message_json, '$.message.itemType'), '') != 'plan'
-                AND COALESCE(json_extract(m.message_json, '$.message.itemType'), '') != 'subagents'
-                AND COALESCE(json_extract(m.message_json, '$.message.itemType'), '') != 'channel-change'
-                AND COALESCE(json_extract(m.message_json, '$.message.itemType'), '') != 'commentary'
-                AND COALESCE(json_extract(m.message_json, '$.message.itemType'), '') NOT LIKE ?) AS unread,
-            (SELECT COUNT(*) FROM projection_channel_tasks AS t
-              WHERE t.channel_id = c.channel_id
-                AND json_extract(t.task_json, '$.state') = 'running') AS running,
-            (SELECT COUNT(*) FROM projection_channel_tasks AS t
-              WHERE t.channel_id = c.channel_id
-                AND json_extract(t.task_json, '$.state') IN ('queued', 'waiting', 'running')) AS open
-            FROM projection_channels AS c ORDER BY c.rowid`,
-        )
-        .all(memberId, memberId, excludedId, `${CHANNEL_ROUTING_EVENT_ITEM_TYPE_PREFIX}%`),
-    );
+        .prepare("SELECT channel_id, through_sequence FROM projection_channel_reads WHERE member_id = ?")
+        .all(memberId),
+    ))
+      cursors.set(requiredStringColumn(row, "channel_id"), Number(row.through_sequence ?? 0));
+    const rows = databaseRows(
+      this.database.connection.prepare("SELECT channel_id, channel_json FROM projection_channels ORDER BY rowid").all(),
+    ).map((row) => {
+      const channelId = requiredStringColumn(row, "channel_id");
+      const cursor = cursors.get(channelId) ?? 0;
+      let unread = 0;
+      let latest: MessageFlags | undefined;
+      for (const flags of this.#flagsOf(channelId).values()) {
+        if (flags.latest && (!latest || laterMessage(flags, latest))) latest = flags;
+        if (flags.counted && flags.sequence > cursor && flags.authorId !== memberId && flags.authorId !== excludedId)
+          unread += 1;
+      }
+      let running = 0;
+      let open = 0;
+      for (const task of this.#tasksOf(channelId)) {
+        if (task.state === "running") running += 1;
+        if (task.state === "queued" || task.state === "waiting" || task.state === "running") open += 1;
+      }
+      const latestRow = latest
+        ? databaseRow(
+            this.database.connection
+              .prepare("SELECT message_json FROM projection_channel_messages WHERE channel_id = ? AND message_id = ?")
+              .get(channelId, latest.messageId),
+          )
+        : undefined;
+      return {
+        channel_json: row.channel_json,
+        latest_json: latestRow?.message_json ?? null,
+        unread,
+        running,
+        open,
+      };
+    });
     const threads = new Map<string, ChannelThread[]>();
     for (const row of databaseRows(
       this.database.connection
@@ -401,6 +446,18 @@ export class ChannelStore {
   }
 
   tasks(channelId: string): ChannelTask[] {
+    return [...this.#tasksOf(channelId)];
+  }
+
+  #tasksOf(channelId: string): readonly ChannelTask[] {
+    const cached = this.#tasks.get(channelId);
+    if (cached) return cached;
+    const tasks = this.#readTasks(channelId);
+    this.#tasks.set(channelId, tasks);
+    return tasks;
+  }
+
+  #readTasks(channelId: string): ChannelTask[] {
     return databaseRows(
       this.database.connection
         .prepare("SELECT task_json FROM projection_channel_tasks WHERE channel_id = ? ORDER BY rowid")
@@ -413,6 +470,14 @@ export class ChannelStore {
   }
 
   assignments(channelId: string): ChannelAssignment[] {
+    const cached = this.#assignments.get(channelId);
+    if (cached) return [...cached];
+    const assignments = this.#readAssignments(channelId);
+    this.#assignments.set(channelId, assignments);
+    return [...assignments];
+  }
+
+  #readAssignments(channelId: string): ChannelAssignment[] {
     return databaseRows(
       this.database.connection
         .prepare("SELECT assignment_json FROM projection_channel_assignments WHERE channel_id = ? ORDER BY rowid")
@@ -467,12 +532,25 @@ export class ChannelStore {
     states: readonly ChannelAssignment["state"][],
   ): { assignment: ChannelAssignment; channel: Channel } | null {
     if (!states.length) return null;
+    const key = JSON.stringify([agentId, states]);
+    let found = this.#agentAssignments.get(key);
+    if (found === undefined) {
+      found = this.#readAgentAssignment(agentId, states);
+      this.#agentAssignments.set(key, found);
+    }
+    return found ? { assignment: { ...found.assignment }, channel: this.get(found.channelId) } : null;
+  }
+
+  #readAgentAssignment(
+    agentId: string,
+    states: readonly ChannelAssignment["state"][],
+  ): { assignment: ChannelAssignment; channelId: string } | null {
     const placeholders = states.map(() => "?").join(", ");
     const ranking = states.map((_, index) => `WHEN ? THEN ${index}`).join(" ");
     const row = databaseRow(
       this.database.connection
         .prepare(
-          `SELECT assignments.assignment_json AS assignment_json, channels.channel_json AS channel_json
+          `SELECT assignments.assignment_json AS assignment_json, assignments.channel_id AS channel_id
              FROM projection_channel_assignments AS assignments
              JOIN projection_channels AS channels ON channels.channel_id = assignments.channel_id
             WHERE json_extract(assignments.assignment_json, '$.agentId') = ?
@@ -486,7 +564,7 @@ export class ChannelStore {
     if (!row) return null;
     return {
       assignment: decodeAssignment(JSON.parse(requiredStringColumn(row, "assignment_json"))),
-      channel: decodeChannel(JSON.parse(requiredStringColumn(row, "channel_json"))),
+      channelId: requiredStringColumn(row, "channel_id"),
     };
   }
 
@@ -549,14 +627,19 @@ export class ChannelStore {
     const payload = { ...change, channel, messages };
     const stopping = this.onTasksStopped ? change.tasks.filter(stoppedState) : [];
     const before = new Map(stopping.map((task) => [task.id, this.task(channel.id, task.id)?.state]));
-    const committed = this.database.dispatch(
-      commandId,
-      [{ aggregateType: "channel", aggregateId: channel.id, eventType: "channel.changed", payload }],
-      (db) => {
-        this.project(db, payload);
-        return channel;
-      },
-    );
+    let committed: Channel;
+    try {
+      committed = this.database.dispatch(
+        commandId,
+        [{ aggregateType: "channel", aggregateId: channel.id, eventType: "channel.changed", payload }],
+        (db) => {
+          this.project(db, payload);
+          return channel;
+        },
+      );
+    } finally {
+      this.#afterChange(payload);
+    }
     const stopped = stopping.filter((task) => {
       const state = before.get(task.id);
       return state !== "paused" && state !== "failed";
@@ -574,6 +657,20 @@ export class ChannelStore {
     const deleted = deletedChannelMessage(entry);
     const updated = { ...channel, revision: channel.revision + 1 };
     const payload: ChannelChange = { channel: updated, messages: [deleted], tasks: [], assignments: [] };
+    try {
+      return this.#deleteMessage(channel, entry, deleted, updated, payload);
+    } finally {
+      this.#afterChange(payload);
+    }
+  }
+
+  #deleteMessage(
+    channel: Channel,
+    entry: ChannelMessage,
+    deleted: ChannelMessage,
+    updated: Channel,
+    payload: ChannelChange,
+  ): Channel {
     return this.database.dispatch(
       `channels:message-deleted:${channel.id}:${entry.id}:${randomUUID()}`,
       [{ aggregateType: "channel", aggregateId: channel.id, eventType: "channel.changed", payload }],
@@ -751,6 +848,14 @@ export class ChannelStore {
   delete(channelId: string, operationId: string = randomUUID()): void {
     if (!this.exists(channelId)) throw new Error(sourceText("error.backend.channelNotFound"));
     const threadIds = this.contextThreads(channelId);
+    try {
+      this.#deleteChannel(channelId, operationId, threadIds);
+    } finally {
+      this.#forget(channelId);
+    }
+  }
+
+  #deleteChannel(channelId: string, operationId: string, threadIds: readonly string[]): void {
     this.database.dispatch(
       `channel-delete:${operationId}`,
       [
@@ -953,6 +1058,14 @@ export class ChannelStore {
 
   /** Rebuilds channel projections from committed events without changing agent threads. */
   rebuild(channelId: string): void {
+    try {
+      this.#rebuild(channelId);
+    } finally {
+      this.#forget(channelId);
+    }
+  }
+
+  #rebuild(channelId: string): void {
     const db = this.database.connection;
     db.exec("BEGIN IMMEDIATE");
     try {
@@ -1047,6 +1160,67 @@ export class ChannelStore {
       if (db.isTransaction) db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  #afterChange(change: ChannelChange): void {
+    const channelId = change.channel.id;
+    if (change.tasks.length > 0)
+      for (const owner of this.#ownerChannels("projection_channel_tasks", "task_id", change.tasks, channelId))
+        this.#tasks.delete(owner);
+    if (change.assignments.length > 0) this.#agentAssignments.clear();
+    if (change.assignments.length > 0)
+      for (const owner of this.#ownerChannels(
+        "projection_channel_assignments",
+        "assignment_id",
+        change.assignments,
+        channelId,
+      ))
+        this.#assignments.delete(owner);
+    const flags = this.#messageFlags.get(channelId);
+    if (!flags || change.messages.length === 0) return;
+    const ids = change.messages.map((message) => message.id);
+    for (const id of ids) flags.delete(id);
+    for (const row of databaseRows(
+      this.database.connection
+        .prepare(`${MESSAGE_FLAGS_SQL} AND message_id IN (SELECT value FROM json_each(?))`)
+        .all(ROUTING_EVENT_PATTERN, channelId, JSON.stringify(ids)),
+    ))
+      flags.set(requiredStringColumn(row, "message_id"), messageFlags(row));
+  }
+
+  #ownerChannels(
+    table: "projection_channel_tasks" | "projection_channel_assignments",
+    column: "task_id" | "assignment_id",
+    rows: readonly { id: string }[],
+    channelId: string,
+  ): Set<string> {
+    const owners = new Set([channelId]);
+    for (const row of databaseRows(
+      this.database.connection
+        .prepare(`SELECT DISTINCT channel_id FROM ${table} WHERE ${column} IN (SELECT value FROM json_each(?))`)
+        .all(JSON.stringify(rows.map((row) => row.id))),
+    ))
+      owners.add(requiredStringColumn(row, "channel_id"));
+    return owners;
+  }
+
+  #forget(channelId: string): void {
+    this.#agentAssignments.clear();
+    this.#tasks.delete(channelId);
+    this.#assignments.delete(channelId);
+    this.#messageFlags.delete(channelId);
+  }
+
+  #flagsOf(channelId: string): ReadonlyMap<string, MessageFlags> {
+    const cached = this.#messageFlags.get(channelId);
+    if (cached) return cached;
+    const flags = new Map<string, MessageFlags>();
+    for (const row of databaseRows(
+      this.database.connection.prepare(MESSAGE_FLAGS_SQL).all(ROUTING_EVENT_PATTERN, channelId),
+    ))
+      flags.set(requiredStringColumn(row, "message_id"), messageFlags(row));
+    this.#messageFlags.set(channelId, flags);
+    return flags;
   }
 
   /** A stored cursor of zero is a reader that read nothing, not a reader with no cursor at all. */

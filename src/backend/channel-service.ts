@@ -1169,7 +1169,10 @@ export class ChannelService {
    */
   #queuedInOrder(channelId: string): ChannelTask[] {
     const queued = this.store.tasks(channelId).filter((item) => item.state === "queued");
-    const fresh = new Set(queued.filter((item) => this.#freshPersonRequest(item, channelId)).map((item) => item.id));
+    const assignments = this.store.assignments(channelId);
+    const fresh = new Set(
+      queued.filter((item) => this.#freshPersonRequest(item, channelId, assignments)).map((item) => item.id),
+    );
     return [...queued.filter((item) => fresh.has(item.id)), ...queued.filter((item) => !fresh.has(item.id))];
   }
 
@@ -1178,13 +1181,17 @@ export class ChannelService {
    * writes its request as a member with a `routine:` id. A subtask is an agent's work under the
    * request. A woken or resumed task keeps the request its earlier assignment carried.
    */
-  #freshPersonRequest(task: ChannelTask, channelId: string): boolean {
+  #freshPersonRequest(
+    task: ChannelTask,
+    channelId: string,
+    assignments: readonly ChannelAssignment[] = this.store.assignments(channelId),
+  ): boolean {
     if (task.parentTaskId !== null) return false;
     const request = this.store.message(channelId, task.requestMessageId);
     if (request?.author.kind !== "member" || request.author.id.startsWith("routine:")) return false;
-    return !this.store
-      .assignments(channelId)
-      .some((assignment) => assignment.taskId === task.id && assignment.requestMessageId === task.requestMessageId);
+    return !assignments.some(
+      (assignment) => assignment.taskId === task.id && assignment.requestMessageId === task.requestMessageId,
+    );
   }
 
   /** Every task by id and every active assignment, across all channels. */
