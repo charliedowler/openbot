@@ -5,7 +5,7 @@ const logger = createOpenBotLogger("slow-call");
 export const SLOW_CALL_MS = 250;
 export const SLOW_CALL_LOG_INTERVAL_MS = 10_000;
 
-export type SlowCallCounts = Record<string, number | boolean | null>;
+export type SlowCallCounts = Record<string, string | number | boolean | null>;
 
 const loggedAt = new Map<string, number>();
 const notLogged = new Map<string, number>();

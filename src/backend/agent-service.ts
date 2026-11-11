@@ -264,6 +264,7 @@ import { RoutineRecords } from "./routine-records";
 import type { RoutineHoldWindow } from "./routine-store";
 import { type RoutineDueSource, RoutineTimer } from "./routine-timer";
 import type { SidebarLayoutStore } from "./sidebar-layout-store";
+import { noteCallTime } from "./slow-calls";
 import type { VaultItems } from "./vault-items";
 import type { WorkflowTools } from "./workflows/workflow-tools";
 import type { WorkflowRunEnd } from "./workflows/workflows";
@@ -5793,10 +5794,64 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
   }
 
   #emit(event: AgentEvent): void {
+    const startedAt = performance.now();
     recordAgentRestartActivity(event);
-    if (this.channels?.event(event) || this.messaging?.event(event, this.#scope) || this.#tasks?.event(event)) return;
-    this.emit("event", event);
-    if (event.type === "waits-changed") this.emit("event", { type: "watching-changed" });
+    const timing = {
+      channelsMs: 0,
+      messagingMs: 0,
+      tasksMs: 0,
+      listeners: 0,
+      slowestListener: -1,
+      slowestListenerMs: 0,
+    };
+    let lapAt = performance.now();
+    const lap = () => {
+      const now = performance.now();
+      const ms = now - lapAt;
+      lapAt = now;
+      return ms;
+    };
+    let handled = this.channels?.event(event) ?? false;
+    timing.channelsMs = lap();
+    if (!handled) {
+      handled = this.messaging?.event(event, this.#scope) ?? false;
+      timing.messagingMs = lap();
+    }
+    if (!handled) {
+      handled = this.#tasks?.event(event) ?? false;
+      timing.tasksMs = lap();
+    }
+    if (!handled) {
+      this.#emitToListeners(event, timing);
+      if (event.type === "waits-changed") this.#emitToListeners({ type: "watching-changed" }, timing);
+    }
+    noteCallTime("AgentService.emit", startedAt, () => ({
+      event: event.type,
+      handled,
+      channelsMs: Math.round(timing.channelsMs),
+      messagingMs: Math.round(timing.messagingMs),
+      tasksMs: Math.round(timing.tasksMs),
+      listeners: timing.listeners,
+      slowestListener: timing.slowestListener,
+      slowestListenerMs: Math.round(timing.slowestListenerMs),
+    }));
+  }
+
+  #emitToListeners(
+    event: AgentEvent,
+    timing: { listeners: number; slowestListener: number; slowestListenerMs: number },
+  ): void {
+    const listeners = this.rawListeners("event");
+    timing.listeners = listeners.length;
+    for (const [index, listener] of listeners.entries()) {
+      const startedAt = performance.now();
+      listener.call(this, event);
+      const ms = performance.now() - startedAt;
+      if (ms > timing.slowestListenerMs) {
+        timing.slowestListenerMs = ms;
+        timing.slowestListener = index;
+      }
+    }
   }
 
   /** Removes live provider state for an execution thread before its durable rows are deleted. */

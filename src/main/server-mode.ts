@@ -40,6 +40,7 @@ import QRCode from "qrcode";
 import type { AgentService } from "../backend/agent-service";
 import { runCauseEffect } from "../backend/effect-boundary";
 import type { CentralAuthManager } from "./central-auth-manager";
+import { CpuProfileBusy, type CpuProfiler, cpuProfileRequest } from "./cpu-profile";
 import type { HostEventsService } from "./host-events-service";
 import type { HostService } from "./host-service";
 import { readBodyWithin } from "./http-body";
@@ -95,6 +96,7 @@ export interface ServerModeOptions {
   agents?: Pick<AgentService, "listAgents" | "interruptRunningTurn" | "updateAgentRuntime" | "agentQueues">;
   routines?: Pick<HostEventsService, "listRoutines" | "saveRoutine">;
   channelIds?: () => readonly string[];
+  cpuProfiler?: Pick<CpuProfiler, "take">;
   onError: (message: string, error: unknown) => void;
   /** Tests only. */
   uid?: number;
@@ -248,6 +250,8 @@ export class ServerMode {
         return this.#routines();
       case "POST /v1/routines/update":
         return this.#updateRoutine(body);
+      case "POST /v1/diagnostics/cpu-profile":
+        return this.#cpuProfile(body);
       case "POST /v1/logout":
         await runCauseEffect(
           this.#options.centralAuth.logout().pipe(Effect.mapError(({ cause }) => new RemoteWorkflowError({ cause }))),
@@ -286,6 +290,29 @@ export class ServerMode {
         ...this.#memoryLines(),
       },
     };
+  }
+
+  async #cpuProfile(body: URLSearchParams): Promise<Answer> {
+    const profiler = this.#options.cpuProfiler;
+    if (!profiler) return failure(404, "not_found");
+    const request = cpuProfileRequest(body.get("seconds"), body.get("intervalUs"));
+    if (!request) return failure(400, "invalid_profile");
+    try {
+      const result = await profiler.take(request.seconds, request.intervalUs);
+      return {
+        status: 200,
+        lines: {
+          profile: result.path,
+          seconds: result.seconds,
+          interval_us: result.intervalUs,
+          samples: result.samples,
+          bytes: result.bytes,
+        },
+      };
+    } catch (error) {
+      if (error instanceof CpuProfileBusy) return failure(409, "profile_running");
+      throw error;
+    }
   }
 
   async #resetUsage(provider: string, accountId: string | null): Promise<Answer> {

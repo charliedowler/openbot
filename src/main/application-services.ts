@@ -37,6 +37,7 @@ import {
 } from "./browser-profile-service";
 import { contextPrCliWithEnvironment } from "./context-pr-cli";
 import { ContextPrService } from "./context-pr-service";
+import { CpuProfiler } from "./cpu-profile";
 import { HostReleaseService, readInstallationMode } from "./host-release-service";
 import {
   CONTAINER_UPDATE_PATHS,
@@ -3720,6 +3721,7 @@ export async function createApplicationServices({
         agents: service,
         routines: events,
         channelIds: () => service.channels.store.ids(),
+        cpuProfiler: new CpuProfiler(join(app.getPath("userData"), "logs")),
         onError: (message, error) => logger.warn(message, toLogValue(error)),
       })
     : null;

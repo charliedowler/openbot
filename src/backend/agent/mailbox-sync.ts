@@ -211,6 +211,7 @@ export class MailboxSync {
   emitQueue(agentId: string): void {
     const startedAt = performance.now();
     const queue = this.#queueWindow(agentId);
+    const windowAt = performance.now();
     let routinesChanged = false;
     // A run in a routine's side thread is not in the queue of the chat, but its run still follows it.
     const reconciling = this.#mailbox.routineQueueDeliveries(agentId, (delivery) => this.#needsReconcile(delivery));
@@ -218,8 +219,10 @@ export class MailboxSync {
       if (this.#routines.reconcileDelivery(delivery)) routinesChanged = true;
       if (!ACTIVE_STATUSES.has(delivery.status)) this.#reconciledEnded.set(delivery.id, endedKey(delivery));
     }
+    const reconciledAt = performance.now();
     this.#hooks.emit({ type: "queue-changed", snapshot: queue });
     if (routinesChanged) this.#routines.stateChanged(agentId);
+    const emittedAt = performance.now();
     const affectedAgents = new Set([agentId, ...this.#mailbox.senderAgentIdsForRecipient(agentId)]);
     let synced = 0;
     let deferred = 0;
@@ -241,7 +244,12 @@ export class MailboxSync {
       this.#tickScheduled = true;
       queueMicrotask(() => this.#endTick());
     }
+    const syncedAt = performance.now();
     noteCallTime("MailboxSync.emitQueue", startedAt, () => ({
+      windowMs: Math.round(windowAt - startedAt),
+      reconcileMs: Math.round(reconciledAt - windowAt),
+      eventMs: Math.round(emittedAt - reconciledAt),
+      syncMs: Math.round(syncedAt - emittedAt),
       queuedDeliveries: queue.deliveries.length,
       reconciled: reconciling.length,
       agents: affectedAgents.size,
