@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { AGENT_PROVIDERS, type AgentModelOption, type AgentSummary } from "@openbot/contracts/ipc";
+import { AGENT_PROVIDERS, type AgentModelOption, type AgentSummary, type QueueDelivery } from "@openbot/contracts/ipc";
 import { sourceText } from "@openbot/i18n/source";
 import { createOpenBotLogger } from "@openbot/logging";
 import { Deferred, Effect, Result, Schema } from "effect";
@@ -139,6 +139,36 @@ function laneOf(key: string): Lane {
   return rest === ROUTINE_LANE ? routineLane(agentId) : { agentId, taskId: rest };
 }
 
+interface DecisionPass {
+  readonly heldBy: Map<string, string | null>;
+  readonly running: Map<string, boolean>;
+  readonly waiting: Map<string, boolean>;
+  readonly heads: Map<string, QueueDelivery | null>;
+  lanes?: MailboxLanes;
+  laneKeys?: readonly string[];
+  personLanes?: ReadonlySet<string>;
+}
+
+const decisionPass = (): DecisionPass => ({
+  heldBy: new Map(),
+  running: new Map(),
+  waiting: new Map(),
+  heads: new Map(),
+});
+
+function remembered<T extends NonNullable<unknown> | null>(
+  memo: Map<string, T> | undefined,
+  key: string,
+  read: () => T,
+): T {
+  if (!memo) return read();
+  const known = memo.get(key);
+  if (known !== undefined) return known;
+  const value = read();
+  memo.set(key, value);
+  return value;
+}
+
 const mainLane = (agentId: string): Lane => ({ agentId, taskId: null });
 const routineLane = (agentId: string): Lane => ({ agentId, taskId: null, routine: true });
 
@@ -195,6 +225,7 @@ export class DrainScheduler {
   readonly #slotWaiters = new Set<string>();
   #wakingSlotWaiters = false;
   #slotLanes: MailboxLanes | null = null;
+  #pass: DecisionPass | null = null;
   readonly #hooks: DrainHooks;
   readonly #channels: ChannelService | undefined;
   readonly #messaging: MessagingThreads | undefined;
@@ -252,27 +283,46 @@ export class DrainScheduler {
     this.#messaging = options.messaging;
     this.#slots = new TurnSlots({
       limit: () => this.#memory.turnLimit(),
-      lanes: () =>
-        this.#store
-          .list()
-          .flatMap((agent) => this.#lanesOf(agent.id))
-          .map(laneKey),
-      isRunning: (key) => {
-        const lane = laneOf(key);
-        // A compaction is a provider turn of the lane whose thread it compacts, so it uses that slot.
-        return this.#laneRunning(lane, this.#slotLanes ?? this.#mailbox) || this.#compactionHolds(lane);
+      lanes: () => {
+        const read = () =>
+          this.#store
+            .list()
+            .flatMap((agent) => this.#lanesOf(agent.id))
+            .map(laneKey);
+        const pass = this.#pass;
+        if (!pass) return read();
+        pass.laneKeys ??= read();
+        return pass.laneKeys;
       },
-      isWaiting: (key) => {
-        const lane = laneOf(key);
-        return (
-          this.#mayStartNow(lane) &&
-          this.#memory.mayDrain(lane.agentId) &&
-          this.#laneHead(lane, this.#slotLanes ?? undefined) !== null
-        );
-      },
-      head: (key) => this.#laneHead(laneOf(key), this.#slotLanes ?? undefined)?.delivery ?? null,
+      isRunning: (key) =>
+        remembered(this.#pass?.running, key, () => {
+          const lane = laneOf(key);
+          // A compaction is a provider turn of the lane whose thread it compacts, so it uses that slot.
+          return this.#laneRunning(lane, this.#slotLanes ?? this.#mailbox) || this.#compactionHolds(lane);
+        }),
+      isWaiting: (key) =>
+        remembered(this.#pass?.waiting, key, () => {
+          const lane = laneOf(key);
+          return (
+            this.#mayStartNow(lane) &&
+            this.#memory.mayDrain(lane.agentId) &&
+            this.#laneHead(lane, this.#slotLanes ?? undefined) !== null
+          );
+        }),
+      head: (key) =>
+        remembered(
+          this.#pass?.heads,
+          key,
+          () => this.#laneHead(laneOf(key), this.#slotLanes ?? undefined)?.delivery ?? null,
+        ),
       backgroundLimit: (limit) => this.#memory.backgroundTurnLimit(limit),
-      personLanes: () => new Set((this.#slotLanes ?? this.#mailbox).personLanes().map(laneKey)),
+      personLanes: () => {
+        const read = () => new Set((this.#slotLanes ?? this.#mailbox).personLanes().map(laneKey));
+        const pass = this.#pass;
+        if (!pass) return read();
+        pass.personLanes ??= read();
+        return pass.personLanes;
+      },
     });
   }
 
@@ -370,8 +420,33 @@ export class DrainScheduler {
     );
   }
 
+  #inPass<T>(work: () => T): T {
+    if (this.#pass) return work();
+    this.#pass = decisionPass();
+    try {
+      return work();
+    } finally {
+      this.#pass = null;
+    }
+  }
+
+  #outsidePass<T>(work: () => T): T {
+    if (!this.#pass) return work();
+    this.#pass = null;
+    try {
+      return work();
+    } finally {
+      this.#pass = decisionPass();
+    }
+  }
+
   /** The first clause of `mayDrain` that holds this lane, or null when none does. */
   #heldBy(lane: Lane): string | null {
+    const pass = this.#pass;
+    return pass ? remembered(pass.heldBy, laneKey(lane), () => this.#readHold(lane)) : this.#readHold(lane);
+  }
+
+  #readHold(lane: Lane): string | null {
     const { agentId, taskId } = lane;
     if (this.#hooks.isDeleting(agentId)) return "deleting";
     const key = laneKey(lane);
@@ -488,8 +563,10 @@ export class DrainScheduler {
 
   /** `followUsageLimit` is false after a move that failed, so that the drain does not try it again. */
   scheduleDrain(agentId: string, followUsageLimit = true): void {
-    this.#scheduleDrain(agentId, followUsageLimit);
-    this.retrySlotWaiters();
+    this.#inPass(() => {
+      this.#scheduleDrain(agentId, followUsageLimit);
+      this.retrySlotWaiters();
+    });
   }
 
   /**
@@ -502,7 +579,9 @@ export class DrainScheduler {
     try {
       const waiters = [...this.#slotWaiters];
       this.#slotWaiters.clear();
-      for (const key of waiters) this.#scheduleLane(laneOf(key));
+      this.#inPass(() => {
+        for (const key of waiters) this.#scheduleLane(laneOf(key));
+      });
     } finally {
       this.#wakingSlotWaiters = false;
     }
@@ -540,7 +619,11 @@ export class DrainScheduler {
       this.#heldBy(lane) ||
       (this.#heldByMachine(lane) && "machine");
     if (hold) this.#reportHold(lane, hold);
-    if (followUsageLimit && (!hold || hold === "usage-limit") && this.#hooks.followUsageLimit(lane.agentId))
+    if (
+      followUsageLimit &&
+      (!hold || hold === "usage-limit") &&
+      this.#outsidePass(() => this.#hooks.followUsageLimit(lane.agentId))
+    )
       return true;
     if (hold) return false;
     this.#scheduledDrains.add(key);
@@ -617,11 +700,13 @@ export class DrainScheduler {
    */
   #heldByMachine(lane: Lane): boolean {
     if (!this.#memory.mayDrain(lane.agentId)) {
-      if (this.#laneHead(lane)) this.#memory.held(lane.agentId);
+      if (this.#laneHead(lane)) this.#outsidePass(() => this.#memory.held(lane.agentId));
       return true;
     }
     const key = laneKey(lane);
-    this.#slotLanes = this.#mailbox.lanes();
+    const pass = this.#pass;
+    if (pass) pass.lanes ??= this.#mailbox.lanes();
+    this.#slotLanes = pass?.lanes ?? this.#mailbox.lanes();
     try {
       if (this.#slots.mayStart(key)) return false;
     } finally {
@@ -724,13 +809,15 @@ export class DrainScheduler {
       Effect.ensuring(
         Effect.sync(() => {
           this.#drainingLanes.delete(key);
-          if (this.#requeuedAtLimit.delete(agentId) || this.#mailbox.nextQueued(agentId))
-            this.#scheduleLane(mainLane(agentId));
-          // A routine lane does not schedule itself again: the end of its run does that.
-          if (!lane.routine) this.#scheduleRoutineLane(agentId);
-          // Every task too: this lane can have held another one for the task limit or the process.
-          this.#scheduleTasks(agentId);
-          this.retrySlotWaiters();
+          this.#inPass(() => {
+            if (this.#requeuedAtLimit.delete(agentId) || this.#mailbox.nextQueued(agentId))
+              this.#scheduleLane(mainLane(agentId));
+            // A routine lane does not schedule itself again: the end of its run does that.
+            if (!lane.routine) this.#scheduleRoutineLane(agentId);
+            // Every task too: this lane can have held another one for the task limit or the process.
+            this.#scheduleTasks(agentId);
+            this.retrySlotWaiters();
+          });
         }),
       ),
     );

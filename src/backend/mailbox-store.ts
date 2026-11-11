@@ -343,6 +343,8 @@ export class MailboxStore {
    */
   #messageIndex: { source: StoredMessage[]; length: number; byId: Map<string, StoredMessage> } | null = null;
   #deliveryIndex: { source: StoredDelivery[]; length: number; byMessage: Map<string, StoredDelivery[]> } | null = null;
+  #agentDeliveries: { source: StoredDelivery[]; length: number; byRecipient: Map<string, StoredDelivery[]> } | null =
+    null;
   #turnIdIndex: {
     source: Record<string, string>;
     revision: number;
@@ -1028,6 +1030,22 @@ export class MailboxStore {
     return byMessage;
   }
 
+  #deliveriesFor(agentId: string): readonly StoredDelivery[] {
+    const source = this.#state.deliveries;
+    let index = this.#agentDeliveries;
+    if (index?.source !== source || index.length !== source.length) {
+      const byRecipient = new Map<string, StoredDelivery[]>();
+      for (const delivery of source) {
+        const deliveries = byRecipient.get(delivery.recipientAgentId);
+        if (deliveries) deliveries.push(delivery);
+        else byRecipient.set(delivery.recipientAgentId, [delivery]);
+      }
+      index = { source, length: source.length, byRecipient };
+      this.#agentDeliveries = index;
+    }
+    return index.byRecipient.get(agentId) ?? [];
+  }
+
   /** The task a delivery runs in, or null for the agent's own chat. */
   taskIdForDelivery(deliveryId: string): string | null {
     const delivery = this.#state.deliveries.find((candidate) => candidate.id === deliveryId);
@@ -1101,7 +1119,7 @@ export class MailboxStore {
 
   /** Whether a delivery of this lane is starting or running: the agent's own chat when `taskId` is null. */
   laneActive(agentId: string, taskId: string | null): boolean {
-    return this.#state.deliveries.some(
+    return this.#deliveriesFor(agentId).some(
       (delivery) =>
         delivery.recipientAgentId === agentId &&
         (delivery.status === "starting" || delivery.status === "running") &&
@@ -1125,7 +1143,7 @@ export class MailboxStore {
 
   /** Whether a routine run of this agent's own chat starts or runs beside its channel work. */
   besideActive(agentId: string): boolean {
-    return this.#state.deliveries.some(
+    return this.#deliveriesFor(agentId).some(
       (delivery) =>
         delivery.recipientAgentId === agentId &&
         (delivery.status === "starting" || delivery.status === "running") &&
@@ -1135,7 +1153,7 @@ export class MailboxStore {
 
   /** Whether this turn is the turn of a routine run beside the agent's channel work. */
   besideTurn(agentId: string, turnId: string): boolean {
-    return this.#state.deliveries.some(
+    return this.#deliveriesFor(agentId).some(
       (delivery) =>
         delivery.recipientAgentId === agentId &&
         delivery.turnId === turnId &&
@@ -1185,7 +1203,7 @@ export class MailboxStore {
   /** Whether the main lane of this agent starts or runs a delivery that is not channel work. */
   mainLaneRunsNonChannelWork(agentId: string): boolean {
     const messages = this.#messagesById();
-    return this.#state.deliveries.some(
+    return this.#deliveriesFor(agentId).some(
       (delivery) =>
         delivery.recipientAgentId === agentId &&
         (delivery.status === "starting" || delivery.status === "running") &&
@@ -1232,7 +1250,7 @@ export class MailboxStore {
 
   /** Whether a message of this task is queued, starting or running. */
   taskBusy(agentId: string, taskId: string): boolean {
-    return this.#state.deliveries.some(
+    return this.#deliveriesFor(agentId).some(
       (delivery) =>
         delivery.recipientAgentId === agentId && isActiveDelivery(delivery) && this.#taskIdOf(delivery) === taskId,
     );
@@ -2005,13 +2023,27 @@ export class MailboxStore {
   nextQueued(agentId: string, taskId: string | null = null, lanes?: MailboxLanes): DeliveryContext | null {
     if ((lanes ?? this).laneActive(agentId, taskId)) return null;
     const messages = this.#messagesById();
+    const delivery = this.#queuedHead(agentId, taskId, messages, lanes);
+    return delivery ? this.#context(delivery, lanes?.positions(agentId), messages) : null;
+  }
+
+  hasQueuedHead(agentId: string, taskId: string | null = null): boolean {
+    return this.#queuedHead(agentId, taskId, this.#messagesById()) !== null;
+  }
+
+  #queuedHead(
+    agentId: string,
+    taskId: string | null,
+    messages: ReadonlyMap<string, StoredMessage>,
+    lanes?: MailboxLanes,
+  ): StoredDelivery | null {
     const queued = lanes ? lanes.queuedFor(agentId) : this.#queuedFor(agentId);
     const eligible = (candidate: StoredDelivery) =>
       this.#taskIdOf(candidate, messages) === taskId && !this.#isHeldReply(candidate, messages);
     const delivery =
       queued.find((candidate) => messages.get(candidate.messageId)?.channelId && eligible(candidate)) ??
       queued.find(eligible);
-    return delivery && this.#mayStart(delivery) ? this.#context(delivery, lanes?.positions(agentId), messages) : null;
+    return delivery && this.#mayStart(delivery) ? delivery : null;
   }
 
   /**
@@ -2150,7 +2182,7 @@ export class MailboxStore {
   }
 
   #queuedFor(agentId: string): StoredDelivery[] {
-    return this.#state.deliveries
+    return this.#deliveriesFor(agentId)
       .filter((candidate) => candidate.recipientAgentId === agentId && candidate.status === "queued")
       .sort(compareQueueOrder);
   }
@@ -2259,7 +2291,7 @@ export class MailboxStore {
    * conversation. A request steered into a running turn does not count: the user can watch that turn.
    */
   answersMessagingRequest(agentId: string, turnId: string): boolean {
-    return this.#state.deliveries.some(
+    return this.#deliveriesFor(agentId).some(
       (delivery) =>
         delivery.recipientAgentId === agentId &&
         delivery.turnId === turnId &&
@@ -3135,7 +3167,7 @@ export class MailboxStore {
    * deletion would take its message and files away while it waited.
    */
   hasUnfinishedDelivery(agentId: string): boolean {
-    return this.#state.deliveries.some(
+    return this.#deliveriesFor(agentId).some(
       (delivery) =>
         delivery.recipientAgentId === agentId &&
         (delivery.status === "queued" || delivery.status === "starting" || delivery.status === "running"),
@@ -3145,7 +3177,7 @@ export class MailboxStore {
   /** As {@link hasUnfinishedDelivery}, without the work of the agent's tasks, which run in their own threads. */
   hasUnfinishedDeliveryOutsideTasks(agentId: string): boolean {
     const messages = this.#messagesById();
-    return this.#state.deliveries.some(
+    return this.#deliveriesFor(agentId).some(
       (delivery) =>
         delivery.recipientAgentId === agentId &&
         isActiveDelivery(delivery) &&
@@ -3155,7 +3187,7 @@ export class MailboxStore {
 
   /** As {@link hasUnfinishedDelivery}, without the `queued` deliveries that a usage limit holds. */
   hasStartedDelivery(agentId: string): boolean {
-    return this.#state.deliveries.some(
+    return this.#deliveriesFor(agentId).some(
       (delivery) =>
         delivery.recipientAgentId === agentId && (delivery.status === "starting" || delivery.status === "running"),
     );

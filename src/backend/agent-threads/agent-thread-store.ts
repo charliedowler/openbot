@@ -16,6 +16,7 @@ import {
   optionalStringColumn,
   requiredStringColumn,
 } from "../database/database-rows";
+import { preparedForGetOrAll } from "../database/prepared-statements";
 import { refreshThreadOrder } from "../database/thread-message-order";
 import type { OpenBotDatabase } from "../openbot-database";
 
@@ -102,9 +103,10 @@ export class AgentThreadStore {
   /** The thread by its task id: the legacy task id, or the thread id of a newer thread. */
   task(taskId: string): AgentThreadRecord | null {
     const row = databaseRow(
-      this.#database.connection
-        .prepare(`${SELECT_THREAD} WHERE legacy_task_id = ? OR (legacy_task_id IS NULL AND thread_id = ?)`)
-        .get(taskId, taskId),
+      preparedForGetOrAll(
+        this.#database.connection,
+        `${SELECT_THREAD} WHERE legacy_task_id = ? OR (legacy_task_id IS NULL AND thread_id = ?)`,
+      ).get(taskId, taskId),
     );
     return row ? decodeThread(row) : null;
   }
@@ -158,12 +160,11 @@ export class AgentThreadStore {
   /** The task ids of the open threads of this agent, oldest first, so a thread that waits longer starts first. */
   openTaskIds(agentId: string): string[] {
     return databaseRows(
-      this.#database.connection
-        .prepare(
-          `SELECT COALESCE(legacy_task_id, thread_id) AS task_id FROM projection_agent_threads
+      preparedForGetOrAll(
+        this.#database.connection,
+        `SELECT COALESCE(legacy_task_id, thread_id) AS task_id FROM projection_agent_threads
            WHERE agent_id = ? AND archived_at IS NULL ORDER BY created_at, thread_id`,
-        )
-        .all(agentId),
+      ).all(agentId),
     ).map((row) => requiredStringColumn(row, "task_id"));
   }
 

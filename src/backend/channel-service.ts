@@ -2072,9 +2072,9 @@ export class ChannelService {
    * The work of other agents and the agent's tasks do not hold it.
    */
   mayDrain(agentId: string): boolean {
+    if (!this.store.hasAgentAssignmentInState(agentId, ACTIVE_ASSIGNMENT_STATES)) return true;
     const next = this.mailbox.nextQueued(agentId);
-    if (next && this.store.assignmentForDelivery(next.delivery.id)) return true;
-    return !this.store.hasAgentAssignmentInState(agentId, ACTIVE_ASSIGNMENT_STATES);
+    return Boolean(next && this.store.assignmentForDelivery(next.delivery.id));
   }
 
   /**

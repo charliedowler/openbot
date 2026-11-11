@@ -28,6 +28,7 @@ import {
   requiredNumberColumn,
   requiredStringColumn,
 } from "./database/database-rows";
+import { preparedForGetOrAll } from "./database/prepared-statements";
 import type { OpenBotDatabase } from "./openbot-database";
 import { noteCallTime } from "./slow-calls";
 import { revokeRoutineWebhooks } from "./webhook-route-store";
@@ -154,6 +155,7 @@ export class ChannelStore {
   readonly #assignments = new Map<string, readonly ChannelAssignment[]>();
   readonly #messageFlags = new Map<string, Map<string, MessageFlags>>();
   readonly #agentAssignments = new Map<string, { assignment: ChannelAssignment; channelId: string } | null>();
+  readonly #agentHasAssignment = new Map<string, boolean>();
 
   constructor(
     readonly database: OpenBotDatabase,
@@ -167,9 +169,10 @@ export class ChannelStore {
 
   get(channelId: string): Channel {
     const row = databaseRow(
-      this.database.connection
-        .prepare("SELECT channel_json FROM projection_channels WHERE channel_id = ?")
-        .get(channelId),
+      preparedForGetOrAll(
+        this.database.connection,
+        "SELECT channel_json FROM projection_channels WHERE channel_id = ?",
+      ).get(channelId),
     );
     if (!row) throw new Error(sourceText("error.backend.channelNotFound"));
     return decodeChannel(JSON.parse(requiredStringColumn(row, "channel_json")));
@@ -420,11 +423,10 @@ export class ChannelStore {
   /** One message by id, read through the primary key rather than the whole history. A deleted message is null. */
   message(channelId: string, messageId: string): ChannelMessage | null {
     const row = databaseRow(
-      this.database.connection
-        .prepare(
-          `SELECT message_json FROM projection_channel_messages WHERE channel_id = ? AND message_id = ? AND ${SHOWN_MESSAGE_SQL}`,
-        )
-        .get(channelId, messageId),
+      preparedForGetOrAll(
+        this.database.connection,
+        `SELECT message_json FROM projection_channel_messages WHERE channel_id = ? AND message_id = ? AND ${SHOWN_MESSAGE_SQL}`,
+      ).get(channelId, messageId),
     );
     if (!row) return null;
     const value = JSON.parse(requiredStringColumn(row, "message_json"));
@@ -435,9 +437,10 @@ export class ChannelStore {
   /** One task by id, read through the primary key rather than every task of the channel. */
   task(channelId: string, taskId: string): ChannelTask | null {
     const row = databaseRow(
-      this.database.connection
-        .prepare("SELECT task_json FROM projection_channel_tasks WHERE channel_id = ? AND task_id = ?")
-        .get(channelId, taskId),
+      preparedForGetOrAll(
+        this.database.connection,
+        "SELECT task_json FROM projection_channel_tasks WHERE channel_id = ? AND task_id = ?",
+      ).get(channelId, taskId),
     );
     if (!row) return null;
     const value = JSON.parse(requiredStringColumn(row, "task_json"));
@@ -507,16 +510,20 @@ export class ChannelStore {
   /** `hasAssignmentInState` for the assignments of one agent. `mayDrain` asks this on every queue check. */
   hasAgentAssignmentInState(agentId: string, states: readonly ChannelAssignment["state"][]): boolean {
     if (!states.length) return false;
+    const db = this.database.connection;
+    const key = JSON.stringify([agentId, states]);
+    const known = db.isTransaction ? undefined : this.#agentHasAssignment.get(key);
+    if (known !== undefined) return known;
     const placeholders = states.map(() => "?").join(", ");
-    return (
-      this.database.connection
-        .prepare(
-          `SELECT 1 FROM projection_channel_assignments
+    const found =
+      preparedForGetOrAll(
+        db,
+        `SELECT 1 FROM projection_channel_assignments
             WHERE json_extract(assignment_json, '$.agentId') = ?
               AND json_extract(assignment_json, '$.state') IN (${placeholders}) LIMIT 1`,
-        )
-        .get(agentId, ...states) !== undefined
-    );
+      ).get(agentId, ...states) !== undefined;
+    if (!db.isTransaction) this.#agentHasAssignment.set(key, found);
+    return found;
   }
 
   /**
@@ -533,10 +540,11 @@ export class ChannelStore {
   ): { assignment: ChannelAssignment; channel: Channel } | null {
     if (!states.length) return null;
     const key = JSON.stringify([agentId, states]);
-    let found = this.#agentAssignments.get(key);
+    const inTransaction = this.database.connection.isTransaction;
+    let found = inTransaction ? undefined : this.#agentAssignments.get(key);
     if (found === undefined) {
       found = this.#readAgentAssignment(agentId, states);
-      this.#agentAssignments.set(key, found);
+      if (!inTransaction) this.#agentAssignments.set(key, found);
     }
     return found ? { assignment: { ...found.assignment }, channel: this.get(found.channelId) } : null;
   }
@@ -570,9 +578,10 @@ export class ChannelStore {
 
   assignmentForDelivery(deliveryId: string): ChannelAssignment | null {
     const row = databaseRow(
-      this.database.connection
-        .prepare("SELECT assignment_json FROM projection_channel_assignments WHERE delivery_id = ?")
-        .get(deliveryId),
+      preparedForGetOrAll(
+        this.database.connection,
+        "SELECT assignment_json FROM projection_channel_assignments WHERE delivery_id = ?",
+      ).get(deliveryId),
     );
     return row ? decodeAssignment(JSON.parse(requiredStringColumn(row, "assignment_json"))) : null;
   }
@@ -1167,7 +1176,10 @@ export class ChannelStore {
     if (change.tasks.length > 0)
       for (const owner of this.#ownerChannels("projection_channel_tasks", "task_id", change.tasks, channelId))
         this.#tasks.delete(owner);
-    if (change.assignments.length > 0) this.#agentAssignments.clear();
+    if (change.assignments.length > 0) {
+      this.#agentAssignments.clear();
+      this.#agentHasAssignment.clear();
+    }
     if (change.assignments.length > 0)
       for (const owner of this.#ownerChannels(
         "projection_channel_assignments",
@@ -1206,6 +1218,7 @@ export class ChannelStore {
 
   #forget(channelId: string): void {
     this.#agentAssignments.clear();
+    this.#agentHasAssignment.clear();
     this.#tasks.delete(channelId);
     this.#assignments.delete(channelId);
     this.#messageFlags.delete(channelId);

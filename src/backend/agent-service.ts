@@ -1312,8 +1312,9 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
       // of the agent at a time. A delivery of its own chat that starts has no turn ID yet, and it
       // makes the agent busy too: otherwise the assignment waits as "starting" for that turn (#4761).
       busy: (agentId) =>
-        Boolean(this.#conversation.workingSnapshot(agentId)?.activeTurnId || this.#mailbox.nextQueued(agentId)) ||
+        Boolean(this.#conversation.workingSnapshot(agentId)?.activeTurnId) ||
         this.#mailbox.laneActive(agentId, null) ||
+        this.#mailbox.hasQueuedHead(agentId) ||
         (this.#tasks.oneTurnAtATime(agentId) &&
           this.#conversation.workingTaskSnapshots(agentId).some((snapshot) => snapshot.activeTurnId)) ||
         !this.#usageLimits.mayDrain(agentId),
