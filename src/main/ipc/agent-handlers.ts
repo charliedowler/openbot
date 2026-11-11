@@ -518,7 +518,7 @@ export function agentIpcHandlers({
       listChannels: scopedQueryHandler({
         // The reader here is the host user of this computer, so messages they wrote before they
         // signed in are their own.
-        local: () => service.channels.store.list(host.channelActor().id, true),
+        local: () => service.channels.listChannels(host.channelActor().id, true),
         remote: (serverId) =>
           runCauseEffect(remoteServers.request(serverId, CHANNEL_ROUTES.list, decodeChannelSummaries)),
       }),

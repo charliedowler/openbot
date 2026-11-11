@@ -1360,6 +1360,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
         this.#routineTimer.arm();
         this.#emit({ type: "channels-changed", channelId, revision });
       },
+      relisted: (channelId, revision) => this.#emit({ type: "channels-changed", channelId, revision }),
       memoriesChanged: (channelId) => this.#emit({ type: "channel-memories-changed", channelId }),
       ...(options.channelPersonAgentLevel ? { personAgentLevel: options.channelPersonAgentLevel } : {}),
       ...(options.channelRemotePerson ? { remotePerson: options.channelRemotePerson } : {}),

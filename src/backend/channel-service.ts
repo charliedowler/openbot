@@ -18,6 +18,7 @@ import {
   type ChannelMemory,
   type ChannelMessage,
   type ChannelRoutingConversationEventAction,
+  type ChannelSummary,
   type ChannelTask,
   type ConversationSnapshot,
   type CreateChannelMemoryInput,
@@ -49,6 +50,7 @@ import {
   sameRequest,
 } from "./channel-history";
 import type { ChannelImages } from "./channel-images";
+import { ChannelListBatch } from "./channel-list-batch";
 import {
   CHANNEL_MANAGEMENT_TOOLS,
   type ChannelChangeNote,
@@ -127,6 +129,8 @@ export interface ChannelHooks {
     text: string,
   ): Effect.Effect<"accepted" | "rejected" | "uncertain", ChannelOperationError>;
   changed(channelId: string, revision: number): void;
+  relisted?(channelId: string, revision: number): void;
+  listBatchMs?: number;
   /** The channel work that queues wait behind has changed, so every held queue needs a new hold. */
   queueHoldChanged?(): void;
   /** A memory is not part of the channel revision, so a tool write needs its own notification. */
@@ -223,6 +227,7 @@ export class ChannelService {
   readonly store: ChannelStore;
   readonly memories: ChannelMemoryStore;
   readonly #history: ChannelHistory;
+  readonly #lists: ChannelListBatch;
   #scope = Scope.makeUnsafe();
   readonly #pumps = new Map<string, Fiber.Fiber<void>>();
   readonly #commands = new Map<string, Deferred.Deferred<void>>();
@@ -289,6 +294,20 @@ export class ChannelService {
       this.memories,
       (error) => hooks.failureCause?.(error) ?? [],
     );
+    this.#lists = new ChannelListBatch(
+      (memberId, signedOutMessagesAreTheirs) => this.store.list(memberId, signedOutMessagesAreTheirs),
+      (channelId, revision) => (hooks.relisted ?? hooks.changed)(channelId, revision),
+      hooks.listBatchMs,
+    );
+  }
+
+  listChannels(memberId: string, signedOutMessagesAreTheirs = false): ChannelSummary[] {
+    return this.#lists.list(memberId, signedOutMessagesAreTheirs);
+  }
+
+  #changed(channelId: string, revision: number): void {
+    this.#lists.changed(channelId, revision);
+    this.hooks.changed(channelId, revision);
   }
 
   /**
@@ -517,7 +536,7 @@ export class ChannelService {
           this.#wakeAgain.delete(channelId);
           this.#waitingForAgents.delete(channelId);
           yield* this.#releaseHeldAgents(agentIds);
-          this.hooks.changed(channelId, channel.revision + 1);
+          this.#changed(channelId, channel.revision + 1);
         }).pipe(Effect.ensuring(Effect.sync(() => this.#deletedChannels.delete(channelId))));
       }),
     ),
@@ -4206,7 +4225,7 @@ export class ChannelService {
 
   private publish(channelId: string): void {
     this.#compactLater(channelId);
-    this.hooks.changed(channelId, this.store.get(channelId).revision);
+    this.#changed(channelId, this.store.get(channelId).revision);
     this.#syncQueueHolds(channelId);
   }
 
@@ -4236,6 +4255,7 @@ export class ChannelService {
     this: ChannelService,
   ): Effect.fn.Return<void, ChannelOperationError> {
     this.#stopped = true;
+    this.#lists.stop();
     for (const timer of this.#stopTimers.values()) clearTimeout(timer);
     for (const timer of this.#compactTimers.values()) clearTimeout(timer);
     this.#compactTimers.clear();

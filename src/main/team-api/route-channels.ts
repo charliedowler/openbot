@@ -72,7 +72,7 @@ export async function routeChannels(
   if (list)
     return json(
       200,
-      channels.store.list(member.id).filter((channel) => seesChannel(channel.members, channelHiddenAgentIds)),
+      channels.listChannels(member.id).filter((channel) => seesChannel(channel.members, channelHiddenAgentIds)),
     );
   if (read) {
     const input = parseChannelRead(channelRequest(url.pathname, await readJson(request)));
