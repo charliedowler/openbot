@@ -3279,24 +3279,61 @@ export class ChannelService {
         let cancelledDeliveries = 0;
         let cancelledWaits = 0;
         const covered = new Set<string>();
+        const originalRequest = this.store.message(channelId, requestMessageId);
+        const originalTask = tasks.find((task) => task.id === originalRequest?.taskId);
+        if (
+          originalTask &&
+          originalTask.requestMessageId !== requestMessageId &&
+          descendants(tasks, originalTask.rootTaskId, true).some((task) => !terminal(task))
+        )
+          refusals.push({ id: originalTask.id, reason: "unrelated-branch" });
         for (const root of roots) {
           const branch = descendants(tasks, root.id, true);
           const ids = new Set(branch.map((task) => task.id));
           for (const id of ids) covered.add(id);
-          const history = this.store.assignments(channelId).filter((assignment) => ids.has(assignment.taskId));
-          const assignments = history.filter((assignment) => assignment.requestMessageId === requestMessageId);
+          const channelAssignments = this.store.assignments(channelId);
+          const requests = new Map([[root.id, requestMessageId]]);
+          for (let changed = true; changed; ) {
+            changed = false;
+            for (const task of branch) {
+              if (requests.has(task.id) || task.parentTaskId === null || task.rootTaskId !== root.id) continue;
+              const parentRequest = requests.get(task.parentTaskId);
+              if (parentRequest === undefined) continue;
+              const parent = branch.find((candidate) => candidate.id === task.parentTaskId);
+              const reply = isReplyTask(task) ? this.store.message(channelId, task.requestMessageId) : null;
+              const linkedReply =
+                parent?.dependencies.includes(task.id) &&
+                reply?.taskId === parent.id &&
+                reply.author.kind === "agent" &&
+                reply.message.turnId !== undefined &&
+                channelAssignments.some(
+                  (assignment) =>
+                    assignment.taskId === parent.id &&
+                    assignment.requestMessageId === parentRequest &&
+                    assignment.turnId === reply.message.turnId &&
+                    assignment.agentId === reply.author.id,
+                );
+              if (task.requestMessageId !== parentRequest && !linkedReply) continue;
+              requests.set(task.id, task.requestMessageId);
+              changed = true;
+            }
+          }
+          const history = channelAssignments.filter((assignment) => ids.has(assignment.taskId));
+          const assignments = history.filter(
+            (assignment) => assignment.requestMessageId === requests.get(assignment.taskId),
+          );
           if (
+            requests.size !== branch.length ||
             history.some(
               (assignment) =>
                 assignment.requestMessageId === null ||
-                (assignment.requestMessageId !== requestMessageId &&
+                (assignment.requestMessageId !== requests.get(assignment.taskId) &&
                   (activeAssignment(assignment) ||
                     (assignment.deliveryId !== null &&
                       ["queued", "starting", "running"].includes(
                         this.mailbox.getDelivery(assignment.deliveryId)?.delivery.status ?? "",
                       )))),
             ) ||
-            branch.some((task) => task.requestMessageId !== requestMessageId) ||
             tasks.some(
               (task) =>
                 !ids.has(task.id) && !terminal(task) && task.dependencies.some((dependency) => ids.has(dependency)),
@@ -3330,15 +3367,8 @@ export class ChannelService {
             (deliveryId) => this.mailbox.getDelivery(deliveryId)?.delivery.status === "queued",
           );
           if (open.length)
-            yield* this.#cancelTasks(
-              this.store.get(channelId),
-              open,
-              `${operationId}:${root.id}`,
-              [],
-              false,
-              requestMessageId,
-            );
-          yield* this.interruptTasks(channelId, branch, { requestMessageId });
+            yield* this.#cancelTasks(this.store.get(channelId), open, `${operationId}:${root.id}`, [], false, requests);
+          yield* this.interruptTasks(channelId, branch, { requests });
           cancelledWaits += this.hooks.cancelEventWaits?.(deliveries) ?? 0;
           cancelledTasks += open.length;
           cancelledDeliveries += queued.filter(
@@ -3361,7 +3391,7 @@ export class ChannelService {
     operationId: string,
     messages: ChannelMessage[] = [],
     wake = true,
-    requestMessageId?: string,
+    requests?: ReadonlyMap<string, string>,
   ) {
     const result = yield* channelSync(() =>
       this.store.update(
@@ -3376,7 +3406,7 @@ export class ChannelService {
       ),
     );
     this.publish(channel.id);
-    yield* this.interruptTasks(channel.id, cancelled, { requestMessageId });
+    yield* this.interruptTasks(channel.id, cancelled, { requests });
     if (wake) yield* this.wake(channel.id);
     return result;
   });
@@ -4077,12 +4107,12 @@ export class ChannelService {
     this: ChannelService,
     channelId: string,
     tasks: ChannelTask[],
-    options: { staleOnly?: boolean; requestMessageId?: string } = {},
+    options: { staleOnly?: boolean; requests?: ReadonlyMap<string, string> } = {},
   ): Effect.fn.Return<void, ChannelOperationError> {
     for (let assignment of yield* channelSync(() => this.store.assignments(channelId))) {
       const task = tasks.find((item) => item.id === assignment.taskId);
       if (!task || !activeAssignment(assignment)) continue;
-      if (options.requestMessageId !== undefined && assignment.requestMessageId !== options.requestMessageId) continue;
+      if (options.requests !== undefined && assignment.requestMessageId !== options.requests.get(task.id)) continue;
       if (options.staleOnly && assignment.taskRevision >= task.revision) continue;
       if (assignment.pendingRevision !== null) {
         const pendingOutcome = assignment.pendingOutcome;
@@ -4121,7 +4151,7 @@ export class ChannelService {
       } else if (assignment.deliveryId) {
         const delivery = this.mailbox.getDelivery(assignment.deliveryId);
         const queued = delivery?.delivery.status === "queued";
-        const cancelledByRequest = options.requestMessageId !== undefined && delivery?.delivery.status === "cancelled";
+        const cancelledByRequest = options.requests !== undefined && delivery?.delivery.status === "cancelled";
         if (queued || cancelledByRequest) {
           if (queued) {
             const deliveryId = assignment.deliveryId;

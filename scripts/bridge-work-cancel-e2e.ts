@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { AGENT_PROVIDERS, type ChannelTask } from "@openbot/contracts/ipc";
+import { AGENT_PROVIDERS, type ChannelMessage, type ChannelTask } from "@openbot/contracts/ipc";
 import type { EventJsonValue } from "@openbot/contracts/ipc-events";
 import { Effect } from "effect";
 import type { AgentBrowserHost } from "../src/backend/agent/turn-lifecycle";
@@ -183,6 +183,9 @@ try {
   };
   const lifecycle = await save("bridge.work.lifecycle");
   const inbox = await save(null);
+  const replyRecipient = await runCauseEffect(
+    store.createAgent({ name: "Reply recipient", description: "Fixture", avatarSeed: "reply", avatarHue: null }),
+  );
   const channelId = randomUUID();
   await runCauseEffect(
     agents.channels.command(
@@ -194,7 +197,7 @@ try {
           name: "Fixture channel",
           title: "",
           instructions: "Fixture",
-          members: [{ agentId: owner.id }],
+          members: [{ agentId: owner.id }, { agentId: replyRecipient.id }],
           leadAgentId: owner.id,
         },
       },
@@ -354,7 +357,7 @@ try {
     const receipt = await runCauseEffect(
       mailbox.enqueue({
         sender: { kind: "user" },
-        recipientAgentIds: [owner.id],
+        recipientAgentIds: [task.ownerAgentId ?? owner.id],
         text: "Fixture channel assignment",
         draftIds: [],
         channelId,
@@ -372,7 +375,7 @@ try {
       id: randomUUID(),
       channelId,
       taskId: task.id,
-      agentId: owner.id,
+      agentId: task.ownerAgentId ?? owner.id,
       taskRevision: task.revision,
       requestMessageId,
       resources: [],
@@ -394,9 +397,9 @@ try {
       .prepare(
         "INSERT INTO agent_waits(wait_id,agent_id,request_delivery_id,request_text,note,routine_id,created_at) VALUES(?,?,?,?,?,?,?)",
       )
-      .run(id, owner.id, assignment.deliveryId, "Fixture", "Fixture", null, new Date().toISOString());
+      .run(id, assignment.agentId, assignment.deliveryId, "Fixture", "Fixture", null, new Date().toISOString());
   };
-  const hasWait = (id: string) => agents.listWaits(owner.id).waits.some((wait) => wait.id === id);
+  const hasWait = (id: string, agentId = owner.id) => agents.listWaits(agentId).waits.some((wait) => wait.id === id);
   await check("open waits and child branches", async () => {
     await work("channel-work", "channel-dispatch", channelInbox);
     await until(() => Boolean(taskFor("channel-work")));
@@ -417,6 +420,103 @@ try {
     assert.equal(hasWait("channel:fixture-wait"), false);
     assert.equal(JSON.parse(response.body ?? "null")?.results[0]?.cancelledTasks, 2);
     assert.equal(JSON.parse(response.body ?? "null")?.results[0]?.cancelledWaits, 1);
+  });
+  const replyBranch = async (key: string) => {
+    await work(`${key}-work`, `${key}-dispatch`, channelInbox);
+    await until(() => Boolean(taskFor(`${key}-work`)));
+    const rootTask = taskFor(`${key}-work`);
+    assert.ok(rootTask);
+    const parentAssignment = await assignmentFor(rootTask, `${key}-parent`);
+    const turnId = `${key}-native-turn`;
+    const targetId = `${key}-target-message`;
+    const target: ChannelMessage = {
+      id: targetId,
+      channelId,
+      taskId: rootTask.id,
+      author: { kind: "agent", id: replyRecipient.id, name: replyRecipient.name },
+      sequence: 0,
+      superseded: false,
+      message: {
+        id: targetId,
+        text: "Fixture recipient question.",
+        author: "assistant",
+        createdAt: new Date().toISOString(),
+        status: "completed",
+      },
+    };
+    agents.channels.store.update(agents.channels.store.get(channelId), {
+      tasks: [{ ...rootTask, ownerAgentId: owner.id, state: "running" }],
+      assignments: [{ ...parentAssignment, state: "running", turnId }],
+      messages: [target],
+    });
+    const response = await runCauseEffect(
+      agents.channels.tool(channelId, owner.id, turnId, `${key}-reply-call`, "channel_reply", {
+        messageId: targetId,
+        text: "Fixture reply needs an answer.",
+      }),
+    );
+    assert.equal(JSON.stringify(response).includes('"accepted":true'), true);
+    const parent = agents.channels.store.task(channelId, rootTask.id);
+    const child = agents.channels.store
+      .tasks(channelId)
+      .find((task) => task.parentTaskId === rootTask.id && task.requestMessageId.startsWith("channel-reply-"));
+    assert.ok(parent && child);
+    agents.channels.store.update(agents.channels.store.get(channelId), {
+      tasks: [{ ...parent, state: "waiting" }],
+      assignments: [{ ...parentAssignment, state: "completed", turnId }],
+    });
+    return { parent, child, parentAssignment };
+  };
+  await check("queued native reply child closes with its original branch", async () => {
+    const { parent, child, parentAssignment } = await replyBranch("reply-child");
+    const childAssignment = await assignmentFor(child, "reply-child-queued", "queued");
+    const historical = await assignmentFor(child, "reply-child-history", "completed", "older-reply-request");
+    openWait(parentAssignment, "channel:reply-parent-wait");
+    openWait(childAssignment, "channel:reply-child-wait");
+    openWait(historical, "channel:reply-history-wait");
+    const response = await cancel("reply-child-key", { dispatchId: "reply-child-dispatch" });
+    assert.equal(JSON.parse(response.body ?? "null")?.results[0]?.refusals.length, 0);
+    assert.equal(agents.channels.store.task(channelId, parent.id)?.state, "cancelled");
+    assert.equal(agents.channels.store.task(channelId, child.id)?.state, "cancelled");
+    assert.equal(mailbox.getDelivery(childAssignment.deliveryId ?? "")?.delivery.status, "cancelled");
+    assert.equal(
+      agents.channels.store.assignments(channelId).find((item) => item.id === childAssignment.id)?.state,
+      "interrupted",
+    );
+    assert.equal(hasWait("channel:reply-parent-wait"), false);
+    assert.equal(hasWait("channel:reply-child-wait", childAssignment.agentId), false);
+    assert.equal(hasWait("channel:reply-history-wait", historical.agentId), true);
+    assert.equal(JSON.parse(response.body ?? "null")?.results[0]?.cancelledTasks, 2);
+  });
+  await check("reply from a historical parent assignment is refused", async () => {
+    const { parent, child, parentAssignment } = await replyBranch("historical-origin");
+    const assignment = await assignmentFor(child, "historical-origin-queued", "queued");
+    openWait(assignment, "channel:historical-origin-wait");
+    const saved = agents.channels.store.assignments(channelId).find((item) => item.id === parentAssignment.id);
+    assert.ok(saved);
+    agents.channels.store.update(agents.channels.store.get(channelId), {
+      assignments: [{ ...saved, requestMessageId: "older-parent-request" }],
+    });
+    const response = await cancel("historical-origin-key", { dispatchId: "historical-origin-dispatch" });
+    assert.equal(JSON.parse(response.body ?? "null")?.results[0]?.refusals[0]?.reason, "unrelated-branch");
+    assert.equal(agents.channels.store.task(channelId, parent.id)?.state, "waiting");
+    assert.equal(agents.channels.store.task(channelId, child.id)?.state, child.state);
+    assert.equal(mailbox.getDelivery(assignment.deliveryId ?? "")?.delivery.status, "queued");
+    assert.equal(hasWait("channel:historical-origin-wait", assignment.agentId), true);
+  });
+  await check("reused parent refuses historical native reply child", async () => {
+    const { parent, child } = await replyBranch("historical-reply");
+    const assignment = await assignmentFor(child, "historical-reply-queued", "queued");
+    openWait(assignment, "channel:historical-reply-wait");
+    agents.channels.store.update(agents.channels.store.get(channelId), {
+      tasks: [{ ...parent, requestMessageId: "newer-parent-request", state: "waiting" }],
+    });
+    const response = await cancel("historical-reply-key", { dispatchId: "historical-reply-dispatch" });
+    assert.equal(JSON.parse(response.body ?? "null")?.results[0]?.refusals[0]?.reason, "unrelated-branch");
+    assert.equal(agents.channels.store.task(channelId, parent.id)?.requestMessageId, "newer-parent-request");
+    assert.equal(agents.channels.store.task(channelId, child.id)?.state, child.state);
+    assert.equal(mailbox.getDelivery(assignment.deliveryId ?? "")?.delivery.status, "queued");
+    assert.equal(hasWait("channel:historical-reply-wait", assignment.agentId), true);
   });
   await check("failed cancellation retries terminal descendants", async () => {
     await work("retry-channel-work", "retry-channel-dispatch", channelInbox);
