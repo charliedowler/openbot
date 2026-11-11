@@ -66,6 +66,7 @@ const HISTORY_MESSAGE_CHARACTERS = 16_000;
 /** The most of a task instruction or expected result that one history page shows. */
 const HISTORY_TASK_CHARACTERS = 2_000;
 const HISTORY_HEAD_SHARE = 0.75;
+const LAST_MESSAGE_PAGE = 50;
 
 const logger = createOpenBotLogger("channel-history");
 const SUMMARY_FIRM_TARGET_CHARACTERS = 4_000;
@@ -154,8 +155,21 @@ function newest(messages: ChannelMessage[], limit: number): { kept: ChannelMessa
  * chat." or the result again, only repeats it. A turn that posted a member reply is the same: it
  * continues with the answer, so a note such as "I will report back" tells the next model nothing.
  */
-function conversation(messages: ChannelMessage[]): ChannelMessage[] {
-  const resultTurns = new Set(
+function inConversation(message: ChannelMessage, resultTurns: ReadonlySet<string>): boolean {
+  return (
+    channelRoutingConversationEvent(message.message) === null &&
+    !isChannelChangeMarker(message.message) &&
+    !isMemberThinking(message) &&
+    !(
+      message.message.itemType === "commentary" &&
+      message.message.turnId !== undefined &&
+      resultTurns.has(message.message.turnId)
+    )
+  );
+}
+
+function resultTurnIds(messages: readonly ChannelMessage[]): Set<string> {
+  return new Set(
     messages.flatMap((message) =>
       (message.id.startsWith("channel-result-") || message.id.startsWith(CHANNEL_REPLY_ID_PREFIX)) &&
       message.message.turnId
@@ -163,17 +177,50 @@ function conversation(messages: ChannelMessage[]): ChannelMessage[] {
         : [],
     ),
   );
-  return messages.filter(
-    (message) =>
-      channelRoutingConversationEvent(message.message) === null &&
-      !isChannelChangeMarker(message.message) &&
-      !isMemberThinking(message) &&
-      !(
-        message.message.itemType === "commentary" &&
-        message.message.turnId !== undefined &&
-        resultTurns.has(message.message.turnId)
-      ),
+}
+
+function conversationPart(store: ChannelStore, channelId: string, messages: ChannelMessage[]): ChannelMessage[] {
+  const resultTurns = resultTurnIds(messages);
+  const open = messages.flatMap((message) =>
+    message.message.itemType === "commentary" && message.message.turnId && !resultTurns.has(message.message.turnId)
+      ? [message.message.turnId]
+      : [],
   );
+  if (open.length) for (const turnId of store.resultTurns(channelId, open)) resultTurns.add(turnId);
+  return messages.filter((message) => inConversation(message, resultTurns));
+}
+
+function recentMessages(store: ChannelStore, channelId: string, throughSequence: number): ChannelMessage[] {
+  return conversationPart(store, channelId, store.messages(channelId, undefined, undefined, throughSequence));
+}
+
+function lastConversationSequence(store: ChannelStore, channelId: string, throughSequence: number): number {
+  let before = throughSequence + 1;
+  for (;;) {
+    const page = store.messages(channelId, before, LAST_MESSAGE_PAGE);
+    const last = conversationPart(store, channelId, page).at(-1);
+    if (last) return last.sequence;
+    const first = page[0];
+    if (!first || page.length < LAST_MESSAGE_PAGE) return 0;
+    before = first.sequence;
+  }
+}
+
+function olderHolder(
+  store: ChannelStore,
+  channelId: string,
+  instruction: string,
+  throughSequence: number,
+): ChannelMessage | undefined {
+  const fragment = JSON.stringify(instruction).slice(1, -1);
+  const candidates = /\\ud[89a-f]/i.test(fragment)
+    ? store.messages(channelId, throughSequence + 1).reverse()
+    : store.messagesHolding(channelId, fragment, throughSequence);
+  return conversationPart(store, channelId, candidates).find((message) => message.message.text.includes(instruction));
+}
+
+function laterInHistory(a: ChannelMessage, b: ChannelMessage): boolean {
+  return a.sequence > b.sequence || (a.sequence === b.sequence && a.id > b.id);
 }
 
 /** The `channel_history` page that a model reads, as the store gives it. */
@@ -318,12 +365,11 @@ export function assignmentText(
 
 const STOPPED_TASK_LIMIT = 20;
 
-function stoppedTaskList(tasks: ChannelTask[], messages: ChannelMessage[], now = Date.now()) {
-  const byId = new Map(messages.map((message) => [message.id, message]));
+function stoppedTaskList(tasks: ChannelTask[], byId: ReadonlyMap<string, ChannelMessage | null>, now = Date.now()) {
   const stopped = tasks
     .filter((item) => item.state === "paused" || item.state === "failed")
     .map((item) => {
-      const request = byId.get(item.requestMessageId) ?? byId.get(item.sourceMessageIds[0] ?? "");
+      const request = byId.get(item.requestMessageId) ?? byId.get(item.sourceMessageIds[0] ?? "") ?? undefined;
       const requestedAt = request?.message.createdAt ?? null;
       const time = requestedAt ? Date.parse(requestedAt) : Number.NaN;
       return { item, requestedAt, time: Number.isNaN(time) ? null : time };
@@ -365,9 +411,8 @@ const summarize = Effect.fn("ChannelHistory.summarize")(function* (
   characterBudget: number,
 ) {
   const dependencies = yield* ChannelHistoryDependencies;
-  let messages = conversation(yield* channelSync(() => dependencies.store.messages(channelId)));
   let summary = yield* channelSync(() => dependencies.store.summary(channelId));
-  let recent = messages.filter((message) => message.sequence > summary.throughSequence);
+  let recent = yield* channelSync(() => recentMessages(dependencies.store, channelId, summary.throughSequence));
   let summaryPasses = 0;
   const limit = Math.floor(characterBudget * TRANSCRIPT_SHARE);
   while (render(recent).length > limit && recent.length > 1) {
@@ -434,10 +479,10 @@ const summarize = Effect.fn("ChannelHistory.summarize")(function* (
       };
       yield* channelSync(() => dependencies.store.saveSummary(channelId, summary));
     }
-    messages = conversation(yield* channelSync(() => dependencies.store.messages(channelId)));
-    recent = messages.filter((message) => message.sequence > summary.throughSequence);
+    const through = summary.throughSequence;
+    recent = yield* channelSync(() => recentMessages(dependencies.store, channelId, through));
   }
-  return { messages, summary, recent, summaryPasses };
+  return { summary, recent, summaryPasses };
 });
 
 /** Builds bounded context; every covered message remains available by its source ID. */
@@ -468,8 +513,7 @@ export class ChannelHistory {
    */
   needsSummary(channelId: string, requestedBudget = CONTEXT_CHARACTERS): boolean {
     const limit = Math.floor(Math.min(CONTEXT_CHARACTERS, requestedBudget) * TRANSCRIPT_SHARE);
-    const throughSequence = this.store.summary(channelId).throughSequence;
-    const recent = conversation(this.store.messages(channelId)).filter((message) => message.sequence > throughSequence);
+    const recent = recentMessages(this.store, channelId, this.store.summary(channelId).throughSequence);
     return render(recent).length > limit && recent.length > 1;
   }
 
@@ -520,33 +564,48 @@ export class ChannelHistory {
               reason: failure.cause instanceof Error ? failure.cause.message : String(failure.cause),
               cause: dependencies.failureCause?.(failure.cause),
             });
-            const messages = conversation(yield* channelSync(() => dependencies.store.messages(channel.id)));
             const summary = yield* channelSync(() => dependencies.store.summary(channel.id));
-            const recent = messages.filter((message) => message.sequence > summary.throughSequence);
-            return { messages, summary, recent, summaryPasses: 0 };
+            const recent = yield* channelSync(() =>
+              recentMessages(dependencies.store, channel.id, summary.throughSequence),
+            );
+            return { summary, recent, summaryPasses: 0 };
           }),
         ),
       );
-      const { messages, summary, summaryPasses } = summarized;
+      const { summary, summaryPasses } = summarized;
       let { recent } = summarized;
+      const store = dependencies.store;
+      const known = new Map<string, ChannelMessage | null>(recent.map((message) => [message.id, message]));
+      const lookUp = (ids: readonly string[]) => {
+        const missing = ids.filter((id) => !known.has(id));
+        if (!missing.length) return;
+        for (const id of missing) known.set(id, null);
+        for (const message of conversationPart(store, channel.id, store.messagesById(channel.id, missing)))
+          known.set(message.id, message);
+      };
+      const byId = (id: string) => known.get(id) ?? undefined;
       const memories = yield* channelSync(() => dependencies.memories.list(channel.id));
-      const request = messages.find((message) => message.id === task.requestMessageId);
+      yield* channelSync(() => lookUp([task.requestMessageId, ...task.sourceMessageIds.slice(0, 1)]));
+      const request = byId(task.requestMessageId);
       const tasks = yield* channelSync(() => dependencies.store.tasks(channel.id));
       // A typed "continue" makes the follow-up the request, so the siblings count from the first one.
-      const origin = messages.find((message) => message.id === task.sourceMessageIds[0]) ?? request;
+      const origin = byId(task.sourceMessageIds[0] ?? "") ?? request;
       // Members that answer one request each give their own view. The reply of a member that
       // finished first made the next one copy its first sentence, so the rows that the other tasks
       // of this request wrote after the request stay out until this assignment ends. After the
       // member gave its own view, a follow-up can ask about the others, so they show again. A note
       // between tool calls or a reply that a stop cut off is not that view.
-      const answered = messages.some(
-        (message) =>
-          message.author.kind === "agent" &&
-          message.taskId === task.id &&
-          message.message.text.trim() &&
-          (message.id.startsWith("channel-result-") ||
-            (message.message.status === "completed" && message.message.itemType !== "commentary")),
-      );
+      const answers = (message: ChannelMessage) =>
+        message.author.kind === "agent" &&
+        message.taskId === task.id &&
+        message.message.text.trim() &&
+        (message.id.startsWith("channel-result-") ||
+          (message.message.status === "completed" && message.message.itemType !== "commentary"));
+      const answered =
+        recent.some(answers) ||
+        (yield* channelSync(() =>
+          conversationPart(store, channel.id, store.taskMessages(channel.id, task.id, summary.throughSequence)),
+        )).some(answers);
       const siblings = new Set(
         task.parentTaskId === null && !answered
           ? tasks
@@ -562,11 +621,34 @@ export class ChannelHistory {
       const hidden = recent.find(sibling);
       const sources = new Set(task.sourceMessageIds);
       sources.add(task.requestMessageId);
-      for (const message of [...messages].reverse())
-        if (sources.has(message.id) && message.message.replyToMessageId) sources.add(message.message.replyToMessageId);
+      yield* channelSync(() => {
+        let cursor: ChannelMessage | null = null;
+        for (;;) {
+          lookUp([...sources]);
+          let next: ChannelMessage | null = null;
+          for (const id of sources) {
+            const message = byId(id);
+            if (!message || (cursor && !laterInHistory(cursor, message))) continue;
+            if (!next || laterInHistory(message, next)) next = message;
+          }
+          if (!next) return;
+          if (next.message.replyToMessageId) sources.add(next.message.replyToMessageId);
+          cursor = next;
+        }
+      });
       // Every source of the task is shown, wherever it is: a source between the summary and the
       // member's cursor was in no block, and the member saw only a short assignment (#3557).
       const isSource = (message: ChannelMessage) => sources.has(message.id) && !sibling(message);
+      if (agent.id === channel.leadAgentId)
+        yield* channelSync(() =>
+          lookUp(
+            tasks.flatMap((item) =>
+              item.state === "paused" || item.state === "failed"
+                ? [item.requestMessageId, ...item.sourceMessageIds.slice(0, 1)]
+                : [],
+            ),
+          ),
+        );
       // The complete packet is self-contained and bounded: the first packet of a provider session
       // must be. The delta gives a session only what it has not read: the session already has the
       // earlier messages, and a complete packet on each turn put the same history in its context
@@ -576,8 +658,11 @@ export class ChannelHistory {
       // A message that streams now is sent as it is, but the cursor stops before it, so the next
       // packet gives its final text. The cursor also stops before a hidden reply of another member,
       // so a later turn of this session gets it.
+      const lastSequence =
+        recent.at(-1)?.sequence ??
+        (yield* channelSync(() => lastConversationSequence(store, channel.id, summary.throughSequence)));
       const throughSequence = Math.min(
-        open ? open.sequence - 1 : (messages.at(-1)?.sequence ?? 0),
+        open ? open.sequence - 1 : lastSequence,
         hidden ? hidden.sequence - 1 : Number.POSITIVE_INFINITY,
       );
       recent = recent.filter((message) => !sibling(message));
@@ -616,7 +701,10 @@ export class ChannelHistory {
       const holds = (message: ChannelMessage) => message.message.text.includes(task.instruction);
       const holder =
         task.instruction.length > REPEATED_ASSIGNMENT_CHARACTERS
-          ? [request, ...[...messages].reverse()].find((message) => message !== undefined && holds(message))
+          ? request && holds(request)
+            ? request
+            : ([...recent].reverse().find(holds) ??
+              (yield* channelSync(() => olderHolder(store, channel.id, task.instruction, summary.throughSequence))))
           : undefined;
       const instruction =
         holder?.author.kind === "agent" && task.instruction.length > HANDOFF_INSTRUCTION_CHARACTERS
@@ -625,7 +713,8 @@ export class ChannelHistory {
       // The message that the request replies to. A reply can be only a mention, and only its
       // `replyToMessageId` joined it to the quote, so the member answered about other messages (#4841).
       const replyToMessageId = request?.message.replyToMessageId;
-      const replyTarget = replyToMessageId ? messages.find((message) => message.id === replyToMessageId) : undefined;
+      if (replyToMessageId) yield* channelSync(() => lookUp([replyToMessageId]));
+      const replyTarget = replyToMessageId ? byId(replyToMessageId) : undefined;
       const requested = `${assignmentText({ ...task, instruction }, request, origin)}\nExpected result: ${task.expectedResult}`;
       const quote = replyTarget?.message.text.trim() ?? "";
       // A reply to the message that made the task has the quote in the assignment already. The row of
@@ -692,11 +781,18 @@ export class ChannelHistory {
               );
         const { kept, omitted } = newest(withoutAssignment(unread), transcriptCharacters);
         const shown = new Set(kept.map((message) => message.id));
-        const referenced = withoutAssignment(messages.filter((message) => isSource(message) && !shown.has(message.id)));
+        const referenced = withoutAssignment(
+          [...sources]
+            .flatMap((id) => {
+              const message = byId(id);
+              return message && isSource(message) && !shown.has(message.id) ? [message] : [];
+            })
+            .sort((a, b) => (laterInHistory(a, b) ? 1 : laterInHistory(b, a) ? -1 : 0)),
+        );
         const first = omitted[0];
         const last = omitted.at(-1);
         const summaryShown = summary.throughSequence > (seen ?? 0);
-        const leadStoppedTasks = agent.id === channel.leadAgentId ? stoppedTaskList(tasks, messages) : null;
+        const leadStoppedTasks = agent.id === channel.leadAgentId ? stoppedTaskList(tasks, known) : null;
         const parts = {
           assignmentCharacters: assignment.length,
           memoryCharacters: memories.reduce((total, memory) => total + memory.text.length, 0),

@@ -16,9 +16,10 @@ import {
   SIGNED_OUT_CHANNEL_MEMBER_ID,
 } from "@openbot/contracts/ipc";
 import { markdownPreviewText } from "@openbot/contracts/markdown-preview-text";
-import { isDynamicRecord, isString } from "@openbot/contracts/runtime-values";
+import { type DynamicRecord, isDynamicRecord, isString } from "@openbot/contracts/runtime-values";
 import { sourceText } from "@openbot/i18n/source";
 import { changesModelContent } from "./channel-history";
+import { CHANNEL_REPLY_ID_PREFIX } from "./channel-replies";
 import { deleteAggregateHistory, deleteThreadAttachments } from "./database/database-core";
 import {
   databaseRow,
@@ -266,19 +267,94 @@ export class ChannelStore {
     );
   }
 
-  messages(channelId: string, before = Number.MAX_SAFE_INTEGER, limit?: number): ChannelMessage[] {
+  messages(
+    channelId: string,
+    before = Number.MAX_SAFE_INTEGER,
+    limit?: number,
+    after = Number.MIN_SAFE_INTEGER,
+  ): ChannelMessage[] {
     const rows = databaseRows(
       this.database.connection
         .prepare(
-          `SELECT message_json FROM projection_channel_messages WHERE channel_id = ? AND sequence < ? AND ${SHOWN_MESSAGE_SQL} ORDER BY sequence DESC, message_id DESC LIMIT ?`,
+          `SELECT message_json FROM projection_channel_messages WHERE channel_id = ? AND sequence < ? AND sequence > ? AND ${SHOWN_MESSAGE_SQL} ORDER BY sequence DESC, message_id DESC LIMIT ?`,
         )
-        .all(channelId, before, limit ?? -1),
+        .all(channelId, before, after, limit ?? -1),
     );
-    return rows.reverse().map((row) => {
-      const value = JSON.parse(requiredStringColumn(row, "message_json"));
-      if (!isChannelMessage(value)) throw new Error("Invalid stored channel message.");
-      return value;
-    });
+    return rows.reverse().map((row) => storedChannelMessage(row));
+  }
+
+  messagesById(channelId: string, messageIds: readonly string[]): ChannelMessage[] {
+    const unique = [...new Set(messageIds)];
+    const found: ChannelMessage[] = [];
+    for (let start = 0; start < unique.length; start += ID_BATCH) {
+      const batch = unique.slice(start, start + ID_BATCH);
+      found.push(
+        ...databaseRows(
+          this.database.connection
+            .prepare(
+              `SELECT message_json FROM projection_channel_messages WHERE channel_id = ? AND message_id IN (${batch.map(() => "?").join(", ")}) AND ${SHOWN_MESSAGE_SQL}`,
+            )
+            .all(channelId, ...batch),
+        ).map((row) => storedChannelMessage(row)),
+      );
+    }
+    return found.sort(compareChannelMessages);
+  }
+
+  resultTurns(channelId: string, turnIds: readonly string[]): Set<string> {
+    const unique = [...new Set(turnIds)].filter((turnId) => turnId.length > 0);
+    const found = new Set<string>();
+    for (let start = 0; start < unique.length; start += ID_BATCH) {
+      const batch = unique.slice(start, start + ID_BATCH);
+      for (const row of databaseRows(
+        this.database.connection
+          .prepare(
+            `SELECT json_extract(message_json, '$.message.turnId') AS turn_id FROM projection_channel_messages
+              WHERE channel_id = ?
+                AND ((message_id >= ? AND message_id < ?) OR (message_id >= ? AND message_id < ?))
+                AND ${SHOWN_MESSAGE_SQL}
+                AND json_extract(message_json, '$.message.turnId') IN (${batch.map(() => "?").join(", ")})`,
+          )
+          .all(
+            channelId,
+            CHANNEL_RESULT_ID_PREFIX,
+            prefixEnd(CHANNEL_RESULT_ID_PREFIX),
+            CHANNEL_REPLY_ID_PREFIX,
+            prefixEnd(CHANNEL_REPLY_ID_PREFIX),
+            ...batch,
+          ),
+      )) {
+        const turnId = row.turn_id;
+        if (typeof turnId === "string") found.add(turnId);
+      }
+    }
+    return found;
+  }
+
+  taskMessages(channelId: string, taskId: string, through: number): ChannelMessage[] {
+    return databaseRows(
+      this.database.connection
+        .prepare(
+          `SELECT message_json FROM projection_channel_messages
+            WHERE channel_id = ? AND sequence <= ? AND ${SHOWN_MESSAGE_SQL}
+              AND json_extract(message_json, '$.taskId') = ?
+              AND json_extract(message_json, '$.author.kind') = 'agent'
+            ORDER BY sequence, message_id`,
+        )
+        .all(channelId, through, taskId),
+    ).map((row) => storedChannelMessage(row));
+  }
+
+  messagesHolding(channelId: string, fragment: string, through: number): ChannelMessage[] {
+    return databaseRows(
+      this.database.connection
+        .prepare(
+          `SELECT message_json FROM projection_channel_messages
+            WHERE channel_id = ? AND sequence <= ? AND ${SHOWN_MESSAGE_SQL} AND instr(message_json, ?) > 0
+            ORDER BY sequence DESC, message_id DESC`,
+        )
+        .all(channelId, through, fragment),
+    ).map((row) => storedChannelMessage(row));
   }
 
   /** One message by id, read through the primary key rather than the whole history. A deleted message is null. */
@@ -1013,6 +1089,23 @@ function previewText(entry: ChannelMessage): string {
   if (entry.message.questionPrompt) return "Asked a question";
   if (entry.message.attachments?.length) return "Sent an attachment";
   return "Sent a message";
+}
+
+const ID_BATCH = 500;
+const CHANNEL_RESULT_ID_PREFIX = "channel-result-";
+
+function prefixEnd(prefix: string): string {
+  return `${prefix.slice(0, -1)}${String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1)}`;
+}
+
+function storedChannelMessage(row: DynamicRecord): ChannelMessage {
+  const value = JSON.parse(requiredStringColumn(row, "message_json"));
+  if (!isChannelMessage(value)) throw new Error("Invalid stored channel message.");
+  return value;
+}
+
+function compareChannelMessages(a: ChannelMessage, b: ChannelMessage): number {
+  return a.sequence - b.sequence || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 }
 
 function stoppedState(task: ChannelTask): boolean {

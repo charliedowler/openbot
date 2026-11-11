@@ -2443,7 +2443,7 @@ export class ChannelService {
       this.#deltas.set(delivery.delivery.id, { sessionId: delivered.sessionId, text: withEvent(history.delta) });
     else this.#deltas.delete(delivery.delivery.id);
     this.#preparedFacts.set(delivery.delivery.id, history.channelFacts);
-    const current = (yield* channelSync(() => this.store.tasks(channel.id))).find((item) => item.id === task.id);
+    const current = yield* channelSync(() => this.store.task(channel.id, task.id));
     if (
       !current ||
       current.revision !== assignment.taskRevision ||
@@ -2895,13 +2895,19 @@ export class ChannelService {
     // holds every message of the whole conversation. A read of the task table and two scans of the
     // channel history for each of them made one capture cost the square of the transcript.
     const tasks = new Map(this.store.tasks(channelId).map((task) => [task.id, task] as const));
-    // A delta reads the few messages of its turn by id. A whole snapshot reads the history once.
-    const history =
-      turnId === undefined
-        ? new Map(this.store.messages(channelId).map((message) => [message.id, message] as const))
-        : new Map<string, ChannelMessage | null>();
+    // A delta reads the few messages of its turn by id. A whole snapshot reads the history after the
+    // summary once, and its own older messages by id.
+    const history = new Map<string, ChannelMessage | null>();
+    if (turnId === undefined) {
+      const summarized = this.store.summary(channelId).throughSequence;
+      for (const message of this.store.messages(channelId, undefined, undefined, summarized))
+        history.set(message.id, message);
+      const older = snapshot.messages.flatMap((message) => (history.has(message.id) ? [] : [message.id]));
+      for (const id of older) history.set(id, null);
+      for (const message of this.store.messagesById(channelId, older)) history.set(message.id, message);
+    }
     const existing = (id: string): ChannelMessage | undefined => {
-      if (turnId !== undefined && !history.has(id)) history.set(id, this.store.message(channelId, id));
+      if (!history.has(id)) history.set(id, this.store.message(channelId, id));
       return history.get(id) ?? undefined;
     };
     const messages: ChannelMessage[] = [];
