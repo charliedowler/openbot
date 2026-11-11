@@ -242,6 +242,7 @@ export interface WebhookDelivery {
 
 interface WebhookDeliveryResponse {
   status: WebhookDeliveryStatus;
+  body?: string;
 }
 
 /** One GitHub event with a valid App signature. Signal read only its installation and repository. */
@@ -888,7 +889,12 @@ export class SignalService {
     })).pipe(
       Effect.map(
         (result): WebhookDeliveryResponse =>
-          result?.type === "webhook-delivery-result" ? { status: result.status } : UNAVAILABLE,
+          result?.type === "webhook-delivery-result"
+            ? {
+                status: result.status,
+                ...(result.status === 200 && result.body !== undefined ? { body: result.body } : {}),
+              }
+            : UNAVAILABLE,
       ),
     );
   });

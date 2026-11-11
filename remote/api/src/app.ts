@@ -308,7 +308,7 @@ export function createRemoteApiApp(
         const result = await runtime.runPromise(signal.deliverWebhook(routeId, { ...signed, body }), {
           signal: request.signal,
         });
-        return webhookResponse(result.status);
+        return webhookResponse(result.status, result.body);
       },
       { parse: "none" },
     )
@@ -658,8 +658,14 @@ function webhookSignedHeaders(headers: Headers): Omit<WebhookDelivery, "body"> |
   return null;
 }
 
-function webhookResponse(status: WebhookDeliveryStatus | 415): Response {
-  return new Response(null, { status, headers: { "Cache-Control": "no-store" } });
+function webhookResponse(status: WebhookDeliveryStatus | 415, body?: string): Response {
+  return new Response(status === 200 ? (body ?? null) : null, {
+    status,
+    headers: {
+      "Cache-Control": "no-store",
+      ...(status === 200 && body !== undefined ? { "Content-Type": "application/json" } : {}),
+    },
+  });
 }
 
 /**

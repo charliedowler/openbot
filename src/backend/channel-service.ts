@@ -33,6 +33,7 @@ import { isFixedSourceText, matchingSourceKeys, sourceText } from "@openbot/i18n
 import { createOpenBotLogger } from "@openbot/logging";
 import { Deferred, Effect, Exit, Fiber, Result, Schema, Scope } from "effect";
 import { relayedPersonRequest } from "./agent/person-priority";
+import { BridgeWorkStore } from "./bridge-work-store";
 import {
   type ChannelOperationError,
   ChannelToolInputError,
@@ -146,6 +147,7 @@ export interface ChannelHooks {
   remotePerson?(personId: string): boolean;
   /** The schedule routines of the channels, for the routine tools. Omitted, those tools fail. */
   routines?: ChannelRoutineToolPort;
+  cancelEventWaits?(deliveryIds: string[]): number;
   waitingForEvent?(deliveryId: string): boolean;
   eventWaitPrompt?(deliveryId: string): string | null;
   resumeEventWaits?(deliveryId: string): Effect.Effect<void, ChannelOperationError>;
@@ -897,6 +899,7 @@ export class ChannelService {
       return result;
     }
     if (command.type === "request") {
+      if (new BridgeWorkStore(this.store.database).requestClosed(command.requestMessageId)) return channel;
       const recipientAgentId = command.recipientAgentId;
       if (recipientAgentId) yield* channelSync(() => this.requireAvailableMember(channel, recipientAgentId));
       // Always new root tasks, one for each member that the text addresses. A routine must never
@@ -3249,13 +3252,116 @@ export class ChannelService {
     return channel;
   });
 
-  /** Cancels the tasks in one saved change, with the notes, then stops their turns. */
+  readonly cancelBridgeWork = Effect.fn("ChannelService.cancelBridgeWork")(function* (
+    this: ChannelService,
+    channelId: string,
+    requestMessageId: string,
+    operationId: string,
+  ) {
+    let result: {
+      cancelledTasks: number;
+      cancelledDeliveries: number;
+      cancelledWaits: number;
+      refusals: Array<{ id: string; reason: string }>;
+    } = {
+      cancelledTasks: 0,
+      cancelledDeliveries: 0,
+      cancelledWaits: 0,
+      refusals: [],
+    };
+    yield* this.#serialize(
+      channelId,
+      Effect.gen({ self: this }, function* () {
+        const tasks = this.store.tasks(channelId);
+        const roots = tasks.filter((task) => task.parentTaskId === null && task.requestMessageId === requestMessageId);
+        const refusals: Array<{ id: string; reason: string }> = [];
+        let cancelledTasks = 0;
+        let cancelledDeliveries = 0;
+        let cancelledWaits = 0;
+        const covered = new Set<string>();
+        for (const root of roots) {
+          const branch = descendants(tasks, root.id, true);
+          const ids = new Set(branch.map((task) => task.id));
+          for (const id of ids) covered.add(id);
+          const history = this.store.assignments(channelId).filter((assignment) => ids.has(assignment.taskId));
+          const assignments = history.filter((assignment) => assignment.requestMessageId === requestMessageId);
+          if (
+            history.some(
+              (assignment) =>
+                assignment.requestMessageId === null ||
+                (assignment.requestMessageId !== requestMessageId &&
+                  (activeAssignment(assignment) ||
+                    (assignment.deliveryId !== null &&
+                      ["queued", "starting", "running"].includes(
+                        this.mailbox.getDelivery(assignment.deliveryId)?.delivery.status ?? "",
+                      )))),
+            ) ||
+            branch.some((task) => task.requestMessageId !== requestMessageId) ||
+            tasks.some(
+              (task) =>
+                !ids.has(task.id) && !terminal(task) && task.dependencies.some((dependency) => ids.has(dependency)),
+            )
+          ) {
+            refusals.push({ id: root.id, reason: "unrelated-branch" });
+            continue;
+          }
+          if (
+            branch.some((task) => task.state === "running") ||
+            assignments.some((assignment) => {
+              const delivery = assignment.deliveryId ? this.mailbox.getDelivery(assignment.deliveryId)?.delivery : null;
+              return (
+                (activeAssignment(assignment) && assignment.turnId !== null) ||
+                (delivery !== null &&
+                  delivery !== undefined &&
+                  !["queued", "completed", "cancelled", "failed"].includes(delivery.status))
+              );
+            })
+          ) {
+            refusals.push({ id: root.id, reason: "running-branch" });
+            continue;
+          }
+          const open = branch.filter((task) => !terminal(task));
+          if (open.some((task) => !["queued", "waiting", "paused"].includes(task.state))) {
+            refusals.push({ id: root.id, reason: "unsupported-state" });
+            continue;
+          }
+          const deliveries = assignments.flatMap((assignment) => assignment.deliveryId ?? []);
+          const queued = deliveries.filter(
+            (deliveryId) => this.mailbox.getDelivery(deliveryId)?.delivery.status === "queued",
+          );
+          if (open.length)
+            yield* this.#cancelTasks(
+              this.store.get(channelId),
+              open,
+              `${operationId}:${root.id}`,
+              [],
+              false,
+              requestMessageId,
+            );
+          yield* this.interruptTasks(channelId, branch, { requestMessageId });
+          cancelledWaits += this.hooks.cancelEventWaits?.(deliveries) ?? 0;
+          cancelledTasks += open.length;
+          cancelledDeliveries += queued.filter(
+            (deliveryId) => this.mailbox.getDelivery(deliveryId)?.delivery.status === "cancelled",
+          ).length;
+        }
+        for (const task of tasks)
+          if (task.requestMessageId === requestMessageId && !terminal(task) && !covered.has(task.id))
+            refusals.push({ id: task.id, reason: "unrelated-branch" });
+        result = { cancelledTasks, cancelledDeliveries, cancelledWaits, refusals };
+      }),
+    );
+    return result;
+  });
+
   readonly #cancelTasks = Effect.fn("ChannelService.cancelTasks")(function* (
     this: ChannelService,
     channel: Channel,
     cancelled: ChannelTask[],
     operationId: string,
     messages: ChannelMessage[] = [],
+    wake = true,
+    requestMessageId?: string,
   ) {
     const result = yield* channelSync(() =>
       this.store.update(
@@ -3270,8 +3376,8 @@ export class ChannelService {
       ),
     );
     this.publish(channel.id);
-    yield* this.interruptTasks(channel.id, cancelled);
-    yield* this.wake(channel.id);
+    yield* this.interruptTasks(channel.id, cancelled, { requestMessageId });
+    if (wake) yield* this.wake(channel.id);
     return result;
   });
 
@@ -3971,11 +4077,12 @@ export class ChannelService {
     this: ChannelService,
     channelId: string,
     tasks: ChannelTask[],
-    options: { staleOnly?: boolean } = {},
+    options: { staleOnly?: boolean; requestMessageId?: string } = {},
   ): Effect.fn.Return<void, ChannelOperationError> {
     for (let assignment of yield* channelSync(() => this.store.assignments(channelId))) {
       const task = tasks.find((item) => item.id === assignment.taskId);
       if (!task || !activeAssignment(assignment)) continue;
+      if (options.requestMessageId !== undefined && assignment.requestMessageId !== options.requestMessageId) continue;
       if (options.staleOnly && assignment.taskRevision >= task.revision) continue;
       if (assignment.pendingRevision !== null) {
         const pendingOutcome = assignment.pendingOutcome;
@@ -4369,7 +4476,7 @@ const ACTIVE_ASSIGNMENT_STATES: readonly ChannelAssignment["state"][] = ["starti
 function activeAssignment(assignment: ChannelAssignment): boolean {
   return ACTIVE_ASSIGNMENT_STATES.includes(assignment.state);
 }
-function descendants(tasks: ChannelTask[], id: string): ChannelTask[] {
+function descendants(tasks: ChannelTask[], id: string, includeTerminal = false): ChannelTask[] {
   const selected = new Set([id]);
   for (let changed = true; changed; ) {
     changed = false;
@@ -4379,7 +4486,7 @@ function descendants(tasks: ChannelTask[], id: string): ChannelTask[] {
         changed = true;
       }
   }
-  return tasks.filter((task) => selected.has(task.id) && !terminal(task));
+  return tasks.filter((task) => selected.has(task.id) && (includeTerminal || !terminal(task)));
 }
 /**
  * Whether two tasks need the same browser or workspace. "host" is what an earlier version stored as

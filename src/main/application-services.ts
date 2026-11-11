@@ -10,6 +10,7 @@ import { AgentApiKeys } from "../backend/agent-api-keys";
 import { AgentDatabaseSupervisor } from "../backend/agent-data/agent-database-supervisor";
 import { AgentTables } from "../backend/agent-data/agent-tables";
 import { AgentRoutineStore } from "../backend/agent-routine-store";
+import { BridgeWorkService } from "../backend/bridge-work-service";
 import { ContextPrReferences } from "../backend/context-pr-references";
 import { DiscordConnectFailed, toDiscordConnectFailed } from "../backend/messaging/discord/discord-connect";
 import { SlackConnectFailed, toSlackConnectFailed } from "../backend/messaging/slack/slack-connect";
@@ -30,6 +31,7 @@ import { agentDisplayEnvironment, hasSeparateAgentDisplay } from "./agent-displa
 import { type AgentFolders, createAgentFolders } from "./agent-folders";
 import { type AgentHostSettingsService, createAgentHostSettings } from "./agent-host-settings";
 import { type AgentInstructionsFiles, createAgentInstructionsFiles } from "./agent-instructions-files";
+import { BridgeWorkObserver } from "./bridge-work-observer";
 import {
   type BrowserProfileService,
   browserProxyConnection,
@@ -2449,6 +2451,19 @@ export async function createApplicationServices({
     hostId: () => teamStore.getIdentity()?.serverId ?? null,
   });
   const events = new HostEventsService({
+    bridgeWorkObserver: new BridgeWorkObserver(
+      store.database,
+      {
+        delivery: (deliveryId) => mailbox.getDelivery(deliveryId)?.delivery ?? null,
+        turnAnswer,
+      },
+      (agentId) => service.listAgents().find((agent) => agent.id === agentId)?.name ?? null,
+    ),
+    bridgeWork: new BridgeWorkService(store.database, {
+      channels: service.channels,
+      mailbox,
+      cancelQueuedMessage: (agentId, deliveryId) => service.cancelQueuedMessage(agentId, deliveryId),
+    }),
     watchRegistry,
     routines: service.routineRecords,
     workflows: {

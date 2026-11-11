@@ -28,6 +28,7 @@ import { Effect, Fiber, Schema, Scope, Semaphore } from "effect";
 import { AgentRoutineStore } from "../agent-routine-store";
 import { AGENT_PREVIEW_MAX_LENGTH, type AgentStore } from "../agent-store";
 import type { AgentWaits } from "../agent-waits/agent-waits";
+import { BridgeWorkStore } from "../bridge-work-store";
 import { causeHelpers } from "../effect-boundary";
 import type { MailboxStore } from "../mailbox-store";
 import type { DynamicToolCallParams } from "../protocol";
@@ -443,7 +444,7 @@ export class RoutineScheduler implements RoutineDueSource {
   #queuedRunId(agentId: string, routineId: string): string | null {
     if (!routineCoalesceEnabled() || this.#waits.hasRoutineWaits(agentId, routineId)) return null;
     const run = this.#routines.activeRuns(agentId, routineId).find((candidate) => {
-      if (candidate.status !== "queued") return false;
+      if (candidate.status !== "queued" || new BridgeWorkStore(this.#store.database).run(candidate.id)) return false;
       if (!candidate.deliveryId) return true;
       return this.#mailbox.getDelivery(candidate.deliveryId)?.delivery.status === "queued";
     });
@@ -1090,6 +1091,9 @@ export class RoutineScheduler implements RoutineDueSource {
   ) {
     // A test or a script run that arrives while a spent plan holds the agent would wait for the
     // reset, and a routine set to skip has no use for a late result.
+    const bridge = new BridgeWorkStore(this.#store.database);
+    if (bridge.runClosed(run.id)) return this.#transitionRunWithConversation(run, "cancelled");
+    const tracked = bridge.run(run.id) !== null;
     const record = yield* routineStep(() => this.#routines.getRecord(run.agentId, run.routineId));
     const skipped = yield* routineStep(() => {
       if (record?.limitPolicy !== "skip" || !this.#hooks.usageLimited(run.agentId)) return null;
@@ -1103,7 +1107,7 @@ export class RoutineScheduler implements RoutineDueSource {
     const agent = yield* this.#store.getOrCreate(run.agentId).pipe(toRoutineOperationFailed);
     // A named channel wait can take the event to its task, and then no own-chat turn runs. Until
     // that is known, no lane starts the delivery: a drain that ran in between would start the turn.
-    const holdStart = fallback && waitId !== null;
+    const holdStart = tracked || (fallback && waitId !== null);
     let heldDeliveryId: string | null = null;
     return yield* Effect.gen({ self: this }, function* () {
       yield* routineStep(validateRecipient);
@@ -1146,6 +1150,11 @@ export class RoutineScheduler implements RoutineDueSource {
           throw error;
         }
       });
+      if (bridge.runClosed(run.id)) {
+        if (this.#mailbox.getDelivery(deliveryId)?.delivery.status === "queued")
+          yield* this.#mailbox.cancel(agent.id, deliveryId).pipe(toRoutineOperationFailed);
+        return this.#transitionRunWithConversation(queued, "cancelled");
+      }
       const forwarded = yield* this.#waits
         .wakeForRun(run, deliveryId, waitId, fallback)
         .pipe(Effect.mapError((cause) => new RoutineOperationFailed({ cause })));
@@ -1199,6 +1208,12 @@ export class RoutineScheduler implements RoutineDueSource {
       Effect.ensuring(
         Effect.sync(() => {
           if (!heldDeliveryId) return;
+          if (
+            tracked &&
+            bridge.runClosed(run.id) &&
+            this.#mailbox.getDelivery(heldDeliveryId)?.delivery.status === "queued"
+          )
+            this.#mailbox.cancelNow(run.agentId, heldDeliveryId);
           this.#mailbox.releaseStart(heldDeliveryId);
           this.#hooks.scheduleDrain(run.agentId);
         }),

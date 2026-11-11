@@ -1,3 +1,5 @@
+export const WEBHOOK_DELIVERY_RESPONSE_BYTES_LIMIT = 32 * 1024;
+
 // The Signal wire protocol: the frames a peer and the Signal service exchange over `WSS /v1/signal`.
 //
 // Signal (`remote/api`) relays SDP and ICE between a host and its clients and hands out resume
@@ -197,6 +199,7 @@ export type SignalClientMessage =
       version: SignalProtocolVersion;
       requestId: string;
       status: WebhookDeliveryStatus;
+      body?: string;
     }
   // An ingress socket's answer to one `github-delivery`: 202 after the host saved the event, 404
   // when no GitHub trigger of the host watches the repository now.

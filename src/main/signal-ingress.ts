@@ -9,10 +9,12 @@ import {
   type QueuedSignalMessage,
 } from "@openbot/contracts/signal-protocol/ingress-queue";
 import {
+  SIGNAL_MESSAGE_BYTES_LIMIT,
   SIGNAL_PROTOCOL_VERSION,
   type SignalClientMessage,
   type SignalServerMessage,
   SLACK_DELIVERY_RESPONSE_BYTES_LIMIT,
+  WEBHOOK_DELIVERY_RESPONSE_BYTES_LIMIT,
   type WebhookDeliveryStatus,
 } from "@openbot/contracts/signal-protocol/messages";
 import {
@@ -151,6 +153,7 @@ export interface WebhookIngressDelivery {
 
 interface WebhookIngressAnswer {
   status: WebhookDeliveryStatus;
+  body?: string;
 }
 
 export type WebhookIngressHandler = (delivery: WebhookIngressDelivery) => Effect.Effect<WebhookIngressAnswer, unknown>;
@@ -744,8 +747,18 @@ export class SignalIngress implements MessagingIngress {
         version: SIGNAL_PROTOCOL_VERSION,
         requestId: message.requestId,
         status: answer.status,
+        ...(answer.status === 200 &&
+        answer.body !== undefined &&
+        Buffer.byteLength(answer.body, "utf8") <= WEBHOOK_DELIVERY_RESPONSE_BYTES_LIMIT
+          ? { body: answer.body }
+          : {}),
       };
-      socket.send(JSON.stringify(result));
+      const encoded = JSON.stringify(result);
+      socket.send(
+        Buffer.byteLength(encoded, "utf8") <= SIGNAL_MESSAGE_BYTES_LIMIT
+          ? encoded
+          : JSON.stringify({ ...result, status: 413, body: undefined }),
+      );
       return;
     }
     if (message.type !== "slack-delivery") return;

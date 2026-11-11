@@ -30,6 +30,7 @@ import type { AgentLifecycleFailed, AgentService } from "../backend/agent-servic
 import { writeFileAtomically } from "../backend/atomic-json-file";
 import { AUTOMATION_HEADERS_FILE, AUTOMATION_TOKEN_FILE, AUTOMATION_URL_FILE } from "../backend/automation-command";
 import { causeHelpers, runCauseEffect } from "../backend/effect-boundary";
+import { readAutomationDelivery } from "./automation-delivery-reader";
 import { readBodyWithin } from "./http-body";
 import { listenLoopback } from "./listen-loopback";
 import { HttpError } from "./team-api/http-error";
@@ -45,14 +46,6 @@ const BODY_LIMIT_BYTES = 32 * 1024;
 const RUN_PATH = /^\/v1\/agents\/([^/]+)\/routines\/([^/]+)\/run$/;
 const AGENT_PATH =
   /^\/v1\/agents\/([^/]+)\/(messages|pending|settings|context\/clear|deliveries\/([^/]+)|prompts\/([^/]+)\/answer|approvals\/([^/]+)\/respond)$/;
-/** A delivery in one of these states has no more work. Its turn's answer is final. */
-const ENDED_DELIVERY_STATUSES: ReadonlySet<QueueDelivery["status"]> = new Set([
-  "completed",
-  "failed",
-  "interrupted",
-  "cancelled",
-]);
-
 /** A start or close that failed. It is only logged; the next `sync` tries again. */
 class AutomationServerFailed extends Schema.TaggedError<AutomationServerFailed>()("AutomationServerFailed", {
   cause: Schema.Defect(),
@@ -341,16 +334,9 @@ export class AutomationServer {
 
   /** The state of one message delivery to this agent, and the turn's answer once the delivery ended. */
   #deliveryResult(agentId: string, deliveryId: string) {
-    const delivery = this.#options.delivery(deliveryId);
-    if (!delivery || delivery.recipientAgentId !== agentId) throw new HttpError(404, "not found");
-    const ended = ENDED_DELIVERY_STATUSES.has(delivery.status);
-    return {
-      id: deliveryId,
-      status: delivery.status,
-      turnId: delivery.turnId,
-      error: delivery.error,
-      answer: ended && delivery.turnId ? this.#options.turnAnswer(agentId, delivery.turnId) : null,
-    };
+    const result = readAutomationDelivery(this.#options, agentId, deliveryId);
+    if (!result) throw new HttpError(404, "not found");
+    return result;
   }
 
   /**

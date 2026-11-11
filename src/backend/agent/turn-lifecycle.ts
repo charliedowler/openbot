@@ -25,6 +25,7 @@ import { type CauseCode, classifyFailure, isCauseCode } from "@openbot/telemetry
 import { Cause, Deferred, Effect, Exit, Schema, Scope } from "effect";
 import type { AgentClient } from "../agent-client";
 import type { AgentStore } from "../agent-store";
+import { BridgeWorkStore } from "../bridge-work-store";
 import type { BrowserOperationError } from "../browser-effects";
 import type { BrowserDynamicToolHooks } from "../browser-tool-actions";
 import { newAssistantMessage, normalizeCompletionStatus } from "../conversation-snapshots";
@@ -1803,7 +1804,30 @@ export class TurnLifecycle {
     completed: boolean,
   ) {
     const usage = completed ? toolUsage(item) : null;
-    if (usage) this.#hooks.emitToolUsage({ ...usage, agentId, turnId });
+    if (usage) {
+      this.#hooks.emitToolUsage({ ...usage, agentId, turnId });
+      if (usage.kind === "mcp" && usage.server?.toLowerCase() === "executor" && isString(item.id)) {
+        const itemId = item.id;
+        const bridge = new BridgeWorkStore(this.#store.database);
+        const tracked = this.#mailbox
+          .findDeliveriesByTurn(agentId, turnId)
+          .some(({ delivery }) => delivery.sender.kind === "routine" && bridge.run(delivery.sender.runId) !== null);
+        if (tracked)
+          yield* turnStep(() =>
+            bridge.recordExecutorOutcome(
+              agentId,
+              turnId,
+              itemId,
+              usage.failed ||
+                item.isError === true ||
+                (item.error !== undefined && item.error !== null) ||
+                (isRecord(item.result) &&
+                  (item.result.isError === true ||
+                    (isRecord(item.result.structuredContent) && item.result.structuredContent.ok === false))),
+            ),
+          );
+      }
+    }
     if (yield* this.#images.handleItem(agentId, threadId, turnId, item, completed)) return;
     const toolProgress = toolProgressText(item, completed);
     this.#observeTraceStep(turnId, item, completed, toolProgress);

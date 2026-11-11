@@ -32,6 +32,13 @@ import {
   validateStoredRoutineSchedule,
 } from "@openbot/team-client/routine-schedule";
 import {
+  BRIDGE_WORK_CANARY_RECEIVER,
+  BRIDGE_WORK_RECEIVER,
+  BridgeWorkStore,
+  bridgeWorkAuthority,
+  bridgeWorkKeys,
+} from "./bridge-work-store";
+import {
   databaseRows,
   optionalStringColumn,
   requiredNumberColumn,
@@ -533,8 +540,17 @@ export class RoutineStore {
       insertWebhookReceipt(db, { ...receipt, status: "ignored", reason, runId: null });
       return { kind: "ignored", reason };
     }
+    const bridge = new BridgeWorkStore(this.database);
+    const purpose = bridge.purpose(event.data);
+    const source = purpose ? bridge.source({ kind: this.tables.ownerKind, id: ownerId }, routineId, purpose) : null;
+    const metadata = source && event.eventType !== "pod.result" ? bridge.metadata(event.data) : null;
+    const refs = metadata
+      ? { ...metadata, deliveryIds: [...new Set([event.deliveryId, ...(metadata.deliveryIds ?? [])])] }
+      : null;
+    const authority = source ? bridgeWorkAuthority(source) : "";
+    if (refs && bridge.closed(authority, bridgeWorkKeys(refs))) return { kind: "duplicate" };
     const waitingRunId =
-      event.waitId === undefined && !event.deliveryId.startsWith(WEBHOOK_TEST_DELIVERY_PREFIX)
+      refs === null && event.waitId === undefined && !event.deliveryId.startsWith(WEBHOOK_TEST_DELIVERY_PREFIX)
         ? queuedRun(event.forward?.agentId ?? routine.ownerId)
         : null;
     if (waitingRunId) {
@@ -575,6 +591,15 @@ export class RoutineStore {
           event.receivedAt,
           sequences[0] ?? 0,
         );
+        if (refs)
+          bridge.record({
+            authority,
+            refs: bridgeWorkKeys(refs),
+            owner: { kind: this.tables.ownerKind, id: ownerId },
+            routineId,
+            runId,
+            deliveryId: event.deliveryId,
+          });
         return { kind: "started", run: this.#requireRun(runId) };
       },
     );
@@ -1007,7 +1032,12 @@ export class RoutineStore {
   ): void {
     if (this.tables.ownerKind === "agent") {
       const trigger = this.getRecord(routine.ownerId, routine.id)?.trigger;
-      if (trigger?.kind === "webhook" && trigger.eventType === WATCH_REGISTRY_ROUTINE_EVENT_TYPE)
+      if (
+        trigger?.kind === "webhook" &&
+        [WATCH_REGISTRY_ROUTINE_EVENT_TYPE, BRIDGE_WORK_RECEIVER, BRIDGE_WORK_CANARY_RECEIVER].includes(
+          trigger.eventType ?? "",
+        )
+      )
         throw new RoutineInputError(sourceText("error.backend.watchRegistryCannotRun"));
     }
     const { runTable, ownerColumn, handleColumn } = this.tables;

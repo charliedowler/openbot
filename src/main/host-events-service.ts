@@ -32,6 +32,18 @@ import { RoutineInputError } from "@openbot/team-client/routine-schedule";
 import { Effect, Semaphore } from "effect";
 import { RoutineOperationFailed } from "../backend/agent/routine-scheduler";
 import type { WebhookRoutineWriter } from "../backend/agent/webhook-routine-tool";
+import type { BridgeWorkResult, BridgeWorkService } from "../backend/bridge-work-service";
+import {
+  BRIDGE_WORK_CANARY_RECEIVER,
+  BRIDGE_WORK_CANARY_RECEIVERS_ENV,
+  BRIDGE_WORK_EVENT,
+  BRIDGE_WORK_OBSERVE_EVENT,
+  BRIDGE_WORK_RECEIVER,
+  BRIDGE_WORK_RESPONSE_BYTES_LIMIT,
+  bridgeWorkAuthority,
+  bridgeWorkCancellation,
+  bridgeWorkReceivers,
+} from "../backend/bridge-work-store";
 import { causeHelpers } from "../backend/effect-boundary";
 import type { RoutineRecords } from "../backend/routine-records";
 import {
@@ -43,6 +55,7 @@ import {
 import type { WebhookRouteOwner } from "../backend/webhook-route-store";
 import { isWebhookWaitId, WEBHOOK_EVENT_TYPE_MAX_LENGTH } from "../backend/webhook-trigger";
 import type { WorkflowWebhookDelivery, WorkflowWebhookResult } from "../backend/workflows/workflows";
+import { type BridgeWorkObserver, decodeObservationIds } from "./bridge-work-observer";
 import {
   type HostEventsApi,
   HostEventsFailure,
@@ -89,6 +102,8 @@ interface HostWorkflowWebhooks {
 
 export interface HostEventsServiceOptions {
   routines: RoutineRecords;
+  bridgeWork?: BridgeWorkService;
+  bridgeWorkObserver?: BridgeWorkObserver;
   watchRegistry?: Pick<WatchRegistryStore, "accept">;
   workflows?: HostWorkflowWebhooks;
   cipher: SecretCipher;
@@ -370,9 +385,19 @@ export class HostEventsService implements HostEventsApi {
   readonly receive = Effect.fn("HostEvents.receive")(function* (
     this: HostEventsService,
     input: WebhookIngressDelivery,
-  ): Effect.fn.Return<{ status: WebhookDeliveryStatus }, HostEventsFailure> {
-    const { status } = yield* this.#process(input);
-    return { status };
+  ): Effect.fn.Return<
+    {
+      status: WebhookDeliveryStatus;
+      body?: string;
+      result?: BridgeWorkResult | ReturnType<BridgeWorkObserver["observe"]>;
+    },
+    HostEventsFailure
+  > {
+    const { status, result } = yield* this.#process(input);
+    if (!result) return { status };
+    const body = JSON.stringify(result);
+    if (Buffer.byteLength(body, "utf8") > BRIDGE_WORK_RESPONSE_BYTES_LIMIT) return { status: 413 };
+    return { status, body, result };
   }).bind(this);
 
   /**
@@ -386,7 +411,12 @@ export class HostEventsService implements HostEventsApi {
     const routine = yield* this.#requireRoutine(input);
     if (routine.trigger.kind !== "webhook")
       return yield* eventFailure(sourceText("error.backend.webhookSettingsInvalid"));
-    if (input.owner.kind === "agent" && routine.trigger.eventType === WATCH_REGISTRY_ROUTINE_EVENT_TYPE)
+    if (
+      input.owner.kind === "agent" &&
+      [WATCH_REGISTRY_ROUTINE_EVENT_TYPE, BRIDGE_WORK_RECEIVER, BRIDGE_WORK_CANARY_RECEIVER].includes(
+        routine.trigger.eventType ?? "",
+      )
+    )
       return yield* eventFailure(sourceText("error.backend.watchRegistryCannotRun"));
     const route = yield* eventStep(() =>
       this.#options.routines.routes
@@ -537,7 +567,14 @@ export class HostEventsService implements HostEventsApi {
   readonly #process = Effect.fn("HostEvents.process")(function* (
     this: HostEventsService,
     input: WebhookIngressDelivery,
-  ): Effect.fn.Return<{ status: WebhookDeliveryStatus; received: ReceivedDelivery | null }, HostEventsFailure> {
+  ): Effect.fn.Return<
+    {
+      status: WebhookDeliveryStatus;
+      received: ReceivedDelivery | null;
+      result?: BridgeWorkResult | ReturnType<BridgeWorkObserver["observe"]>;
+    },
+    HostEventsFailure
+  > {
     if (this.#options.accountPrincipal() === null) return { status: 503, received: null };
     if (input.body.byteLength > WEBHOOK_DELIVERY_BODY_BYTES_LIMIT) return { status: 413, received: null };
     const route = yield* eventStep(() => this.#options.routines.routes.find(input.routeId));
@@ -565,6 +602,56 @@ export class HostEventsService implements HostEventsApi {
       receiverOwner.kind === "agent"
         ? yield* eventStep(() => this.#options.routines.get(receiverOwner, route.routineId))
         : null;
+    if (
+      receiver?.trigger.kind === "webhook" &&
+      receiver.trigger.eventType === BRIDGE_WORK_CANARY_RECEIVER &&
+      body.type !== BRIDGE_WORK_OBSERVE_EVENT
+    )
+      return { status: 400, received: null };
+    if (body.type === BRIDGE_WORK_OBSERVE_EVENT) {
+      if (receiverOwner.kind !== "agent" || !this.#options.bridgeWorkObserver) return { status: 400, received: null };
+      if (!receiver?.active || receiver.trigger.kind !== "webhook") return { status: 404, received: null };
+      if (receiver.trigger.eventType !== BRIDGE_WORK_CANARY_RECEIVER || body.forward !== undefined)
+        return { status: 400, received: null };
+      const allowed = yield* eventStep(() =>
+        bridgeWorkReceivers(BRIDGE_WORK_CANARY_RECEIVERS_ENV).find(
+          (entry) => entry.ownerAgentId === receiverOwner.id && entry.routineId === route.routineId,
+        ),
+      );
+      if (!allowed) return { status: 401, received: null };
+      const input = isDynamicRecord(body.data) && isDynamicRecord(body.data.data) ? body.data.data : body.data;
+      const ids = decodeObservationIds(input);
+      if (!ids) return { status: 400, received: null };
+      const result = yield* eventStep(() =>
+        this.#options.bridgeWorkObserver?.observe(bridgeWorkAuthority(allowed), ids),
+      );
+      return { status: 200, received: null, result };
+    }
+    if (
+      receiver?.trigger.kind === "webhook" &&
+      receiver.trigger.eventType === BRIDGE_WORK_RECEIVER &&
+      body.type !== BRIDGE_WORK_EVENT
+    )
+      return { status: 400, received: null };
+    if (body.type === BRIDGE_WORK_EVENT) {
+      if (receiverOwner.kind !== "agent" || !this.#options.bridgeWork) return { status: 400, received: null };
+      if (!receiver?.active || receiver.trigger.kind !== "webhook") return { status: 404, received: null };
+      if (receiver.trigger.eventType !== BRIDGE_WORK_RECEIVER || body.forward !== undefined)
+        return { status: 400, received: null };
+      const allowed = yield* eventStep(() =>
+        bridgeWorkReceivers().find(
+          (entry) => entry.ownerAgentId === receiverOwner.id && entry.routineId === route.routineId,
+        ),
+      );
+      if (!allowed) return { status: 401, received: null };
+      const input = isDynamicRecord(body.data) && isDynamicRecord(body.data.data) ? body.data.data : body.data;
+      const cancellation = bridgeWorkCancellation(input);
+      if (!cancellation) return { status: 400, received: null };
+      const result = yield* toHostEventsFailure(
+        this.#options.bridgeWork.cancel(bridgeWorkAuthority(allowed), cancellation),
+      );
+      return { status: 200, received: null, result };
+    }
     if (
       receiver?.trigger.kind === "webhook" &&
       receiver.trigger.eventType === WATCH_REGISTRY_ROUTINE_EVENT_TYPE &&

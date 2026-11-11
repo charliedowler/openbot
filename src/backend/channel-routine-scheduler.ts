@@ -14,6 +14,7 @@ import { sourceText } from "@openbot/i18n/source";
 import { collapseMissedOccurrences } from "@openbot/team-client/routine-schedule";
 import { Effect, Result, Schema } from "effect";
 import type { RoutineTriggerAccess } from "./agent/routine-scheduler";
+import { BridgeWorkStore } from "./bridge-work-store";
 import { ChannelRoutineStore } from "./channel-routine-store";
 import type { ChannelService } from "./channel-service";
 import { causeHelpers } from "./effect-boundary";
@@ -394,6 +395,10 @@ export class ChannelRoutineScheduler implements RoutineDueSource {
     this: ChannelRoutineScheduler,
     run: ChannelRoutineRun,
   ) {
+    if (new BridgeWorkStore(this.#channels.store.database).runClosed(run.id)) {
+      this.#settle(run, { status: "cancelled", error: null });
+      return { ...run, status: "cancelled" as const };
+    }
     recordRestartActivity();
     const requestMessageId = run.requestMessageId;
     if (!requestMessageId)

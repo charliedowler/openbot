@@ -11,6 +11,7 @@ import {
   type SignalClientMessage,
   type SignalServerMessage,
   SLACK_DELIVERY_RESPONSE_BYTES_LIMIT,
+  WEBHOOK_DELIVERY_RESPONSE_BYTES_LIMIT,
 } from "@openbot/contracts/signal-protocol/messages";
 import {
   TELEGRAM_BOT_ID_PATTERN,
@@ -226,6 +227,11 @@ const signalClientMessageSchema = z.discriminatedUnion("type", [
       z.literal(429),
       z.literal(503),
     ]),
+    body: z
+      .string()
+      .max(WEBHOOK_DELIVERY_RESPONSE_BYTES_LIMIT)
+      .refine((value) => new TextEncoder().encode(value).byteLength <= WEBHOOK_DELIVERY_RESPONSE_BYTES_LIMIT)
+      .optional(),
   }),
   z.object({
     type: z.literal("github-delivery-result"),

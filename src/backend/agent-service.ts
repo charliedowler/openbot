@@ -237,6 +237,7 @@ import { type AgentThreadRecord, AgentThreadStore } from "./agent-threads/agent-
 import { AgentWaitError, AgentWaitStore } from "./agent-waits/agent-wait-store";
 import { AgentWaits } from "./agent-waits/agent-waits";
 import { automationRunCommand } from "./automation-command";
+import { BridgeWorkService } from "./bridge-work-service";
 import { channelFailure, toChannelOperationError } from "./channel-effects";
 import { type ChannelImageFile, ChannelImages } from "./channel-images";
 import { ChannelRoutineScheduler } from "./channel-routine-scheduler";
@@ -1288,6 +1289,16 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
         }).pipe(toChannelOperationError),
       eventWaitInput: (assignment) => this.#waits.channelWakeInput(assignment),
       eventWaitQueued: (agentId, waitIds, deliveryId) => this.#waits.channelWakeQueued(agentId, waitIds, deliveryId),
+      cancelEventWaits: (deliveryIds) => {
+        let count = 0;
+        for (const agent of this.#store.list())
+          for (const wait of this.#waits.list(agent.id).waits) {
+            if (!deliveryIds.includes(wait.requestMessageId)) continue;
+            this.#waits.cancel(agent.id, wait.id);
+            count += 1;
+          }
+        return count;
+      },
       waitingForEvent: (deliveryId) => this.#waits.hasWaitForDelivery(deliveryId),
       eventWaitPrompt: (deliveryId) => this.#waits.channelWaitsPrompt(deliveryId),
       resumeEventWaits: (deliveryId) =>
@@ -4015,6 +4026,19 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
       this.#hostedSites.restore();
       this.#routines.skipMissed(new Date(), options.heldRoutines);
       this.#channelRoutines.skipMissed(new Date(), options.heldRoutines);
+    });
+    yield* new BridgeWorkService(this.#store.database, {
+      channels: this.channels,
+      mailbox: this.#mailbox,
+      cancelQueuedMessage: (agentId, deliveryId) => this.cancelQueuedMessage(agentId, deliveryId),
+    })
+      .recover()
+      .pipe(
+        Effect.mapError(
+          (failure) => new AgentLifecycleFailed({ operation: "recover work closures", cause: failure.cause }),
+        ),
+      );
+    yield* lifecycleStep("enable agent service", () => {
       this.#initialized = true;
       this.#memoryHold.start();
     });
