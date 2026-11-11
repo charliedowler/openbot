@@ -7,7 +7,7 @@ import { type AgentProvider, ProviderTurnActiveError } from "../agent-client";
 import type { AgentStore } from "../agent-store";
 import type { ChannelService } from "../channel-service";
 import { causeHelpers } from "../effect-boundary";
-import type { DeliveryContext, MailboxStore } from "../mailbox-store";
+import type { DeliveryContext, MailboxLanes, MailboxStore } from "../mailbox-store";
 import type { MessagingThreads } from "../messaging/messaging-threads";
 import { decodeTurnResponse } from "../protocol";
 import type { ContextCompaction } from "./context-compaction";
@@ -193,6 +193,7 @@ export class DrainScheduler {
   /** Lanes that a full set of turn slots held back. A drain that may free a slot tries them again. */
   readonly #slotWaiters = new Set<string>();
   #wakingSlotWaiters = false;
+  #slotLanes: MailboxLanes | null = null;
   readonly #hooks: DrainHooks;
   readonly #channels: ChannelService | undefined;
   readonly #messaging: MessagingThreads | undefined;
@@ -258,15 +259,19 @@ export class DrainScheduler {
       isRunning: (key) => {
         const lane = laneOf(key);
         // A compaction is a provider turn of the lane whose thread it compacts, so it uses that slot.
-        return this.#laneRunning(lane) || this.#compactionHolds(lane);
+        return this.#laneRunning(lane, this.#slotLanes ?? this.#mailbox) || this.#compactionHolds(lane);
       },
       isWaiting: (key) => {
         const lane = laneOf(key);
-        return this.#mayStartNow(lane) && this.#memory.mayDrain(lane.agentId) && this.#laneHead(lane) !== null;
+        return (
+          this.#mayStartNow(lane) &&
+          this.#memory.mayDrain(lane.agentId) &&
+          this.#laneHead(lane, this.#slotLanes ?? undefined) !== null
+        );
       },
-      head: (key) => this.#laneHead(laneOf(key))?.delivery ?? null,
+      head: (key) => this.#laneHead(laneOf(key), this.#slotLanes ?? undefined)?.delivery ?? null,
       backgroundLimit: (limit) => this.#memory.backgroundTurnLimit(limit),
-      personLanes: () => new Set(this.#mailbox.personLanes().map(laneKey)),
+      personLanes: () => new Set((this.#slotLanes ?? this.#mailbox).personLanes().map(laneKey)),
     });
   }
 
@@ -285,22 +290,22 @@ export class DrainScheduler {
   }
 
   /** The next delivery that this lane would start. */
-  #laneHead(lane: Lane): DeliveryContext | null {
+  #laneHead(lane: Lane, lanes?: MailboxLanes): DeliveryContext | null {
     return lane.routine
-      ? this.#mailbox.nextBesideRoutine(lane.agentId)
-      : this.#mailbox.nextQueued(lane.agentId, lane.taskId);
+      ? this.#mailbox.nextBesideRoutine(lane.agentId, lanes)
+      : this.#mailbox.nextQueued(lane.agentId, lane.taskId, lanes);
   }
 
   /**
    * Whether this lane runs a turn or starts one. A start whose `turn/start` timed out stays "starting"
    * with no turn ID, and its turn can still run.
    */
-  #laneRunning(lane: Lane): boolean {
-    if (lane.routine) return this.#drainingLanes.has(laneKey(lane)) || this.#mailbox.besideActive(lane.agentId);
+  #laneRunning(lane: Lane, lanes: MailboxLanes | MailboxStore = this.#mailbox): boolean {
+    if (lane.routine) return this.#drainingLanes.has(laneKey(lane)) || lanes.besideActive(lane.agentId);
     return (
       this.#drainingLanes.has(laneKey(lane)) ||
-      this.#laneTurnActive(lane) ||
-      this.#mailbox.laneActive(lane.agentId, lane.taskId)
+      this.#laneTurnActive(lane, lanes) ||
+      lanes.laneActive(lane.agentId, lane.taskId)
     );
   }
 
@@ -309,7 +314,7 @@ export class DrainScheduler {
    * reads the turns of the own chat and of the channel and messaging threads, except a routine run
    * that started beside the channel work.
    */
-  #laneTurnActive(lane: Lane): boolean {
+  #laneTurnActive(lane: Lane, lanes: MailboxLanes | MailboxStore = this.#mailbox): boolean {
     if (lane.routine) return Boolean(this.#conversation.loadedSnapshot(lane.agentId)?.activeTurnId);
     if (lane.taskId === null)
       return [...this.#conversation.activeSnapshots()].some(
@@ -317,7 +322,7 @@ export class DrainScheduler {
           id === lane.agentId &&
           snapshot.activeTurnId &&
           !this.#conversation.isTaskThread(snapshot.threadId) &&
-          !this.#mailbox.besideTurn(lane.agentId, snapshot.activeTurnId),
+          !lanes.besideTurn(lane.agentId, snapshot.activeTurnId),
       );
     const threadId = this.#tasks.threadId(lane.taskId);
     return this.#conversation
@@ -615,7 +620,12 @@ export class DrainScheduler {
       return true;
     }
     const key = laneKey(lane);
-    if (this.#slots.mayStart(key)) return false;
+    this.#slotLanes = this.#mailbox.lanes();
+    try {
+      if (this.#slots.mayStart(key)) return false;
+    } finally {
+      this.#slotLanes = null;
+    }
     this.#slotWaiters.add(key);
     return true;
   }

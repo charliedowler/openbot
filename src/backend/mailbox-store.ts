@@ -264,6 +264,61 @@ export interface QueueDeliveryState {
   error: QueueDelivery["error"];
 }
 
+interface LaneIndex {
+  active: Map<string, Set<string | null>>;
+  beside: Map<string, Set<string | null>>;
+  person: Array<{ agentId: string; taskId: string | null }>;
+  queued: Map<string, StoredDelivery[]>;
+  positions: Map<string, Map<string, number>>;
+}
+
+export class MailboxLanes {
+  readonly #read: () => LaneIndex;
+  #index: LaneIndex | null = null;
+
+  constructor(read: () => LaneIndex) {
+    this.#read = read;
+  }
+
+  #lanes(): LaneIndex {
+    this.#index ??= this.#read();
+    return this.#index;
+  }
+
+  laneActive(agentId: string, taskId: string | null): boolean {
+    return this.#lanes().active.get(agentId)?.has(taskId) ?? false;
+  }
+
+  besideActive(agentId: string): boolean {
+    return this.#lanes().beside.has(agentId);
+  }
+
+  besideTurn(agentId: string, turnId: string): boolean {
+    return this.#lanes().beside.get(agentId)?.has(turnId) ?? false;
+  }
+
+  personLanes(): Array<{ agentId: string; taskId: string | null }> {
+    return this.#lanes().person;
+  }
+
+  queuedFor(agentId: string): readonly StoredDelivery[] {
+    this.positions(agentId);
+    return this.#lanes().queued.get(agentId) ?? [];
+  }
+
+  positions(agentId: string): ReadonlyMap<string, number> {
+    const index = this.#lanes();
+    const known = index.positions.get(agentId);
+    if (known) return known;
+    const positions = new Map<string, number>();
+    const queued = index.queued.get(agentId)?.sort(compareQueueOrder) ?? [];
+    for (const delivery of queued)
+      if (!waitsForPlanContinuation(delivery)) positions.set(delivery.id, positions.size + 1);
+    index.positions.set(agentId, positions);
+    return positions;
+  }
+}
+
 export class MailboxStore {
   readonly #statePath: string;
   readonly #files: AttachmentFiles;
@@ -1087,6 +1142,44 @@ export class MailboxStore {
     );
   }
 
+  lanes(): MailboxLanes {
+    return new MailboxLanes(() => {
+      const messages = this.#messagesById();
+      const index: LaneIndex = {
+        active: new Map(),
+        beside: new Map(),
+        person: [],
+        queued: new Map(),
+        positions: new Map(),
+      };
+      const add = (map: Map<string, Set<string | null>>, agentId: string, value: string | null) => {
+        const values = map.get(agentId);
+        if (values) values.add(value);
+        else map.set(agentId, new Set([value]));
+      };
+      for (const delivery of this.#state.deliveries) {
+        const agentId = delivery.recipientAgentId;
+        if (delivery.status === "queued") {
+          const queued = index.queued.get(agentId);
+          if (queued) queued.push(delivery);
+          else index.queued.set(agentId, [delivery]);
+          continue;
+        }
+        if (delivery.status !== "starting" && delivery.status !== "running") continue;
+        const message = messages.get(delivery.messageId);
+        const taskId = message?.taskId ?? null;
+        if (this.#besideDeliveries.has(delivery.id)) {
+          add(index.beside, agentId, delivery.turnId);
+          if (taskId !== null) add(index.active, agentId, taskId);
+          continue;
+        }
+        add(index.active, agentId, taskId);
+        if (message?.sender.kind === "user") index.person.push({ agentId, taskId });
+      }
+      return index;
+    });
+  }
+
   /** Whether the main lane of this agent starts or runs a delivery that is not channel work. */
   mainLaneRunsNonChannelWork(agentId: string): boolean {
     const messages = this.#messagesById();
@@ -1108,10 +1201,10 @@ export class MailboxStore {
    * own session reads nothing of the chat session. A plan continuation or a continuation after a
    * usage limit keeps its place in the main lane, and so do the routine runs after it.
    */
-  nextBesideRoutine(agentId: string): DeliveryContext | null {
-    if (this.besideActive(agentId)) return null;
+  nextBesideRoutine(agentId: string, lanes?: MailboxLanes): DeliveryContext | null {
+    if ((lanes ?? this).besideActive(agentId)) return null;
     const messages = this.#messagesById();
-    for (const candidate of this.#queuedFor(agentId)) {
+    for (const candidate of lanes ? lanes.queuedFor(agentId) : this.#queuedFor(agentId)) {
       const message = messages.get(candidate.messageId);
       if (this.#taskIdOf(candidate, messages) !== null || message?.channelId || message?.messaging) continue;
       if (message?.sender.kind === "agent") continue;
@@ -1122,7 +1215,7 @@ export class MailboxStore {
         !this.#mayStart(candidate)
       )
         return null;
-      return this.#context(candidate, undefined, messages);
+      return this.#context(candidate, lanes?.positions(agentId), messages);
     }
     return null;
   }
@@ -1907,16 +2000,16 @@ export class MailboxStore {
    * The delivery that starts the next turn in one lane of this agent: its own chat (`taskId` null,
    * with its channel and messaging work), or one task. Each lane runs one turn at a time.
    */
-  nextQueued(agentId: string, taskId: string | null = null): DeliveryContext | null {
-    if (this.laneActive(agentId, taskId)) return null;
+  nextQueued(agentId: string, taskId: string | null = null, lanes?: MailboxLanes): DeliveryContext | null {
+    if ((lanes ?? this).laneActive(agentId, taskId)) return null;
     const messages = this.#messagesById();
-    const queued = this.#queuedFor(agentId);
+    const queued = lanes ? lanes.queuedFor(agentId) : this.#queuedFor(agentId);
     const eligible = (candidate: StoredDelivery) =>
-      this.#taskIdOf(candidate, messages) === taskId && !this.#isHeldReply(candidate);
+      this.#taskIdOf(candidate, messages) === taskId && !this.#isHeldReply(candidate, messages);
     const delivery =
       queued.find((candidate) => messages.get(candidate.messageId)?.channelId && eligible(candidate)) ??
       queued.find(eligible);
-    return delivery && this.#mayStart(delivery) ? this.#context(delivery, undefined, messages) : null;
+    return delivery && this.#mayStart(delivery) ? this.#context(delivery, lanes?.positions(agentId), messages) : null;
   }
 
   /**
@@ -2037,10 +2130,12 @@ export class MailboxStore {
    * has the request still queued or running. So the requester reads all the answers in one turn,
    * not one turn for each answer.
    */
-  #isHeldReply(delivery: StoredDelivery): boolean {
-    const reply = this.#requireMessage(delivery.messageId);
+  #isHeldReply(delivery: StoredDelivery, messages?: ReadonlyMap<string, StoredMessage>): boolean {
+    const reply = this.#requireMessage(delivery.messageId, messages);
     if (!isAnswer(reply)) return false;
-    const request = this.#state.messages.find((message) => message.id === reply.replyToMessageId);
+    const request = messages
+      ? messages.get(reply.replyToMessageId)
+      : this.#state.messages.find((message) => message.id === reply.replyToMessageId);
     if (
       request?.sender.kind !== "agent" ||
       request.sender.agentId !== delivery.recipientAgentId ||

@@ -45,18 +45,19 @@ export class TurnSlots {
     if (!head) return true;
     const backgroundFree = this.#backgroundFree(head, limit, running);
     if (backgroundFree !== null && backgroundFree <= 0) return false;
+    const runningLanes = new Set(running);
     let ahead = 0;
     let backgroundAhead = 0;
     for (const other of lanes) {
-      if (other === lane) continue;
+      if (other === lane || runningLanes.has(other)) continue;
       const otherHead = this.#options.head(other);
       if (!otherHead || !startsBefore(otherHead, other, head, lane)) continue;
-      if (!this.#options.isRunning(other) && this.#options.isWaiting(other)) {
-        ahead += 1;
-        if (otherHead.sender.kind !== "user") backgroundAhead += 1;
-      }
+      if (!this.#options.isWaiting(other)) continue;
+      ahead += 1;
+      if (otherHead.sender.kind !== "user") backgroundAhead += 1;
+      if (ahead >= free || (backgroundFree !== null && backgroundAhead >= backgroundFree)) return false;
     }
-    return ahead < free && (backgroundFree === null || backgroundAhead < backgroundFree);
+    return true;
   }
 
   #backgroundFree(head: QueueDelivery, limit: number, running: readonly string[]): number | null {
