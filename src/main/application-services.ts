@@ -128,6 +128,7 @@ import {
 import { pasteCodeLoginSupported } from "../backend/agent/cli-code-login";
 import { toMcpGatewayFailed } from "../backend/agent/mcp-gateway";
 import { ProviderAccountStore } from "../backend/agent/provider-account-store";
+import { TurnBuffer, turnBufferSettings } from "../backend/agent/turn-buffer";
 import { AgentLifecycleFailed, AgentService } from "../backend/agent-service";
 import { AgentStore } from "../backend/agent-store";
 import { BrowserHost } from "../backend/browser-host";
@@ -1202,10 +1203,12 @@ export async function createApplicationServices({
   teardown.push(TEARDOWN_ORDER.browserEgress, "the computer proxies of members", () => browserEgress.dispose());
   // Only a hosted, self-hosted or container server: one unit or container holds OpenBot and every
   // agent process. The desktop app does not hold turns for memory.
+  const turnBuffer = hostedServer || serverModeEnvironment ? new TurnBuffer(turnBufferSettings(process.env)) : null;
   const hostMemory =
     hostedServer || serverModeEnvironment
       ? new ServerMemory({
           hostedPlan: hostedServer !== null,
+          ...(turnBuffer ? { turnBuffer } : {}),
           onError: (message, error) => logger.warn(message, toLogValue(error)),
           onAgentProcessStopped: (stopped) =>
             logger.warn("Stopped a leftover agent process to free memory.", { ...stopped }),
@@ -3051,6 +3054,7 @@ export async function createApplicationServices({
     statementTimings,
     tabProcessIds: () => browser.tabProcessIds(),
     turnRunning: () => service.earliestRunningTurnStartedAt() !== null,
+    ...(turnBuffer ? { onMainLoop: (p99Ms: number) => turnBuffer.observeMainLoop(p99Ms) } : {}),
   });
   teardown.push(TEARDOWN_ORDER.resourceMonitor, "the resource monitor", () =>
     Effect.runPromise(resourceMonitor.close()),

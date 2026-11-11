@@ -90,6 +90,10 @@ export class MemoryHold {
     return this.#memory?.turnLimit() ?? null;
   }
 
+  backgroundTurnLimit(limit: number): number | null {
+    return this.#memory?.backgroundTurnLimit?.(limit) ?? null;
+  }
+
   readonly #sampled = Effect.fn("MemoryHold.sampled")(function* (this: MemoryHold) {
     this.#hooks.retryWaiting();
     const level = this.#memory?.level() ?? "ok";

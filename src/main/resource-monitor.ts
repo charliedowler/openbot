@@ -81,6 +81,7 @@ export interface ResourceMonitorOptions {
    * completion event, so the loop rest asks the turns themselves.
    */
   turnRunning: () => boolean;
+  onMainLoop?: (p99Ms: number) => void;
 }
 
 /** One sample as `resources.ndjson` and the diagnostics export hold it. Group and provider names only. */
@@ -458,6 +459,7 @@ export class ResourceMonitor implements AnalyticsResourceSource {
         day.mainLoopPeak = { phase: mainLoopMs.phase, turnActive: turnInLoopWindow };
       }
       recordValue(day, METRIC.mainLoop, mainLoopMs.p99);
+      this.#options.onMainLoop?.(mainLoopMs.p99);
       recordPeak(day, METRIC.mainLoop, mainLoopMs.max);
       if (mainLoopMs.max >= MAIN_LOOP_STALL_MS) {
         addCount(day, COUNTER.mainLoopStall);

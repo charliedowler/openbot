@@ -990,6 +990,19 @@ export class MailboxStore {
     );
   }
 
+  personLanes(): Array<{ agentId: string; taskId: string | null }> {
+    const messages = this.#messagesById();
+    const lanes: Array<{ agentId: string; taskId: string | null }> = [];
+    for (const delivery of this.#state.deliveries) {
+      if (delivery.status !== "starting" && delivery.status !== "running") continue;
+      if (this.#besideDeliveries.has(delivery.id)) continue;
+      const message = messages.get(delivery.messageId);
+      if (message?.sender.kind !== "user") continue;
+      lanes.push({ agentId: delivery.recipientAgentId, taskId: message.taskId ?? null });
+    }
+    return lanes;
+  }
+
   /** Whether a routine run of this agent's own chat starts or runs beside its channel work. */
   besideActive(agentId: string): boolean {
     return this.#state.deliveries.some(

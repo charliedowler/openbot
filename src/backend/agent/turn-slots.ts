@@ -14,6 +14,8 @@ export interface TurnSlotsOptions {
   isWaiting(lane: string): boolean;
   /** The delivery at the head of the lane's queue. */
   head(lane: string): QueueDelivery | null;
+  backgroundLimit?(limit: number): number | null;
+  personLanes?(): ReadonlySet<string>;
 }
 
 /**
@@ -36,18 +38,33 @@ export class TurnSlots {
     const limit = this.#options.limit();
     if (limit === null) return true;
     const lanes = this.#options.lanes();
-    const free = limit - lanes.filter((id) => this.#options.isRunning(id)).length;
+    const running = lanes.filter((id) => this.#options.isRunning(id));
+    const free = limit - running.length;
     if (free <= 0) return false;
     const head = this.#options.head(lane);
     if (!head) return true;
+    const backgroundFree = this.#backgroundFree(head, limit, running);
+    if (backgroundFree !== null && backgroundFree <= 0) return false;
     let ahead = 0;
+    let backgroundAhead = 0;
     for (const other of lanes) {
       if (other === lane) continue;
       const otherHead = this.#options.head(other);
       if (!otherHead || !startsBefore(otherHead, other, head, lane)) continue;
-      if (!this.#options.isRunning(other) && this.#options.isWaiting(other)) ahead += 1;
+      if (!this.#options.isRunning(other) && this.#options.isWaiting(other)) {
+        ahead += 1;
+        if (otherHead.sender.kind !== "user") backgroundAhead += 1;
+      }
     }
-    return ahead < free;
+    return ahead < free && (backgroundFree === null || backgroundAhead < backgroundFree);
+  }
+
+  #backgroundFree(head: QueueDelivery, limit: number, running: readonly string[]): number | null {
+    if (head.sender.kind === "user") return null;
+    const backgroundLimit = this.#options.backgroundLimit?.(limit) ?? null;
+    if (backgroundLimit === null) return null;
+    const personLanes = this.#options.personLanes?.() ?? new Set<string>();
+    return backgroundLimit - running.filter((id) => !personLanes.has(id)).length;
   }
 }
 

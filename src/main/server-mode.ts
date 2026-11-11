@@ -87,7 +87,9 @@ export interface ServerModeOptions {
   >;
   host: Pick<HostService, "getStatus" | "configure" | "start" | "updateIdentity" | "getMobileConnectHost">;
   /** The memory guard, so that `status` shows the memory ceiling and the turn limit. */
-  memory: Pick<ServerMemory, "level" | "sample" | "turnLimit"> | null;
+  memory:
+    | (Pick<ServerMemory, "level" | "sample" | "turnLimit"> & Partial<Pick<ServerMemory, "turnBufferStatus">>)
+    | null;
   nativeWork?: () => { idle: boolean; compactions: number; providerOperations: number; reasons: string[] };
   usageLimits?: Pick<AgentService, "releaseUsageLimits">;
   agents?: Pick<AgentService, "listAgents" | "interruptRunningTurn" | "updateAgentRuntime" | "agentQueues">;
@@ -389,6 +391,7 @@ export class ServerMode {
       status: 200,
       lines: {
         agents: rows.length,
+        ...this.#turnLines(),
         ...Object.fromEntries(rows.map(({ agentId, ...row }) => [`agent.${agentId}`, JSON.stringify(row)])),
       },
     };
@@ -474,7 +477,25 @@ export class ServerMode {
       memory_level: memory.level(),
       memory_limit: sample.total,
       memory_available: sample.available,
-      turn_limit: memory.turnLimit(),
+      ...this.#turnLines(),
+    };
+  }
+
+  #turnLines(): Answer["lines"] {
+    const memory = this.#options.memory;
+    if (!memory?.sample()) return {};
+    const buffer = memory.turnBufferStatus?.() ?? null;
+    if (!buffer) return { turn_limit: memory.turnLimit() };
+    return {
+      turn_limit: buffer.limit,
+      turn_limit_memory: buffer.memoryLimit,
+      turn_limit_cap: buffer.limitCap ?? "none",
+      person_reserved_slots: buffer.personReservedSlots,
+      background_turn_limit: buffer.backgroundLimit ?? "none",
+      shed: buffer.shed,
+      shed_p99_ms: buffer.shedP99Ms,
+      main_loop_p99_ms: buffer.mainLoopP99Ms === null ? null : Math.round(buffer.mainLoopP99Ms),
+      shed_changed_at: buffer.shedChangedAt,
     };
   }
 

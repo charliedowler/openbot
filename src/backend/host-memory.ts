@@ -10,6 +10,7 @@ export interface HostMemory {
   level(): HostMemoryLevel;
   /** The most agent turns that run at the same time on this machine. */
   turnLimit(): number;
+  backgroundTurnLimit?(limit: number): number | null;
   /**
    * Counts the memory of a turn that starts now, before its processes grow. Returns the release, for
    * a start that ends with no turn.

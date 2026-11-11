@@ -265,6 +265,8 @@ export class DrainScheduler {
         return this.#mayStartNow(lane) && this.#memory.mayDrain(lane.agentId) && this.#laneHead(lane) !== null;
       },
       head: (key) => this.#laneHead(laneOf(key))?.delivery ?? null,
+      backgroundLimit: (limit) => this.#memory.backgroundTurnLimit(limit),
+      personLanes: () => new Set(this.#mailbox.personLanes().map(laneKey)),
     });
   }
 

@@ -1,6 +1,7 @@
 import { readdir, readFile, readlink, writeFile } from "node:fs/promises";
 import { getPriority, setPriority } from "node:os";
 import { Deferred, Effect, Schema } from "effect";
+import type { TurnBuffer, TurnBufferStatus } from "../backend/agent/turn-buffer";
 import { causeHelpers } from "../backend/effect-boundary";
 import type { HostMemory, HostMemoryLevel } from "../backend/host-memory";
 
@@ -38,6 +39,8 @@ export interface ServerMemoryOptions {
   onError: (message: string, error: unknown) => void;
   /** Called for each leftover agent process that the server signals to free memory. */
   onAgentProcessStopped?: (process: StoppedAgentProcess) => void;
+  turnBuffer?: TurnBuffer;
+  readSample?: () => MemorySample | null;
   now?: () => number;
 }
 
@@ -123,7 +126,20 @@ export class ServerMemory implements HostMemory {
     return this.#sample;
   }
 
-  turnLimit(): 2 | 8 | 16 {
+  turnLimit(): number {
+    const memoryLimit = this.memoryTurnLimit();
+    return this.#options.turnBuffer?.limit(memoryLimit) ?? memoryLimit;
+  }
+
+  backgroundTurnLimit(limit: number): number | null {
+    return this.#options.turnBuffer?.backgroundLimit(limit) ?? null;
+  }
+
+  turnBufferStatus(): TurnBufferStatus | null {
+    return this.#options.turnBuffer?.status(this.memoryTurnLimit()) ?? null;
+  }
+
+  memoryTurnLimit(): 2 | 8 | 16 {
     // A margin over the plan sizes of 4 and 8 GB: the kernel keeps some memory for itself. On 4 GB,
     // four turns that start together reserve enough `TURN_RESERVE_BYTES` to reach the low level.
     const total = this.#sample?.total ?? 0;
@@ -177,6 +193,7 @@ export class ServerMemory implements HostMemory {
   });
 
   #read = Effect.fn("ServerMemory.read")(function* (this: ServerMemory) {
+    if (this.#options.readSample) return this.#options.readSample();
     const result = yield* Effect.result(readLinuxMemory());
     if (result._tag === "Success") {
       if (result.success.unit === "unknown" && !this.#noCgroupLogged) {

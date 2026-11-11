@@ -84,3 +84,69 @@ describe("TurnSlots.mayStart", () => {
     expect(blocked.mayStart("agent-020")).toBe(true);
   });
 });
+
+describe("TurnSlots.mayStart with reserved person slots", () => {
+  const lanes = Array.from({ length: 20 }, (_, index) => `agent-${String(index).padStart(2, "0")}`);
+
+  function reserved(options: {
+    running: string[];
+    person: string[];
+    heads: Record<string, QueueDelivery>;
+    backgroundLimit: number | null;
+  }) {
+    return new TurnSlots({
+      limit: () => 10,
+      lanes: () => lanes,
+      isRunning: (lane) => options.running.includes(lane),
+      isWaiting: (lane) => !options.running.includes(lane) && options.heads[lane] !== undefined,
+      head: (lane) => options.heads[lane] ?? null,
+      backgroundLimit: () => options.backgroundLimit,
+      personLanes: () => new Set(options.person),
+    });
+  }
+
+  it("keeps the reserved slots for a person's message when background turns fill their share", () => {
+    const running = lanes.slice(0, 7);
+    const heads = {
+      "agent-10": delivery("2026-11-11T10:00:00.000Z"),
+      "agent-11": delivery("2026-11-11T10:05:00.000Z", "user"),
+    };
+    const slots = reserved({ running, person: [], heads, backgroundLimit: 7 });
+    expect(slots.mayStart("agent-10")).toBe(false);
+    expect(slots.mayStart("agent-11")).toBe(true);
+  });
+
+  it("does not count a person's running turn against the background share", () => {
+    const running = [...lanes.slice(0, 6), "agent-15", "agent-16"];
+    const heads = { "agent-10": delivery("2026-11-11T10:00:00.000Z") };
+    const slots = reserved({ running, person: ["agent-15", "agent-16"], heads, backgroundLimit: 7 });
+    expect(slots.mayStart("agent-10")).toBe(true);
+  });
+
+  it("lets only the oldest waiting background lanes into the free background slots", () => {
+    const running = lanes.slice(0, 5);
+    const heads = {
+      "agent-10": delivery("2026-11-11T10:00:00.000Z"),
+      "agent-11": delivery("2026-11-11T10:01:00.000Z"),
+      "agent-12": delivery("2026-11-11T10:02:00.000Z"),
+      "agent-13": delivery("2026-11-11T10:03:00.000Z", "user"),
+    };
+    const slots = reserved({ running, person: [], heads, backgroundLimit: 7 });
+    expect(slots.mayStart("agent-10")).toBe(true);
+    expect(slots.mayStart("agent-11")).toBe(true);
+    expect(slots.mayStart("agent-12")).toBe(false);
+    expect(slots.mayStart("agent-13")).toBe(true);
+  });
+
+  it("still stops a person's message when every slot runs", () => {
+    const running = lanes.slice(0, 10);
+    const heads = { "agent-11": delivery("2026-11-11T10:05:00.000Z", "user") };
+    expect(reserved({ running, person: [], heads, backgroundLimit: 7 }).mayStart("agent-11")).toBe(false);
+  });
+
+  it("starts background turns in every free slot when there is no background limit", () => {
+    const running = lanes.slice(0, 9);
+    const heads = { "agent-10": delivery("2026-11-11T10:00:00.000Z") };
+    expect(reserved({ running, person: [], heads, backgroundLimit: null }).mayStart("agent-10")).toBe(true);
+  });
+});
