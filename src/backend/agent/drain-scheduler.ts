@@ -17,6 +17,7 @@ import {
   CURRENT_MESSAGE_SEPARATOR,
   combinedPromptInput,
   deliveryPromptInput,
+  labelTeammateMessage,
   type TagReferenceSource,
 } from "./delivery-content";
 import type { DuplicationGate } from "./duplication-gate";
@@ -795,12 +796,14 @@ export class DrainScheduler {
         ? this.#mailbox.planContinuationsToStartWith(delivery.id)
         : channelDelivery || ownSession || messagingDelivery
           ? []
-          : this.#mailbox.userMessagesToStartWith(delivery.id);
+          : delivery.sender.kind === "agent"
+            ? this.#mailbox.agentMessagesToStartWith(delivery.id, new Set(replies.map((item) => item.delivery.id)))
+            : this.#mailbox.userMessagesToStartWith(delivery.id);
     const companions = [...replies, ...laterMessages];
     let batch =
       planNote !== undefined || delivery.sender.kind === "user"
         ? [...replies, context, ...laterMessages]
-        : [context, ...replies];
+        : [context, ...replies, ...laterMessages];
     let confirmedTurnId: string | null = null;
     // The session of a routine run in its own session. Closed here when no turn starts on it.
     let routineThreadId: string | null = null;
@@ -938,11 +941,11 @@ export class DrainScheduler {
         // The deliveries of one interrupted turn share its continuation, so the prompt states it once.
         const continued = new Set<string>();
         return combinedPromptInput(
-          batch.map((item) => {
+          batch.map((item, index) => {
             const { resumeAfterUsageLimit, ...rest } = item;
             const repeated = resumeAfterUsageLimit !== undefined && continued.has(resumeAfterUsageLimit.turnId);
             if (resumeAfterUsageLimit) continued.add(resumeAfterUsageLimit.turnId);
-            return deliveryPromptInput(repeated ? rest : item, {
+            const items = deliveryPromptInput(repeated ? rest : item, {
               agentNames,
               snapshot,
               routineRun:
@@ -953,6 +956,7 @@ export class DrainScheduler {
                 item.delivery.sender.kind === "routine" && this.#routines.hasForwardedChannelWaits(item.delivery.id),
               ...(executionText === undefined ? {} : { executionText }),
             });
+            return labelTeammateMessage(items, item, index, batch.length, agentNames);
           }),
           [...requestIds].flatMap((requestId) => this.#mailbox.unansweredRecipients(requestId)),
           agentNames,

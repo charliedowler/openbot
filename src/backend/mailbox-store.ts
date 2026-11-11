@@ -258,6 +258,7 @@ export interface CommittedChannelAttachments {
 export const MAILBOX_CONVERSATION_MESSAGE_LIMIT = 100;
 export const QUEUE_WINDOW_COMPLETED_LIMIT = 100;
 export const QUEUE_WINDOW_ENDED_LIMIT = 100;
+export const AGENT_MESSAGE_BATCH_LIMITS = { messages: 20, bytes: 24 * 1024 };
 
 export interface QueueDeliveryState {
   id: string;
@@ -2068,6 +2069,48 @@ export class MailboxStore {
       )
         break;
       run.push(candidate);
+    }
+    return this.#contexts(run);
+  }
+
+  agentMessagesToStartWith(
+    deliveryId: string,
+    taken: ReadonlySet<string> = new Set(),
+    limits: { messages: number; bytes: number } = AGENT_MESSAGE_BATCH_LIMITS,
+  ): DeliveryContext[] {
+    const next = this.#state.deliveries.find((candidate) => candidate.id === deliveryId);
+    if (!next) return [];
+    const messages = this.#messagesById();
+    const first = this.#requireMessage(next.messageId, messages);
+    if (!isChatMessageFromAgent(first) || next.resumeAfterUsageLimit) return [];
+    const lane = first.taskId ?? null;
+    let count = 1 + taken.size;
+    let bytes = Buffer.byteLength(first.text);
+    for (const id of taken) {
+      const delivery = this.#state.deliveries.find((candidate) => candidate.id === id);
+      const message = delivery ? messages.get(delivery.messageId) : undefined;
+      if (message) bytes += Buffer.byteLength(message.text);
+    }
+    const run: StoredDelivery[] = [];
+    for (const candidate of this.#queuedFor(next.recipientAgentId)) {
+      if (count >= limits.messages) break;
+      if (candidate.id === next.id || taken.has(candidate.id)) continue;
+      const message = this.#requireMessage(candidate.messageId, messages);
+      if ((message.taskId ?? null) !== lane) continue;
+      if (message.sender.kind === "user") break;
+      if (
+        !isChatMessageFromAgent(message) ||
+        candidate.resumeAfterUsageLimit ||
+        waitsForPlanContinuation(candidate) ||
+        !this.#mayStart(candidate) ||
+        this.#isHeldReply(candidate, messages)
+      )
+        continue;
+      const size = Buffer.byteLength(message.text);
+      if (bytes + size > limits.bytes) break;
+      run.push(candidate);
+      count += 1;
+      bytes += size;
     }
     return this.#contexts(run);
   }
@@ -4035,6 +4078,16 @@ function recordFinishedQueueEdit(delivery: StoredDelivery, editId: string, outco
 }
 
 /** A message the person wrote in the agent's chat or a task, not one of a channel or a messaging app. */
+function isChatMessageFromAgent(message: StoredMessage): boolean {
+  return (
+    message.sender.kind === "agent" &&
+    message.channelId === undefined &&
+    message.messaging === undefined &&
+    message.messagingReturn === undefined &&
+    message.senderTaskId === undefined
+  );
+}
+
 function isChatMessageFromPerson(message: StoredMessage): boolean {
   return (
     message.sender.kind === "user" &&

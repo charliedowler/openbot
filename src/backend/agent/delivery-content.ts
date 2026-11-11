@@ -409,6 +409,23 @@ export function nextStepContinuationPrompt(count: number, limit: number): string
  * handoff goes in front of all of them. `unanswered` names the teammates whose request ended with no
  * answer, so the agent does not wait for them.
  */
+export function labelTeammateMessage(
+  items: DeliveryInputItem[],
+  context: DeliveryContext,
+  index: number,
+  count: number,
+  agentNames: ReadonlyMap<string, string>,
+): DeliveryInputItem[] {
+  const { sender, createdAt } = context.delivery;
+  if (count < 2 || sender.kind !== "agent") return items;
+  const label = `Message ${index + 1} of ${count}, from ${agentNames.get(sender.agentId) ?? sender.agentId} at ${createdAt}:`;
+  const first = items.findIndex((item) => item.type === "text");
+  if (first < 0) return [{ type: "text", text: label }, ...items];
+  return items.map((item, position) =>
+    position === first && item.type === "text" ? { ...item, text: `${label}\n${item.text}` } : item,
+  );
+}
+
 export function combinedPromptInput(
   inputs: readonly DeliveryInputItem[][],
   unanswered: readonly string[],
