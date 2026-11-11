@@ -9,8 +9,8 @@
  * full access to its files, so the socket gives them nothing new. The socket answers a closed list
  * of requests: status, the email-code sign-in, the sign-in with an operator's one-time claim, the
  * server name, sign-out, a Mobile Connect code, the end of the usage limits that hold a provider's
- * agents, the Stop of an agent's running turn, an agent's model and backup models, and each agent's
- * queue. It never sends the session token, the sign-in code
+ * agents, the Stop of an agent's running turn, an agent's model and backup models, each agent's
+ * queue, the agent routines and where an agent routine runs. It never sends the session token, the sign-in code
  * or the claim back. The Mobile Connect code signs one phone
  * in to the account of the server; the account service lets it work for one sign-in, for two minutes.
  *
@@ -24,13 +24,23 @@ import type { Socket } from "node:net";
 import { dirname, isAbsolute, join } from "node:path";
 import { parseHostedServerName } from "@openbot/contracts/hosted-servers";
 import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
-import { type AgentSummary, type CentralAuthState, isAgentProvider, isProviderAccountId } from "@openbot/contracts/ipc";
+import {
+  type AgentSummary,
+  type CentralAuthState,
+  type EventRoutine,
+  isAgentProvider,
+  isProviderAccountId,
+  ROUTINE_RUN_PLACES,
+  type RoutineRunPlace,
+  type SaveEventRoutineInput,
+} from "@openbot/contracts/ipc";
 import { sourceText } from "@openbot/i18n/source";
 import { Deferred, Effect } from "effect";
 import QRCode from "qrcode";
 import type { AgentService } from "../backend/agent-service";
 import { runCauseEffect } from "../backend/effect-boundary";
 import type { CentralAuthManager } from "./central-auth-manager";
+import type { HostEventsService } from "./host-events-service";
 import type { HostService } from "./host-service";
 import { readBodyWithin } from "./http-body";
 import { createHostedMobileConnect } from "./mobile-connect-host";
@@ -81,6 +91,8 @@ export interface ServerModeOptions {
   nativeWork?: () => { idle: boolean; compactions: number; providerOperations: number; reasons: string[] };
   usageLimits?: Pick<AgentService, "releaseUsageLimits">;
   agents?: Pick<AgentService, "listAgents" | "interruptRunningTurn" | "updateAgentRuntime" | "agentQueues">;
+  routines?: Pick<HostEventsService, "listRoutines" | "saveRoutine">;
+  channelIds?: () => readonly string[];
   onError: (message: string, error: unknown) => void;
   /** Tests only. */
   uid?: number;
@@ -230,6 +242,10 @@ export class ServerMode {
         return this.#updateAgent(body);
       case "GET /v1/agents/queue":
         return this.#agentQueue();
+      case "GET /v1/routines":
+        return this.#routines();
+      case "POST /v1/routines/update":
+        return this.#updateRoutine(body);
       case "POST /v1/logout":
         await runCauseEffect(
           this.#options.centralAuth.logout().pipe(Effect.mapError(({ cause }) => new RemoteWorkflowError({ cause }))),
@@ -378,6 +394,78 @@ export class ServerMode {
     };
   }
 
+  async #agentRoutines(): Promise<EventRoutine[] | null> {
+    const { agents, routines } = this.#options;
+    if (!agents || !routines) return null;
+    const listed: EventRoutine[] = [];
+    for (const agent of agents.listAgents())
+      listed.push(...(await runCauseEffect(routines.listRoutines({ owner: { kind: "agent", id: agent.id } }))));
+    return listed;
+  }
+
+  async #routines(): Promise<Answer> {
+    const listed = await this.#agentRoutines();
+    if (!listed) return failure(404, "not_found");
+    return {
+      status: 200,
+      lines: {
+        routines: listed.length,
+        ...Object.fromEntries(
+          listed.map((routine) => [
+            `routine.${routine.id}`,
+            JSON.stringify({
+              agentId: routine.owner.id,
+              name: routine.name,
+              runIn: routine.runIn ?? "chat",
+              active: routine.active,
+              trigger: routine.trigger.kind,
+            }),
+          ]),
+        ),
+      },
+    };
+  }
+
+  async #updateRoutine(body: URLSearchParams): Promise<Answer> {
+    const { routines, channelIds } = this.#options;
+    const listed = await this.#agentRoutines();
+    if (!routines || !listed) return failure(404, "not_found");
+    for (const key of new Set(body.keys())) {
+      if (!ROUTINE_UPDATE_FIELDS.has(key)) return failure(400, "unknown_field", key);
+      if (body.getAll(key).length > 1) return failure(400, "repeated_field", key);
+    }
+    const routineId = body.get("routineId")?.trim() ?? "";
+    if (!routineId || routineId.length > INPUT_LIMITS.identifier) return failure(400, "invalid_routine");
+    const runIn = ROUTINE_RUN_PLACES.find((place) => place === body.get("runIn"));
+    if (!runIn) return failure(400, "invalid_run_in");
+    const routine = listed.find((item) => item.id === routineId);
+    if (!routine) {
+      for (const channelId of channelIds?.() ?? []) {
+        const channelRoutines = await runCauseEffect(
+          routines.listRoutines({ owner: { kind: "channel", id: channelId } }),
+        );
+        if (channelRoutines.some((item) => item.id === routineId))
+          return { status: 409, lines: { error: "channel_routine", channelId } };
+      }
+      return failure(404, "unknown_routine");
+    }
+    let saved: EventRoutine;
+    try {
+      saved = (await runCauseEffect(routines.saveRoutine(runInUpdate(routine, runIn)))).routine;
+    } catch (error) {
+      return failure(400, "invalid_update", error instanceof Error ? error.message : String(error));
+    }
+    return {
+      status: 200,
+      lines: {
+        routineId: saved.id,
+        agentId: saved.owner.id,
+        runIn: saved.runIn ?? "chat",
+        active: String(saved.active),
+      },
+    };
+  }
+
   #memoryLines(): Answer["lines"] {
     const memory = this.#options.memory;
     const sample = memory?.sample();
@@ -507,6 +595,26 @@ async function readBody(request: IncomingMessage): Promise<URLSearchParams | nul
 }
 
 const AGENT_UPDATE_FIELDS = new Set(["agentId", "provider", "model", "providerAccountId", "backupModels"]);
+const ROUTINE_UPDATE_FIELDS = new Set(["routineId", "runIn"]);
+
+function runInUpdate(routine: EventRoutine, runIn: RoutineRunPlace): SaveEventRoutineInput {
+  const { trigger } = routine;
+  return {
+    id: routine.id,
+    owner: routine.owner,
+    name: routine.name,
+    instruction: routine.instruction,
+    active: routine.active,
+    timezone: routine.timezone,
+    trigger:
+      trigger.kind === "schedule"
+        ? { kind: "schedule", schedule: trigger.schedule }
+        : { kind: "webhook", eventType: trigger.eventType, filters: trigger.filters },
+    ...(routine.limitPolicy === undefined ? {} : { limitPolicy: routine.limitPolicy }),
+    ...(routine.missedPolicy === undefined ? {} : { missedPolicy: routine.missedPolicy }),
+    runIn,
+  };
+}
 const DEFAULT_ACCOUNT_FIELD = "default";
 
 function failure(status: number, error: string, message: string | null = null): Answer {

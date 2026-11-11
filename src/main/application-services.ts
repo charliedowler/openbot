@@ -3714,6 +3714,8 @@ export async function createApplicationServices({
         },
         usageLimits: service,
         agents: service,
+        routines: events,
+        channelIds: () => service.channels.store.ids(),
         onError: (message, error) => logger.warn(message, toLogValue(error)),
       })
     : null;
