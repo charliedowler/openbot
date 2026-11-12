@@ -75,6 +75,7 @@ export interface MessagingOrigin {
 }
 
 interface StoredMessage {
+  executionPurpose?: "review";
   channelId?: string | undefined;
   messaging?: MessagingOrigin;
   /**
@@ -191,6 +192,7 @@ interface StoredReaction {
 }
 
 interface EnqueueInput {
+  executionPurpose?: "review";
   channelId?: string;
   messaging?: MessagingOrigin;
   messagingReturn?: MessagingOrigin;
@@ -226,6 +228,7 @@ export interface MailboxStoredFile {
 }
 
 export interface DeliveryContext {
+  executionPurpose?: "review";
   delivery: QueueDelivery;
   managedAttachments: Array<AttachmentSummary & { path: string }>;
   resumeAfterUsageLimit?: UsageLimitContinuation;
@@ -689,6 +692,7 @@ export class MailboxStore {
       const committedByDraftId = new Map(drafts.map((draft, index) => [draft.id, attachments[index]] as const));
       const messaging = input.messaging ?? this.#answerReturn(input, recipients);
       const message: StoredMessage = {
+        ...(input.executionPurpose ? { executionPurpose: input.executionPurpose } : {}),
         ...(input.channelId === undefined ? {} : { channelId: input.channelId }),
         ...(messaging ? { messaging } : {}),
         ...(input.messagingReturn ? { messagingReturn: input.messagingReturn } : {}),
@@ -3622,6 +3626,7 @@ export class MailboxStore {
     const message = this.#requireMessage(delivery.messageId, messages);
     return {
       delivery: this.#publicDelivery(delivery, positions, message),
+      ...(message.executionPurpose ? { executionPurpose: message.executionPurpose } : {}),
       ...(delivery.resumeAfterUsageLimit ? { resumeAfterUsageLimit: delivery.resumeAfterUsageLimit } : {}),
       ...(delivery.planContinuation ? { planContinuation: delivery.planContinuation } : {}),
       ...(message.channelId ? { channelId: message.channelId } : {}),
@@ -4034,6 +4039,7 @@ function messageFiles(message: StoredMessage): StoredAttachment[] {
 function isStoredMessage(value: unknown): value is StoredMessage {
   return (
     isRecord(value) &&
+    (value.executionPurpose === undefined || value.executionPurpose === "review") &&
     (value.channelId === undefined || isString(value.channelId)) &&
     (value.messaging === undefined || isMessagingOrigin(value.messaging)) &&
     (value.messagingReturn === undefined || isMessagingOrigin(value.messagingReturn)) &&

@@ -2539,6 +2539,8 @@ export function createMockOpenBot(options: MockOpenBotOptions = {}): MockOpenBot
         const {
           agentId: _agentId,
           busyMessageMode,
+          channelSummaryModel,
+          routineModel,
           sessionTokenCap,
           turnTokenBudget,
           taskLimit,
@@ -2559,6 +2561,10 @@ export function createMockOpenBot(options: MockOpenBotOptions = {}): MockOpenBot
           if (flag === null) delete updated[key];
           else if (flag !== undefined) updated[key] = flag;
         }
+        if (channelSummaryModel === null) delete updated.channelSummaryModel;
+        else if (channelSummaryModel !== undefined) updated.channelSummaryModel = { ...channelSummaryModel };
+        if (routineModel === null) delete updated.routineModel;
+        else if (routineModel !== undefined) updated.routineModel = { ...routineModel };
         if (backupModels === null) delete updated.backupModels;
         else if (backupModels) updated.backupModels = backupModels;
         if (providerAccountId === null || (updates.provider && !providerAccountId)) delete updated.providerAccountId;

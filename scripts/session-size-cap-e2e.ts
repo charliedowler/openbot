@@ -428,6 +428,7 @@ const browser: AgentBrowserHost = {
 
 interface Row {
   method?: string;
+  compactionEnded?: string;
   params?: { threadId?: string; input?: { text?: string }[] };
   threadId?: string;
 }
@@ -457,6 +458,7 @@ const report: {
   checkedAt?: string;
 } = { passed: false, checks: [] };
 async function check(name: string, run: () => Promise<unknown>) {
+  if (process.argv[2] && !name.includes(process.argv[2])) return;
   try {
     report.checks.push({ name, passed: true, detail: await run() });
   } catch (error) {
@@ -624,6 +626,55 @@ try {
     await waitFor("default-cap compaction", () => f.compactRows().length > 0);
     return { cap: 200000, used: 201000, compactions: f.compactRows().length };
   });
+  await check("a growing post-compaction session rotates only after its turn ends", async () => {
+    controlUsage(150000);
+    const f = await fixture();
+    await f.send("GROWING-COMPACTION-HANDOFF");
+    const before = f.session();
+    const compacted = await f.control(`agentId=${f.agent.id}`);
+    assert.equal(compacted.status, 202, compacted.text);
+    await waitFor("the manual compaction to finish", () =>
+      protocol().some((row) => row.compactionEnded && row.threadId === before),
+    );
+    await waitFor("the compaction hold to release", () => f.service.nativeWorkSnapshot().compactions === 0);
+    controlUsage(170000, 1000000, 400);
+    const next = f.send("The larger session finishes this turn before it rotates.");
+    await waitFor("the growing turn to start", () =>
+      f.service.listQueue(f.agent.id).deliveries.some((delivery) => delivery.status === "running"),
+    );
+    assert.equal(f.session(), before, "An active turn keeps its session.");
+    await next;
+    await waitFor("growth-triggered rotation", () => f.session() !== before);
+    assert.equal(f.service.listAgents().find((agent) => agent.id === f.agent.id)?.threadId, f.threadId);
+    assert.equal(
+      protocol().filter((row) => row.method === "thread/compact/start" && row.params?.threadId === before).length,
+      1,
+    );
+    controlUsage(1000);
+    await f.send("A fresh session receives the short handoff.");
+    const latest = protocol()
+      .filter((row) => row.method === "turn/start")
+      .at(-1);
+    assert.ok(JSON.stringify(latest?.params).includes("GROWING-COMPACTION-HANDOFF"));
+    return { before, after: f.session(), publicThread: f.threadId };
+  });
+  for (const after of [140000, 150000])
+    await check(`a post-compaction session of ${after} tokens keeps its session`, async () => {
+      controlUsage(150000);
+      const f = await fixture();
+      await f.send("A comparable pre-compaction count.");
+      const before = f.session();
+      const compacted = await f.control(`agentId=${f.agent.id}`);
+      assert.equal(compacted.status, 202, compacted.text);
+      await waitFor("the manual compaction to finish", () =>
+        protocol().some((row) => row.compactionEnded && row.threadId === before),
+      );
+      await waitFor("the compaction hold to release", () => f.service.nativeWorkSnapshot().compactions === 0);
+      controlUsage(after);
+      await f.send("A comparable result does not grow.");
+      assert.equal(f.session(), before);
+      return { before: 150000, after };
+    });
   await check("an explicit agent cap persists and null removes the override", async () => {
     controlUsage(1000);
     const f = await fixture();

@@ -213,6 +213,8 @@ export interface AgentSummary {
   reasoningEffort: AgentReasoningEffort;
   /** Local saved provider settings; released Team API agent payloads omit this field. */
   sessionSettingOverrides?: AgentSessionSettingOverrides;
+  channelSummaryModel?: AgentModelChoice;
+  routineModel?: AgentModelChoice;
   /** Provider sessions that must restart to restore defaults after a reset. Local-only. */
   sessionSettingResets?: string[];
   /**
@@ -352,6 +354,8 @@ function hasAgentSummaryFields(value: DynamicRecord): boolean {
     isBoolean(value.notifications) &&
     isAgentModel(value.model) &&
     isReasoningEffort(value.reasoningEffort) &&
+    (value.channelSummaryModel === undefined || isAgentModelChoice(value.channelSummaryModel)) &&
+    (value.routineModel === undefined || isAgentModelChoice(value.routineModel)) &&
     (value.sessionSettingOverrides === undefined || isAgentSessionSettingOverrides(value.sessionSettingOverrides)) &&
     (value.sessionSettingResets === undefined || isAgentSessionSettingResets(value.sessionSettingResets)) &&
     (value.access === undefined || isAgentAccess(value.access)) &&
@@ -407,6 +411,8 @@ export interface CreateAgentInput {
 
 export interface UpdateAgentInput {
   agentId: string;
+  channelSummaryModel?: AgentModelChoice | null;
+  routineModel?: AgentModelChoice | null;
   name?: string;
   title?: string;
   description?: string;

@@ -48,6 +48,7 @@ import {
   isAgentAdditionalFolders,
   isAgentBackupModels,
   isAgentModel,
+  isAgentModelChoice,
   isAgentPendingRuntime,
   isAgentSessionSettingOverrides,
   isAgentSessionSettingResets,
@@ -438,6 +439,8 @@ export class AgentStore {
         );
       record.computerUse = source.computerUse;
       if (source.busyMessageMode) record.busyMessageMode = source.busyMessageMode;
+      if (source.channelSummaryModel) record.channelSummaryModel = { ...source.channelSummaryModel };
+      if (source.routineModel) record.routineModel = { ...source.routineModel };
       if (source.sessionTokenCap !== undefined) record.sessionTokenCap = source.sessionTokenCap;
       if (source.turnTokenBudget !== undefined) record.turnTokenBudget = source.turnTokenBudget;
       if (source.taskLimit !== undefined) record.taskLimit = source.taskLimit;
@@ -813,6 +816,18 @@ export class AgentStore {
         if (!isBusyMessageMode(input.busyMessageMode)) throw new Error("Invalid busy message mode.");
         next.busyMessageMode = input.busyMessageMode;
       }
+      for (const field of ["channelSummaryModel", "routineModel"] as const) {
+        const choice = input[field];
+        if (choice === null) delete next[field];
+        else if (choice !== undefined) {
+          if (!isAgentModelChoice(choice)) throw new Error("Invalid helper model.");
+          next[field] = {
+            provider: choice.provider,
+            model: choice.model,
+            ...(choice.providerAccountId ? { providerAccountId: choice.providerAccountId } : {}),
+          };
+        }
+      }
       if (input.sessionTokenCap === null) delete next.sessionTokenCap;
       else if (input.sessionTokenCap !== undefined) {
         if (!isAgentTokenBudget(input.sessionTokenCap)) throw new Error("Invalid token budget.");
@@ -890,6 +905,8 @@ export class AgentStore {
       // A copy cannot remove a field, and `null` above returned the agent to the app default or to
       // the provider's own sign-in, and an agent flag to the account default.
       if (next.busyMessageMode === undefined) delete agent.busyMessageMode;
+      if (next.channelSummaryModel === undefined) delete agent.channelSummaryModel;
+      if (next.routineModel === undefined) delete agent.routineModel;
       if (next.sessionTokenCap === undefined) delete agent.sessionTokenCap;
       if (next.turnTokenBudget === undefined) delete agent.turnTokenBudget;
       if (next.taskLimit === undefined) delete agent.taskLimit;
@@ -910,6 +927,8 @@ export class AgentStore {
       } catch (error) {
         Object.assign(agent, previous);
         if (previous.busyMessageMode === undefined) delete agent.busyMessageMode;
+        if (previous.channelSummaryModel === undefined) delete agent.channelSummaryModel;
+        if (previous.routineModel === undefined) delete agent.routineModel;
         if (previous.sessionTokenCap === undefined) delete agent.sessionTokenCap;
         if (previous.turnTokenBudget === undefined) delete agent.turnTokenBudget;
         if (previous.taskLimit === undefined) delete agent.taskLimit;
@@ -1936,6 +1955,8 @@ function isStoredAgent(value: unknown): value is PersistedStoredAgent {
     (record.browserProfileId === undefined || isBrowserProfileId(record.browserProfileId)) &&
     (record.fastMode === undefined || isBoolean(record.fastMode)) &&
     (record.busyMessageMode === undefined || isBusyMessageMode(record.busyMessageMode)) &&
+    (record.channelSummaryModel === undefined || isAgentModelChoice(record.channelSummaryModel)) &&
+    (record.routineModel === undefined || isAgentModelChoice(record.routineModel)) &&
     (record.sessionTokenCap === undefined || isAgentTokenBudget(record.sessionTokenCap)) &&
     (record.turnTokenBudget === undefined || isAgentTokenBudget(record.turnTokenBudget)) &&
     (record.taskLimit === undefined || isAgentTaskLimit(record.taskLimit)) &&
@@ -2038,6 +2059,14 @@ function readStoredAgent(value: unknown): ReadStoredAgent | UnreadableStoredAgen
     value.busyMessageMode === undefined || isBusyMessageMode(value.busyMessageMode)
       ? value.busyMessageMode
       : reset("busyMessageMode", undefined);
+  const channelSummaryModel =
+    value.channelSummaryModel === undefined || isAgentModelChoice(value.channelSummaryModel)
+      ? value.channelSummaryModel
+      : reset("channelSummaryModel", undefined);
+  const routineModel =
+    value.routineModel === undefined || isAgentModelChoice(value.routineModel)
+      ? value.routineModel
+      : reset("routineModel", undefined);
   const sessionTokenCap =
     value.sessionTokenCap === undefined || isAgentTokenBudget(value.sessionTokenCap)
       ? value.sessionTokenCap
@@ -2133,6 +2162,8 @@ function readStoredAgent(value: unknown): ReadStoredAgent | UnreadableStoredAgen
     ...(browserProfileId === undefined ? {} : { browserProfileId }),
     ...(fastMode === undefined ? {} : { fastMode }),
     ...(busyMessageMode === undefined ? {} : { busyMessageMode }),
+    ...(channelSummaryModel === undefined ? {} : { channelSummaryModel }),
+    ...(routineModel === undefined ? {} : { routineModel }),
     ...(sessionTokenCap === undefined ? {} : { sessionTokenCap }),
     ...(turnTokenBudget === undefined ? {} : { turnTokenBudget }),
     ...(taskLimit === undefined ? {} : { taskLimit }),

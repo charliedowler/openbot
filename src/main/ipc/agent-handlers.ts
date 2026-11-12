@@ -722,6 +722,9 @@ export function agentIpcHandlers({
           if (input.taskLimit !== undefined) {
             throw new Error(sourceText("error.agent.taskLimitLocalOnly"));
           }
+          if (input.channelSummaryModel !== undefined || input.routineModel !== undefined) {
+            throw new Error(sourceText("error.agent.settingsLocalOnly"));
+          }
           if (input.backupModels !== undefined || input.leaveUsageLimit !== undefined) {
             throw new Error(sourceText("error.agent.backupModelsLocalOnly"));
           }
@@ -888,6 +891,7 @@ export function agentIpcHandlers({
       sendMessage: scopedHandler(parseSendMessage, {
         local: (input) => runCauseEffect(service.sendMessage(input, host.conversationSender())),
         remote: (input, serverId) => {
+          if (input.executionPurpose !== undefined) throw new Error(sourceText("error.agent.settingsLocalOnly"));
           if (input.taskId) {
             const replyToMessageId = input.replyToMessageId;
             if (replyToMessageId)
