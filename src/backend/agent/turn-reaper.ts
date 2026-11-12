@@ -8,7 +8,7 @@ const MAX_STOPS_PER_AGENT_PER_HOUR = 2;
 const DEFAULT_STALL_MINUTES = 8;
 const DEFAULT_INTERVAL_SECONDS = 60;
 
-export type TurnReaperKind = "orphaned" | "parked";
+export type TurnReaperKind = "orphaned" | "parked" | "silent";
 
 export interface TurnReaperTurn {
   agentId: string;
@@ -16,6 +16,7 @@ export interface TurnReaperTurn {
   turnId: string;
   startedAt: number;
   lastThreadEventAt: number | null;
+  lastOutputAt?: number | null;
 }
 
 export interface TurnReaperStop {
@@ -32,12 +33,16 @@ export interface TurnReaperHost {
   pendingAttention(agentId: string, turnId: string): boolean;
   nobodyToAnswer(agentId: string, turnId: string, threadId: string): boolean;
   stop(stop: TurnReaperStop): Effect.Effect<void, unknown>;
+  kill?(stop: TurnReaperStop): Effect.Effect<void, unknown>;
+  refresh?(): Effect.Effect<void, unknown>;
 }
 
 export interface TurnReaperConfig {
   enabled: boolean;
   stallMs: number;
   intervalMs: number;
+  silenceMs: number;
+  killAfterMs: number;
 }
 
 function positiveNumber(value: string | undefined, fallback: number): number {
@@ -50,7 +55,9 @@ export function turnReaperConfig(env: NodeJS.ProcessEnv = process.env): TurnReap
   return {
     enabled: !["0", "false", "off", "no", "disabled"].includes(flag),
     stallMs: positiveNumber(env.OPENBOT_TURN_REAPER_MINUTES, DEFAULT_STALL_MINUTES) * 60_000,
-    intervalMs: positiveNumber(env.OPENBOT_TURN_REAPER_INTERVAL_SECONDS, DEFAULT_INTERVAL_SECONDS) * 1000,
+    silenceMs: Math.min(30, positiveNumber(env.OPENBOT_TURN_REAPER_SILENCE_MINUTES, 30)) * 60_000,
+    killAfterMs: Math.min(120, positiveNumber(env.OPENBOT_TURN_REAPER_KILL_SECONDS, 120)) * 1000,
+    intervalMs: Math.min(60, positiveNumber(env.OPENBOT_TURN_REAPER_INTERVAL_SECONDS, DEFAULT_INTERVAL_SECONDS)) * 1000,
   };
 }
 
@@ -100,6 +107,7 @@ export class TurnReaper {
     if (this.#sweeping) return;
     this.#sweeping = true;
     try {
+      if (this.#host.refresh) yield* this.#host.refresh();
       const turns = this.#host.runningTurns();
       const running = new Set(turns.map((turn) => turn.turnId));
       for (const turnId of this.#firstSeen.keys()) if (!running.has(turnId)) this.#firstSeen.delete(turnId);
@@ -107,7 +115,26 @@ export class TurnReaper {
       for (const turnId of this.#limitLogged) if (!running.has(turnId)) this.#limitLogged.delete(turnId);
       for (const turn of turns) {
         const decision = this.#classify(turn, now);
-        if (!decision) continue;
+        if (!decision) {
+          this.#attempted.delete(turn.turnId);
+          continue;
+        }
+        if (decision.kind === "silent") {
+          const interruptedAt = this.#attempted.get(turn.turnId);
+          if (interruptedAt !== undefined) {
+            if (now - interruptedAt >= this.#config.killAfterMs && this.#host.kill) {
+              yield* this.#host.kill(decision);
+            }
+            continue;
+          }
+          this.#attempted.set(turn.turnId, now);
+          yield* this.#host.stop(decision);
+          continue;
+        }
+        if (decision.kind === "orphaned") {
+          yield* this.#host.stop(decision);
+          continue;
+        }
         const attemptedAt = this.#attempted.get(turn.turnId);
         if (attemptedAt !== undefined && now - attemptedAt < this.#config.stallMs) continue;
         const recent = (this.#stops.get(turn.agentId) ?? []).filter((at) => now - at < HOUR_MS);
@@ -138,24 +165,33 @@ export class TurnReaper {
   });
 
   #classify(turn: TurnReaperTurn, now: number): TurnReaperStop | null {
-    const firstSeen = this.#firstSeen.get(turn.turnId) ?? now;
-    this.#firstSeen.set(turn.turnId, firstSeen);
-    const lastProgress = Math.max(
-      turn.startedAt,
-      firstSeen,
-      turn.lastThreadEventAt ?? 0,
-      this.#host.lastProviderEventAt(turn.agentId) ?? 0,
-    );
-    const idleMs = now - lastProgress;
-    if (idleMs < this.#config.stallMs) return null;
-    const minutes = Math.round(idleMs / 60_000);
     if (!this.#host.providerTurnLive(turn.agentId, turn.turnId))
       return {
         turn,
         kind: "orphaned",
-        idleMs,
-        reason: `No provider process runs this turn and it made no progress for ${minutes} minutes.`,
+        idleMs: Math.max(0, now - turn.startedAt),
+        reason: "No provider process runs this turn.",
       };
+    const outputIdleMs = now - Math.max(turn.startedAt, turn.lastOutputAt ?? turn.lastThreadEventAt ?? turn.startedAt);
+    if (outputIdleMs >= this.#config.silenceMs)
+      return {
+        turn,
+        kind: "silent",
+        idleMs: outputIdleMs,
+        reason: "The live turn reached its provider output silence ceiling.",
+      };
+    const firstSeen = this.#firstSeen.get(turn.turnId) ?? now;
+    this.#firstSeen.set(turn.turnId, firstSeen);
+    const idleMs =
+      now -
+      Math.max(
+        turn.startedAt,
+        firstSeen,
+        turn.lastThreadEventAt ?? 0,
+        this.#host.lastProviderEventAt(turn.agentId) ?? 0,
+      );
+    if (idleMs < this.#config.stallMs) return null;
+    const minutes = Math.round(idleMs / 60_000);
     if (
       this.#host.pendingAttention(turn.agentId, turn.turnId) &&
       this.#host.nobodyToAnswer(turn.agentId, turn.turnId, turn.threadId)

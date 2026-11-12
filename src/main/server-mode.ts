@@ -356,7 +356,10 @@ export class ServerMode {
         return {
           status: 200,
           lines: {
-            stopped: outcome.turn.turnId,
+            stopped: outcome.ended === false ? "false" : outcome.turn.turnId,
+            turnId: outcome.turn.turnId,
+            ended: String(outcome.ended ?? true),
+            interruptSent: String(outcome.interruptSent ?? true),
             threadId: outcome.turn.threadId,
             ownChat: String(outcome.turn.ownChat),
           },

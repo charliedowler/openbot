@@ -334,6 +334,7 @@ export class TurnLifecycle {
       sentAt: number | null;
       start: DeliveryStart | null;
       firstOutputAt: number | null;
+      lastOutputAt: number;
       produced: boolean;
       acted: boolean;
     }
@@ -468,6 +469,45 @@ export class TurnLifecycle {
     return this.#lastEventAt.get(agentId) ?? null;
   }
 
+  readonly #reaperProcesses = new Map<string, { live: boolean; toolOutputAt: number | null }>();
+
+  readonly refreshReaperProcesses = Effect.fn("TurnLifecycle.refreshReaperProcesses")(function* (this: TurnLifecycle) {
+    this.#reaperProcesses.clear();
+    for (const [turnId, turn] of this.#runningTurns) {
+      const state = turn.client.turnProcessState
+        ? yield* turn.client
+            .turnProcessState(turn.threadId, turnId)
+            .pipe(Effect.catch(() => Effect.succeed({ live: turn.client.running, toolOutputAt: null })))
+        : { live: turn.client.running, toolOutputAt: null };
+      if (this.#runningTurns.get(turnId) === turn) this.#reaperProcesses.set(turnId, state);
+    }
+  });
+
+  reaperTurnLive(turnId: string): boolean {
+    if (this.isCompleting(turnId)) return true;
+    const turn = this.#runningTurns.get(turnId);
+    return turn !== undefined && (this.#reaperProcesses.get(turnId)?.live ?? turn.client.running);
+  }
+
+  reaperOutputAt(turnId: string): number | null {
+    const turn = this.#runningTurns.get(turnId);
+    return turn ? Math.max(turn.lastOutputAt, this.#reaperProcesses.get(turnId)?.toolOutputAt ?? 0) : null;
+  }
+
+  readonly killReaperProcess = Effect.fn("TurnLifecycle.killReaperProcess")(function* (
+    this: TurnLifecycle,
+    turnId: string,
+  ) {
+    const turn = this.#runningTurns.get(turnId);
+    if (!turn || this.isCompleting(turnId)) return false;
+    const client = turn.client;
+    if (client.killTurnProcess) return yield* client.killTurnProcess(turn.threadId, turnId);
+    if ([...this.#runningTurns.entries()].some(([id, entry]) => id !== turnId && entry.client === client)) return false;
+    yield* client.stop();
+    yield* this.interruptTurnsOf(client);
+    return true;
+  });
+
   trackItem(itemId: string, turnId: string): void {
     this.#itemTurns.set(itemId, turnId);
   }
@@ -490,6 +530,7 @@ export class TurnLifecycle {
     this.#failoverTurns.clear();
     this.#failoverRetries.clear();
     this.#runningTurns.clear();
+    this.#reaperProcesses.clear();
     this.#noUpdateTurns.clear();
     this.#reportedFailures.clear();
     this.#endedTurns.clear();
@@ -630,6 +671,23 @@ export class TurnLifecycle {
     const threadId = getString(params, "threadId");
     const agentId = threadId ? this.#conversation.agentForThread(threadId) : undefined;
     if (agentId) this.#lastEventAt.set(agentId, Date.now());
+    const outputTurnId = getString(params, "turnId");
+    const outputTurn = outputTurnId ? this.#runningTurns.get(outputTurnId) : undefined;
+    if (
+      outputTurn &&
+      outputTurn.client === source &&
+      outputTurn.threadId === threadId &&
+      (notification.method === "openbot/provider-output" ||
+        (["item/started", "item/completed"].includes(notification.method) && getRecord(params, "item")) ||
+        ([
+          "item/commandExecution/outputDelta",
+          "item/reasoning/summaryTextDelta",
+          "item/reasoning/textDelta",
+          "item/agentMessage/delta",
+        ].includes(notification.method) &&
+          Boolean(getString(params, "delta"))))
+    )
+      outputTurn.lastOutputAt = Date.now();
 
     if (
       threadId &&
@@ -677,6 +735,7 @@ export class TurnLifecycle {
         const start = starting ? (this.#deliveryStarts.get(starting.id) ?? null) : null;
         // The other deliveries of the batch share this start and start no turn of their own.
         for (const [id, candidate] of this.#deliveryStarts) if (candidate === start) this.#deliveryStarts.delete(id);
+        this.#reaperProcesses.delete(turnId);
         this.#runningTurns.set(turnId, {
           client: source,
           agentId,
@@ -685,6 +744,7 @@ export class TurnLifecycle {
           sentAt: Number.isFinite(sentAt) ? sentAt : null,
           start,
           firstOutputAt: null,
+          lastOutputAt: Date.now(),
           produced: false,
           acted: false,
         });
@@ -1707,7 +1767,10 @@ export class TurnLifecycle {
     if (!running) return;
     running.produced = true;
     if (acted) running.acted = true;
-    if (streamed) running.firstOutputAt ??= Date.now();
+    if (streamed) {
+      running.firstOutputAt ??= Date.now();
+      running.lastOutputAt = Date.now();
+    }
   }
 
   readonly #associateStartedTurn = Effect.fn("TurnLifecycle.associateStartedTurn")(function* (

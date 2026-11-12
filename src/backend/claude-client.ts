@@ -129,6 +129,7 @@ import {
   toProviderClientOperationError,
 } from "./provider-client-effects";
 import type { ReadProviderHistory } from "./provider-history";
+import { ProviderTurnProcess } from "./provider-turn-process";
 
 const execFileAsync = promisify(execFile);
 const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
@@ -238,6 +239,7 @@ interface ThreadRuntime {
   resumedUsage: boolean;
   /** The usage of each API request since the last result, by message id. */
   requestUsage: Map<string, { model: string; usage: unknown }>;
+  process: () => ProviderTurnProcess | null;
   contextRequest: number;
   compacting: boolean;
   config: ThreadConfig;
@@ -498,6 +500,32 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
     yield* this.#threads.close(runtime).pipe(toProviderClientOperationError);
   });
 
+  readonly turnProcessState = Effect.fn("ClaudeAgentClient.turnProcessState")(function* (
+    this: ClaudeAgentClient,
+    threadId: string,
+    turnId: string,
+  ) {
+    const runtime = this.#threads.get(threadId);
+    if (!runtime || runtime.activeTurn?.id !== turnId) return { live: false, toolOutputAt: null };
+    const child = runtime.process();
+    const toolOutputAt = child
+      ? yield* providerCall(() => child.toolOutputAt((runtime.activeTurn?.toolCalls.size ?? 0) > 0))
+      : null;
+    return { live: child?.live ?? this.#running, toolOutputAt };
+  });
+
+  readonly killTurnProcess = Effect.fn("ClaudeAgentClient.killTurnProcess")(function* (
+    this: ClaudeAgentClient,
+    threadId: string,
+    turnId: string,
+  ) {
+    const runtime = this.#threads.get(threadId);
+    if (!runtime || runtime.activeTurn?.id !== turnId) return false;
+    runtime.process()?.kill();
+    yield* this.releaseThread(threadId);
+    return true;
+  });
+
   readonly #closeRuntime = Effect.fn("ClaudeAgentClient.closeRuntime")(function* (
     this: ClaudeAgentClient,
     runtime: ThreadRuntime,
@@ -581,7 +609,11 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
         // A released thread has no turn to stop.
         if (this.#threads.isReleased(threadId)) return yield* providerSync(() => decoder({}));
         const runtime = yield* providerSync(() => this.#requireThread(threadId));
-        yield* providerCall(() => runtime.query.interrupt());
+        yield* providerCall(() => {
+          const turnId = getString(params, "turnId");
+          if (turnId && runtime.activeTurn?.id !== turnId) return Promise.resolve();
+          return runtime.query.interrupt();
+        });
         return yield* providerSync(() => decoder({}));
       }
       case "thread/compact/start":
@@ -961,12 +993,39 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
       // The CLI loads this file and the SDK's own `--mcp-config` value together.
       ...(mcpConfigFile ? { "mcp-config": mcpConfigFile } : {}),
     };
+    let turnProcess: ProviderTurnProcess | null = null;
     const claudeQuery = yield* providerSync(() =>
       this.#createQuery({
         prompt: input,
         options: {
           cwd: config.cwd,
           ...this.#sdkLaunch,
+          spawnClaudeCodeProcess: (options) => {
+            const child =
+              this.#sdkLaunch.spawnClaudeCodeProcess?.(options) ??
+              spawn(options.command, options.args, {
+                cwd: options.cwd,
+                env: options.env,
+                stdio: ["pipe", "pipe", "pipe"],
+                windowsHide: true,
+              });
+            const tracked = new ProviderTurnProcess(child);
+            turnProcess = tracked;
+            const abort = () => tracked.kill();
+            options.signal.addEventListener("abort", abort, { once: true });
+            child.once("exit", () => options.signal.removeEventListener("abort", abort));
+            if (options.signal.aborted) abort();
+            child.on("error", () => {});
+            if (
+              "stderr" in child &&
+              child.stderr &&
+              typeof child.stderr === "object" &&
+              "resume" in child.stderr &&
+              typeof child.stderr.resume === "function"
+            )
+              child.stderr.resume();
+            return child;
+          },
           ...(config.model ? { model: this.#sdkModel(config.model) } : {}),
           ...(appliedEffort ? { effort: appliedEffort } : {}),
           ...(resume ? { resume: threadId } : { sessionId: threadId }),
@@ -1034,6 +1093,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
       usageCost: 0,
       resumedUsage: resume,
       requestUsage: new Map(),
+      process: () => turnProcess,
       contextRequest: 0,
       compacting: false,
       config,
@@ -1786,6 +1846,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
     if (!turn || !delta) return;
     turn.text += delta;
     turn.seenText += delta;
+    this.emit("notification", { method: "openbot/provider-output", params: { threadId: runtime.id, turnId: turn.id } });
   }
 
   /**

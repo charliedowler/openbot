@@ -26,6 +26,11 @@ export interface AgentClient {
    */
   readonly provisionalAnswers?: boolean;
   readonly running: boolean;
+  turnProcessState?(
+    threadId: string,
+    turnId: string,
+  ): Effect.Effect<{ live: boolean; toolOutputAt: number | null }, ProviderClientOperationError>;
+  killTurnProcess?(threadId: string, turnId: string): Effect.Effect<boolean, ProviderClientOperationError>;
   readonly readHistory?: ReadProviderHistory;
   /**
    * True when the user's MCP tools in this thread wait for the provider's own `tool_search`. OpenBot's
