@@ -25,9 +25,11 @@ import { dirname, isAbsolute, join } from "node:path";
 import { parseHostedServerName } from "@openbot/contracts/hosted-servers";
 import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
 import {
+  type AgentModelChoice,
   type AgentSummary,
   type CentralAuthState,
   type EventRoutine,
+  isAgentModelChoice,
   isAgentProvider,
   isProviderAccountId,
   ROUTINE_RUN_PLACES,
@@ -94,7 +96,12 @@ export interface ServerModeOptions {
   nativeWork?: () => { idle: boolean; compactions: number; providerOperations: number; reasons: string[] };
   usageLimits?: Pick<AgentService, "releaseUsageLimits">;
   agents?: Pick<AgentService, "listAgents" | "interruptRunningTurn" | "updateAgentRuntime" | "agentQueues"> &
-    Partial<Pick<AgentService, "controlAgentContext" | "cancelControlDeliveries" | "repairClaudeProviderSessions">>;
+    Partial<
+      Pick<
+        AgentService,
+        "controlAgentContext" | "cancelControlDeliveries" | "repairClaudeProviderSessions" | "sendMessage"
+      >
+    >;
   routines?: Pick<HostEventsService, "listRoutines" | "saveRoutine">;
   channelIds?: () => readonly string[];
   cpuProfiler?: Pick<CpuProfiler, "take">;
@@ -249,6 +256,8 @@ export class ServerMode {
         return this.#interruptTurn(body);
       case "POST /v1/agents/compact":
         return this.#compactAgent(body);
+      case "POST /v1/agents/review":
+        return this.#reviewAgent(body);
       case "POST /v1/agents/update":
         return this.#updateAgent(body);
       case "GET /v1/agents/queue":
@@ -438,6 +447,22 @@ export class ServerMode {
     return { status: 202, lines: { accepted: mode, agentId, threadId: result.threadId } };
   }
 
+  async #reviewAgent(body: URLSearchParams): Promise<Answer> {
+    const agents = this.#options.agents;
+    if (!agents?.sendMessage) return failure(404, "not_found");
+    for (const key of new Set(body.keys())) {
+      if (key !== "agentId" && key !== "text") return failure(400, "unknown_field", key);
+      if (body.getAll(key).length !== 1) return failure(400, "repeated_field", key);
+    }
+    const agentId = body.get("agentId")?.trim() ?? "";
+    const text = body.get("text")?.trim() ?? "";
+    if (!agentId || agentId.length > INPUT_LIMITS.identifier) return failure(400, "invalid_agent");
+    if (!text || text.length > INPUT_LIMITS.messageText) return failure(400, "invalid_text");
+    if (!agents.listAgents().some((agent) => agent.id === agentId)) return failure(404, "unknown_agent");
+    const receipt = await runCauseEffect(agents.sendMessage({ agentId, text, executionPurpose: "review" }));
+    return { status: 200, lines: { deliveryId: receipt.deliveries[0]?.id ?? "" } };
+  }
+
   async #updateAgent(body: URLSearchParams): Promise<Answer> {
     const agents = this.#options.agents;
     if (!agents) return failure(404, "not_found");
@@ -458,8 +483,22 @@ export class ServerMode {
     } catch {
       return failure(400, "invalid_backup_models");
     }
+    const helpers: Partial<Record<"channelSummaryModel" | "routineModel", AgentModelChoice | null>> = {};
+    try {
+      for (const field of ["channelSummaryModel", "routineModel"] as const) {
+        const text = body.get(field);
+        if (text !== null) {
+          const choice = JSON.parse(text);
+          if (choice !== null && !isAgentModelChoice(choice)) return failure(400, "invalid_helper_model");
+          helpers[field] = choice;
+        }
+      }
+    } catch {
+      return failure(400, "invalid_helper_model");
+    }
     const request = {
       agentId,
+      ...helpers,
       ...Object.fromEntries(
         ["sessionTokenCap", "turnTokenBudget"]
           .filter((key) => body.has(key))
@@ -484,6 +523,8 @@ export class ServerMode {
         model: updated.model,
         providerAccountId: updated.providerAccountId ?? DEFAULT_ACCOUNT_FIELD,
         backupModels: JSON.stringify(updated.backupModels ?? null),
+        channelSummaryModel: JSON.stringify(updated.channelSummaryModel ?? null),
+        routineModel: JSON.stringify(updated.routineModel ?? null),
         sessionTokenCap: updated.sessionTokenCap ?? "default",
         turnTokenBudget: updated.turnTokenBudget ?? "default",
         pendingRuntime: updated.pendingRuntime ? JSON.stringify(updated.pendingRuntime) : null,
@@ -729,6 +770,8 @@ const AGENT_UPDATE_FIELDS = new Set([
   "model",
   "providerAccountId",
   "backupModels",
+  "channelSummaryModel",
+  "routineModel",
   "sessionTokenCap",
   "turnTokenBudget",
 ]);

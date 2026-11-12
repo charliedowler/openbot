@@ -5,6 +5,7 @@ import { basename } from "node:path";
 import type {
   AccountUsage,
   AgentEvent,
+  AgentModelChoice,
   AgentModelId,
   AgentModelOption,
   AgentProviderStatus,
@@ -370,6 +371,7 @@ export class ProviderRuntime implements ProviderPort {
   /** `LONG_START_TIMEOUT_MS`, shorter in an end-to-end script. */
   readonly #longStartTimeoutMs: number;
   readonly #clientFactory: AgentClientFactory | null;
+  readonly #executionClients = new Map<AgentClient, AgentSummary>();
   readonly #bundledExecutables: BundledProviderExecutables;
   readonly #credentials: ProviderClientContext;
   readonly #clients = new Map<AgentProvider, AgentClient>();
@@ -611,20 +613,35 @@ export class ProviderRuntime implements ProviderPort {
           agentClient: (provider, accountId) =>
             [...this.#confined.values()].find(
               (confined) => confined.client.provider === provider && confined.accountId === accountId,
-            )?.client ?? null,
+            )?.client ??
+            [...this.#executionClients].find(
+              ([client, agent]) => client.provider === provider && agent.providerAccountId === accountId,
+            )?.[0] ??
+            null,
           isAccountBusy: (provider, accountId) =>
             [...this.#confined].some(
               ([agentId, confined]) =>
                 confined.client.provider === provider &&
                 confined.accountId === accountId &&
                 this.#hooks.isAgentBusy(agentId),
+            ) ||
+            [...this.#executionClients].some(
+              ([client, agent]) =>
+                client.provider === provider &&
+                agent.providerAccountId === accountId &&
+                this.#hooks.isAgentBusy(agent.id),
             ),
           stopAgentClients: (provider, accountId) =>
             Effect.forEach(
-              [...this.#confined].filter(
-                ([, confined]) => confined.client.provider === provider && confined.accountId === accountId,
-              ),
-              ([agentId, confined]) => this.#stopConfined(agentId, confined).pipe(Effect.ignore),
+              [
+                ...[...this.#confined]
+                  .filter(([, confined]) => confined.client.provider === provider && confined.accountId === accountId)
+                  .map(([agentId, confined]) => this.#stopConfined(agentId, confined).pipe(Effect.ignore)),
+                ...[...this.#executionClients]
+                  .filter(([client, agent]) => client.provider === provider && agent.providerAccountId === accountId)
+                  .map(([client]) => this.releaseExecutionClient(client)),
+              ],
+              (stop) => stop,
               { concurrency: "unbounded", discard: true },
             ),
           readUsage: (client, model) =>
@@ -943,6 +960,69 @@ export class ProviderRuntime implements ProviderPort {
     if (driver.createProfileClient) return driver.createProfileClient(cli, this.#requestTimeoutMs, context);
     return driver.createClient(cli, this.#requestTimeoutMs, context);
   }
+
+  executionAgent(agent: AgentSummary, choice: AgentModelChoice): AgentSummary {
+    this.requireProviderOn(choice.provider);
+    const model = this.listModels().find((item) => item.provider === choice.provider && item.id === choice.model);
+    if (!model) throw new Error(sourceText("error.backend.channelLeadModelUnavailable"));
+    if (choice.providerAccountId && !this.hasProviderAccount(choice.provider, choice.providerAccountId))
+      throw new Error(sourceText("error.provider.accountNotFound", { provider: providerLabel(choice.provider) }));
+    return {
+      ...agent,
+      provider: choice.provider,
+      model: choice.model,
+      providerAccountId: choice.providerAccountId,
+      reasoningEffort: model.supportedReasoningEfforts.includes(agent.reasoningEffort)
+        ? agent.reasoningEffort
+        : model.defaultReasoningEffort,
+    };
+  }
+
+  readonly createExecutionClient = Effect.fn("ProviderRuntime.createExecutionClient")(function* (
+    this: ProviderRuntime,
+    agent: AgentSummary,
+  ) {
+    const provider = providerForAgent(agent);
+    const disposals = this.#disposals;
+    yield* this.ensureProvider(provider);
+    yield* checkAgentFolders(agent);
+    const own = this.#ownProcessFor(agent);
+    if (agent.providerAccountId && !own?.account)
+      return yield* new ProviderOperationFailed({
+        cause: new Error(sourceText("error.provider.accountNotFound", { provider: providerLabel(provider) })),
+      });
+    const cli = this.#cli.get(provider);
+    if (!cli)
+      return yield* new ProviderOperationFailed({
+        cause: new Error(sourceText("error.provider.connectBeforeProfile")),
+      });
+    if (own?.account && !this.#providerAccounts?.supported(provider))
+      return yield* new ProviderOperationFailed({
+        cause: new Error(sourceText("error.provider.accountsUnsupported", { provider: providerLabel(provider) })),
+      });
+    const accountEnvironment = own?.account ? this.#providerAccounts?.environment(own.account) : undefined;
+    const { client } = yield* this.#authenticateClient(provider, cli, {
+      ...(own?.confinement ? { confinement: own.confinement } : {}),
+      ...(accountEnvironment ? { accountEnvironment } : {}),
+    });
+    if (disposals !== this.#disposals || this.#hooks.isStopping()) {
+      yield* client.stop().pipe(Effect.ignore);
+      return yield* new ProviderOperationFailed({
+        cause: new Error(sourceText("error.provider.stoppedBeforeAgentProcess", { provider: providerLabel(provider) })),
+      });
+    }
+    this.#executionClients.set(client, { ...agent });
+    return client;
+  }, Effect.uninterruptible).bind(this);
+
+  readonly releaseExecutionClient = Effect.fn("ProviderRuntime.releaseExecutionClient")(function* (
+    this: ProviderRuntime,
+    client: AgentClient,
+  ) {
+    if (!this.#executionClients.delete(client)) return;
+    yield* client.stop().pipe(Effect.ignore);
+    yield* this.#hooks.onClientStopped(client);
+  }, Effect.uninterruptible).bind(this);
 
   preferredProvider(): AgentProvider {
     return this.#preferredProvider;
@@ -2719,11 +2799,13 @@ export class ProviderRuntime implements ProviderPort {
     yield* stopCliLogins;
     const clients = [
       ...this.#clients.values(),
+      ...this.#executionClients.keys(),
       ...[...this.#confined.values()].map((confined) => confined.client),
       ...(loginClient ? [loginClient] : []),
     ];
     this.#clients.clear();
     this.#confined.clear();
+    this.#executionClients.clear();
     yield* Scope.close(this.#scope, Exit.void);
     return clients;
   }, Effect.uninterruptible).bind(this);
@@ -3816,6 +3898,15 @@ export class ProviderRuntime implements ProviderPort {
 
   #handleExit(client: AgentClient, exit: Error): void {
     const error = this.#withExitDetail(exit);
+    const executionOwner = this.#executionClients.get(client);
+    if (executionOwner) {
+      this.#executionClients.delete(client);
+      if (!this.#hooks.isStopping()) {
+        Effect.runFork(this.#hooks.onClientStopped(client).pipe(Effect.forkIn(this.#scope)));
+        this.#emitProviderError(client.provider, "exited", error, executionOwner.id);
+      }
+      return;
+    }
     if (this.#handleConfinedExit(client, error)) return;
     if (this.#clients.get(client.provider) !== client || this.#hooks.isStopping()) return;
     this.#clients.delete(client.provider);

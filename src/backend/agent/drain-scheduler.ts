@@ -52,6 +52,7 @@ const TURN_START_GRACE_MS = 5 * 60_000;
 export interface DrainHooks {
   emitError(code: string, error: unknown, agentId?: string): void;
   isStopping(): boolean;
+  routineOrigin?(deliveryId: string): boolean;
   /** Whether this agent is being deleted. Its queued messages are deleted with it and never start. */
   isDeleting(agentId: string): boolean;
   /**
@@ -538,8 +539,11 @@ export class DrainScheduler {
     if (this.#compactionHolds(lane)) return "compaction";
     if (!this.#routines.mayDrain(agentId)) return "routine";
     // The one try that a message from the person allows at a limit stays with the main lane.
-    if (lane.routine && !this.#usageLimits.mayDrain(agentId)) return "usage-limit";
-    if (!this.#usageLimits.mayDrain(agentId) && !this.#usageLimits.mayTry(agentId)) return "usage-limit";
+    const head = this.#laneHead(lane);
+    const choice = head && this.#runsInOwnSession(head) ? agent?.routineModel : undefined;
+    if (lane.routine && !this.#usageLimits.mayDrain(agentId, choice)) return "usage-limit";
+    if (!this.#usageLimits.mayDrain(agentId, choice) && !this.#usageLimits.mayTry(agentId, choice))
+      return "usage-limit";
     if (this.#usageLimits.retryHeld(agentId)) return "provider-retry";
     return null;
   }
@@ -896,7 +900,9 @@ export class DrainScheduler {
     const channelDelivery = this.#channels ? this.#channels.store.assignmentForDelivery(delivery.id) !== null : false;
     const messagingDelivery = this.#messaging?.ownsDelivery(delivery.id) ?? false;
     const taskId = this.#mailbox.taskIdForDelivery(delivery.id);
-    const ownSession = this.#runsInOwnSession(context);
+    const routineSession = this.#runsInOwnSession(context);
+    const reviewSession = context.executionPurpose === "review";
+    const ownSession = routineSession || reviewSession;
     // The teammate answers that start in this turn too. A channel task, an external message and a
     // routine run in its own session always run alone; a teammate's answer in an external
     // conversation takes the other answers to the same request. The person's message goes last, so
@@ -942,6 +948,8 @@ export class DrainScheduler {
     // The model this start asks for. The agent can move to another one while `turn/start` waits, and
     // a plan limit belongs to the model the provider refused.
     let requestedModel: string | null = null;
+    let executionAgent: AgentSummary | undefined;
+    let releaseExecutionClient: Effect.Effect<void> | undefined;
     const pickedAt = Date.now();
     yield* Effect.gen({ self: this }, function* () {
       for (const item of batch) yield* this.#mailbox.markStarting(item.delivery.id, beside).pipe(toDeliveryStartFailed);
@@ -964,7 +972,12 @@ export class DrainScheduler {
         batch = batch.filter((item) => !failedCompanions.has(item.delivery.id));
         this.#mailboxSync.emitQueue(delivery.recipientAgentId);
       }
-      const agent = yield* this.#store.getOrCreate(delivery.recipientAgentId).pipe(toDeliveryStartFailed);
+      const owner = yield* this.#store.getOrCreate(delivery.recipientAgentId).pipe(toDeliveryStartFailed);
+      const routineChoice = routineSession ? owner.routineModel : undefined;
+      const agent = routineChoice
+        ? yield* drainStep(() => this.#providers.executionAgent(owner, routineChoice))
+        : owner;
+      executionAgent = agent;
       // Once for the turn: its process, its session and its sandbox roots read the result.
       yield* checkAgentFolders(agent);
       requestedModel = agent.model;
@@ -976,11 +989,16 @@ export class DrainScheduler {
         if (!this.#hooks.servesModel(agent.model, providerForAgent(agent))) throw new Error(REMOVED_ENDPOINT_MESSAGE);
       };
       yield* drainStep(requireServedModel);
-      yield* this.#threads.applyPendingRuntimeRefresh(agent, new Set(batch.map((item) => item.delivery.id)));
+      yield* this.#threads.applyPendingRuntimeRefresh(owner, new Set(batch.map((item) => item.delivery.id)));
       releaseRuntimeRefresh = this.#threads.holdRuntimeRefresh(agent.id, taskId !== null);
       const providerRunning = this.#providers.agentClientRunning(agent);
       const providerStartedAt = Date.now();
-      const client = yield* this.#providers.ensureAgentClient(agent).pipe(toDeliveryStartFailed);
+      const client = yield* (
+        routineSession && owner.routineModel
+          ? this.#providers.createExecutionClient(agent)
+          : this.#providers.ensureAgentClient(agent)
+      ).pipe(toDeliveryStartFailed);
+      if (routineSession && owner.routineModel) releaseExecutionClient = this.#providers.releaseExecutionClient(client);
       this.#hooks.deliveriesStarting(
         batch.map((item) => item.delivery.id),
         { pickedAt, providerStartMs: providerRunning ? null : Date.now() - providerStartedAt },
@@ -1032,8 +1050,15 @@ export class DrainScheduler {
           return;
         }
         routineThreadId = yield* this.#threads
-          .startRoutineThread(agent, client, execution?.threadId)
+          .startRoutineThread(
+            agent,
+            client,
+            execution?.threadId,
+            releaseExecutionClient,
+            reviewSession ? "review" : "routine",
+          )
           .pipe(toDeliveryStartFailed);
+        releaseExecutionClient = undefined;
       }
       let threadId =
         routineThreadId ??
@@ -1138,7 +1163,7 @@ export class DrainScheduler {
                 model: agent.model,
                 effort: agent.reasoningEffort,
                 sessionSettings: sessionSettingsOverrides(
-                  this.#store.list().find((current) => current.id === agent.id) ?? agent,
+                  routineChoice ? agent : (this.#store.list().find((current) => current.id === agent.id) ?? agent),
                 ),
                 clientUserMessageId: delivery.id,
                 // The delivery stays the same; a continuation must not overwrite the first turn's items.
@@ -1156,7 +1181,7 @@ export class DrainScheduler {
                 sandboxPolicy: codexSandboxPolicy(agent, this.#store.sharedRoot),
                 ...(client.provider === "codex"
                   ? codexServiceTier(
-                      this.#store.list().find((current) => current.id === agent.id) ?? agent,
+                      routineChoice ? agent : (this.#store.list().find((current) => current.id === agent.id) ?? agent),
                       this.#providers.listModels(),
                     )
                   : {}),
@@ -1312,11 +1337,11 @@ export class DrainScheduler {
                 yield* this.#mailbox.restoreQueued(item.delivery.id).pipe(toDeliveryStartFailed);
               this.#mailboxSync.emitQueue(delivery.recipientAgentId);
               // After the restore, so a routine set to skip finds its run back in the queue.
-              yield* this.#usageLimits.reached(delivery.recipientAgentId, null, requestedModel);
+              yield* this.#usageLimits.reached(delivery.recipientAgentId, null, requestedModel, executionAgent);
               return;
             }
             // Before the requeue, so the channel does not assign the task to this agent again at once.
-            yield* this.#usageLimits.reached(delivery.recipientAgentId, null, requestedModel);
+            yield* this.#usageLimits.reached(delivery.recipientAgentId, null, requestedModel, executionAgent);
             // A ready backup continues earlier work in the same assignment, so the work is not lost.
             if (
               context.resumeAfterUsageLimit &&
@@ -1364,6 +1389,7 @@ export class DrainScheduler {
           // A turn that started, or that may still start, closes the session when it ends.
           if (routineThreadId && !confirmedTurnId && !turnMayRun)
             yield* this.#threads.closeRoutineThread(routineThreadId);
+          if (releaseExecutionClient) yield* releaseExecutionClient;
           for (const id of startingIds) {
             this.#startingCancellation.delete(id);
             const current = this.#mailbox.getDelivery(id)?.delivery;
@@ -1410,11 +1436,7 @@ export class DrainScheduler {
    * that thread's session.
    */
   #runsInOwnSession(context: DeliveryContext): boolean {
-    const id = context.delivery.id;
-    if (context.delivery.sender.kind !== "routine") return false;
-    const taskId = this.#mailbox.taskIdForDelivery(id);
-    if (taskId !== null) return this.#tasks.isRoutineThread(taskId);
-    return !this.#channels?.store.assignmentForDelivery(id) && !this.#messaging?.ownsDelivery(id);
+    return context.delivery.sender.kind === "routine" || (this.#hooks.routineOrigin?.(context.delivery.id) ?? false);
   }
 
   /**
@@ -1493,7 +1515,9 @@ export class DrainScheduler {
    */
   #deliveryProviders(agentId: string): AgentProvider[] {
     const agent = this.#store.list().find((candidate) => candidate.id === agentId);
-    return agent ? [providerForAgent(agent)] : [...AGENT_PROVIDERS];
+    return agent
+      ? [...new Set([providerForAgent(agent), ...(agent.routineModel ? [agent.routineModel.provider] : [])])]
+      : [...AGENT_PROVIDERS];
   }
 }
 

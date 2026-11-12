@@ -115,6 +115,7 @@ export class ContextCompaction {
   readonly #isStopping: () => boolean;
   readonly #startsHeld: () => boolean;
   readonly #rotations = new Set<string>();
+  readonly #growingCompactions = new Set<string>();
   readonly #budgets = new Map<string, ThreadContextBudget>();
   /**
    * The agent of each provider thread that compacts, and the client that runs it once `request` sends it.
@@ -311,6 +312,7 @@ export class ContextCompaction {
       awaitingUsage: false,
     };
     if (agentId) budget.agentId = agentId;
+    const compactedFrom = budget.lastCompactedTokens ?? this.#display.get(threadId)?.compaction?.beforeTokens;
     budget.usedTokens = usedTokens;
     budget.contextWindow = contextWindow;
     this.#budgets.set(threadId, budget);
@@ -318,7 +320,13 @@ export class ContextCompaction {
     // budget. `observeUsage` runs next and takes that mark, so it is read here first.
     const afterCompaction = budget.awaitingUsage || this.#awaitingPostCompaction.has(threadId);
     budget.awaitingUsage = false;
-    if (afterCompaction) this.#checkCompaction(budget, agentId);
+    if (afterCompaction) {
+      if (compactedFrom !== undefined && compactedFrom !== null && usedTokens > compactedFrom) {
+        this.#growingCompactions.add(threadId);
+        logger.warn("context.compaction-grew", { agentId, threadId, before: compactedFrom, after: usedTokens });
+      }
+      this.#checkCompaction(budget, agentId);
+    }
 
     const pressured = usedTokens >= this.#threshold(budget);
     if (!pressured) {
@@ -439,6 +447,7 @@ export class ContextCompaction {
    */
   reserve(agentId: string, threadId: string, manual = false, turnId: string | null = null, rotate = false): boolean {
     if (this.#isStopping() || this.#startsHeld()) return false;
+    rotate ||= this.#growingCompactions.has(threadId);
     const agent = this.#store.list().find((candidate) => candidate.id === agentId);
     const mode = agent ? this.#providers.clientForAgent(agent)?.contextCompaction : undefined;
     if (!agent || (!rotate && !compactsOnRequest(mode))) return false;
@@ -456,7 +465,11 @@ export class ContextCompaction {
         awaitingUsage: false,
       });
     const budget = this.#budgets.get(threadId);
-    if (!(budget?.pending || (manual && budget)) || budget.phase !== "idle" || this.#compacting.has(threadId)) {
+    if (
+      !(budget?.pending || ((manual || rotate) && budget)) ||
+      budget.phase !== "idle" ||
+      this.#compacting.has(threadId)
+    ) {
       return false;
     }
     if (rotate) this.#rotations.add(threadId);
@@ -597,6 +610,7 @@ export class ContextCompaction {
   /** Drops a retired provider thread's budget. The agent keeps compacting until `forgetAgent`. */
   forgetThread(threadId: string): void {
     this.#budgets.delete(threadId);
+    this.#growingCompactions.delete(threadId);
     const displayed = this.#display.delete(threadId);
     this.#observedClients.delete(threadId);
     this.#durations.delete(threadId);

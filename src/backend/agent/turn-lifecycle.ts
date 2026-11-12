@@ -223,6 +223,8 @@ export interface TurnHooks {
   hasOpenWait(agentId: string, deliveryIds: readonly string[]): boolean;
   /** Ends the provider session of a routine run. Nothing for any other session, or a second time. */
   closeRoutineSession(externalThreadId: string): Effect.Effect<void>;
+  executionAgent?(externalThreadId: string): AgentSummary | undefined;
+  executionPurpose?(externalThreadId: string): "routine" | "review" | undefined;
   /** Gives the answer of a routine run in its own session to the session of the agent's chat. */
   routineAnswered(agentId: string, deliveryId: string, answer: string): Effect.Effect<void>;
   /** Attaches the files that a finished answer names by path to it. It never fails the turn. */
@@ -695,7 +697,7 @@ export class TurnLifecycle {
       this.#budgetStops.has(turnId)
     )
       return;
-    const agent = this.#store.list().find((entry) => entry.id === agentId);
+    const agent = this.#hooks.executionAgent?.(threadId) ?? this.#store.list().find((entry) => entry.id === agentId);
     if (!agent) return;
     let input: number | null = null;
     if (
@@ -799,15 +801,20 @@ export class TurnLifecycle {
       agentId &&
       ["turn/started", "thread/tokenUsage/updated", "openbot/usage", "model/rerouted"].includes(notification.method)
     ) {
-      const agent = this.#store.list().find((entry) => entry.id === agentId);
+      const agent = this.#hooks.executionAgent?.(threadId) ?? this.#store.list().find((entry) => entry.id === agentId);
+      const purpose = this.#hooks.executionPurpose?.(threadId);
       // A task or other side thread keeps its provider sessions under its own thread, not the agent's.
       // A routine run's own session is not saved, so its usage has its own session id.
       const session = agent
         ? (this.#store.database
             .listProviderSessions(this.#conversation.publicThreadId(agentId, threadId))
             .find((entry) => entry.externalSessionId === threadId && entry.provider === source.provider) ??
-          (this.#conversation.isRoutineSession(threadId)
-            ? { id: `routine:${threadId}`, provider: source.provider, createdAt: new Date().toISOString() }
+          (purpose || this.#conversation.isRoutineSession(threadId)
+            ? {
+                id: `${purpose ?? "routine"}:${threadId}`,
+                provider: source.provider,
+                createdAt: new Date().toISOString(),
+              }
             : undefined))
         : undefined;
       if (agent && session) {
@@ -1347,15 +1354,25 @@ export class TurnLifecycle {
       // A routine run's own session closes after this turn, so it is not compacted either. Nor is a
       // turn that a provider error ended before it did work, or that an outage ended: it can run again.
       const routineSession = this.#conversation.isRoutineSession(threadId);
+      const execution = this.#hooks.executionAgent?.(threadId);
+      const storedAgent = this.#store.list().find((agent) => agent.id === agentId);
+      const executionOverride =
+        execution !== undefined &&
+        storedAgent !== undefined &&
+        (execution.provider !== storedAgent.provider ||
+          execution.model !== storedAgent.model ||
+          (execution.providerAccountId ?? null) !== (storedAgent.providerAccountId ?? null));
+      const freshSession = routineSession || this.#hooks.executionPurpose?.(threadId) !== undefined;
       const transientFailure = failover !== undefined && TRANSIENT_CAUSES.has(failover.context.causeCode);
       const mayRunAgain =
+        !executionOverride &&
         failover !== undefined &&
         !limited &&
         status === "failed" &&
         running !== undefined &&
         (!running.acted || transientFailure);
       let currentContext = true;
-      if (!budgetExceeded && !limited && !routineSession && running?.client.readContextUsage) {
+      if (!budgetExceeded && !limited && !freshSession && running?.client.readContextUsage) {
         const usage = yield* running.client.readContextUsage(threadId).pipe(
           Effect.timeout("2 seconds"),
           Effect.catch(() => Effect.succeed(null)),
@@ -1393,7 +1410,7 @@ export class TurnLifecycle {
         !refused &&
         !limited &&
         !mayRunAgain &&
-        !routineSession &&
+        !freshSession &&
         this.#compaction.reserve(agentId, threadId, false, turnId);
       this.#browser.endControl(this.#conversation.publicThreadId(agentId, threadId), turnId);
       const snapshot = this.#conversation.ensureSnapshot(agentId, threadId);
@@ -1434,14 +1451,19 @@ export class TurnLifecycle {
       const model = this.#hooks.turnModel(agentId, turnId);
       // A message runs again once for each provider account and model that failed it, so a move that
       // does not happen cannot run it on the same one again.
-      const failedKey = this.#usageLimits.failureKey(agentId, model);
+      const failedKey = this.#usageLimits.failureKey(agentId, model, execution);
       const firstFailure =
         failedKey !== null &&
         deliveries.length > 0 &&
         deliveries.every(({ delivery }) => !this.#failoverRetries.get(delivery.id)?.has(failedKey));
-      const backupReady = this.#hooks.mayFailOver(agentId);
+      const backupReady = !executionOverride && this.#hooks.mayFailOver(agentId);
       let runsAgain = mayRunAgain && transientFailure && firstFailure;
-      let continuing = limited && carriesWork && deliveries.length > 0 && this.#hooks.mayContinueOnBackup(agentId);
+      let continuing =
+        !executionOverride &&
+        limited &&
+        carriesWork &&
+        deliveries.length > 0 &&
+        this.#hooks.mayContinueOnBackup(agentId);
       if (continuing || runsAgain) {
         for (const { delivery, channelId } of deliveries) {
           if (channelId && !(yield* this.#hooks.requeueChannelDelivery(delivery.id, true))) {
@@ -1452,7 +1474,12 @@ export class TurnLifecycle {
         }
       }
       if (runsAgain && carriesWork) continuing = true;
-      const repeatable = limited && running !== undefined && (!running.acted || continuing) && deliveries.length > 0;
+      const repeatable =
+        !executionOverride &&
+        limited &&
+        running !== undefined &&
+        (!running.acted || continuing) &&
+        deliveries.length > 0;
       const requeue = (repeatable && (!channelTurn || continuing)) || runsAgain;
       // Any other provider error moves the agent to a backup model only from its own chat, and only
       // before the turn did work: a task or a channel task fails as before.
@@ -1526,11 +1553,11 @@ export class TurnLifecycle {
             const failed = this.#failoverRetries.get(delivery.id) ?? new Set<string>();
             this.#failoverRetries.set(delivery.id, failed.add(failedKey));
           }
-          if (backupReady) this.#usageLimits.failed(agentId, model);
+          if (backupReady) this.#usageLimits.failed(agentId, model, null, execution);
           else this.#usageLimits.holdForRetry(agentId);
         } else {
           // After the requeue, so a routine set to skip finds its run back in the queue.
-          yield* this.#usageLimits.reached(agentId, resetsAt, model);
+          yield* this.#usageLimits.reached(agentId, resetsAt, model, execution);
         }
         this.#hooks.scheduleDrain(agentId);
         return;
@@ -1542,14 +1569,16 @@ export class TurnLifecycle {
           this.#failoverRetries.set(delivery.id, failed.add(failedKey));
         }
         yield* this.#requeueTurn(agentId, threadId, turnId, snapshot, deliveries);
-        this.#usageLimits.failed(agentId, model, providerResetDelayMs(failover.message));
+        this.#usageLimits.failed(agentId, model, providerResetDelayMs(failover.message), execution);
         this.#hooks.scheduleDrain(agentId);
         return;
       }
       // The turn did work, or nothing waits to run again: the error shows as it does with no backup.
       if (failover) this.#showFailoverError(agentId, threadId, failover);
-      if (limited) yield* this.#usageLimits.reached(agentId, resetsAt, model);
-      else if (status === "completed") yield* this.#usageLimits.completed(agentId, model);
+      if (failover && executionOverride)
+        this.#usageLimits.failed(agentId, model, providerResetDelayMs(failover.message), execution);
+      if (limited) yield* this.#usageLimits.reached(agentId, resetsAt, model, execution);
+      else if (status === "completed") yield* this.#usageLimits.completed(agentId, model, execution);
       // After the limit is recorded, so the channel does not assign the task to this agent again
       // before the reset. A channel that took the task back ends this turn as interrupted.
       let requeued = repeatable && channelTurn;
@@ -1862,7 +1891,10 @@ export class TurnLifecycle {
     }).pipe(Effect.catchCause(report));
     for (const [itemId, itemTurnId] of this.#itemTurns) if (itemTurnId === turnId) this.#itemTurns.delete(itemId);
     // A routine run's own session ends with its turn. A task or channel turn runs in another session.
-    if (runningThreadId && this.#conversation.isRoutineSession(runningThreadId))
+    if (
+      runningThreadId &&
+      (this.#conversation.isRoutineSession(runningThreadId) || this.#hooks.executionPurpose?.(runningThreadId))
+    )
       yield* this.#hooks.closeRoutineSession(runningThreadId);
     yield* turnStep(() => this.#mailboxSync.emitQueue(agentId)).pipe(Effect.catchCause(report));
     yield* turnStep(() => {

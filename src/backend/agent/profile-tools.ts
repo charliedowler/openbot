@@ -154,6 +154,24 @@ export const updateProfileToolSchema = z
 export const hostAgentUpdateSchema = updateProfileToolSchema
   .pick({ agentId: true, provider: true, model: true, providerAccountId: true, backupModels: true })
   .extend({
+    channelSummaryModel: z
+      .object({
+        provider: z.enum(AGENT_PROVIDERS),
+        model: z.string().trim().min(1).max(INPUT_LIMITS.modelName),
+        providerAccountId: providerAccountId.optional(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
+    routineModel: z
+      .object({
+        provider: z.enum(AGENT_PROVIDERS),
+        model: z.string().trim().min(1).max(INPUT_LIMITS.modelName),
+        providerAccountId: providerAccountId.optional(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
     sessionTokenCap: z.number().int().min(1024).max(100_000_000).nullable().optional(),
     turnTokenBudget: z.number().int().min(1024).max(100_000_000).nullable().optional(),
   })
