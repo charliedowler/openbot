@@ -73,6 +73,7 @@ export interface ContextCompactionOptions {
   rotatesSession(agentId: string, threadId: string): boolean;
   /** The service stops: its database can close before a provider stops reporting usage. */
   isStopping(): boolean;
+  startsHeld?(): boolean;
   changed?(): void;
   /** A provider session finished a compaction: its summary replaces what it read before. */
   compacted?(threadId: string): void;
@@ -112,6 +113,7 @@ export class ContextCompaction {
   readonly #rotateSession: ContextCompactionOptions["rotateSession"];
   readonly #rotatesSession: ContextCompactionOptions["rotatesSession"];
   readonly #isStopping: () => boolean;
+  readonly #startsHeld: () => boolean;
   readonly #rotations = new Set<string>();
   readonly #budgets = new Map<string, ThreadContextBudget>();
   /**
@@ -147,6 +149,7 @@ export class ContextCompaction {
     this.#rotateSession = options.rotateSession;
     this.#rotatesSession = options.rotatesSession;
     this.#isStopping = options.isStopping;
+    this.#startsHeld = options.startsHeld ?? (() => false);
   }
 
   /** Only personal sessions appear in the desktop snapshot; execution threads remain separate. */
@@ -435,6 +438,7 @@ export class ContextCompaction {
    * `turnId`: the turn whose end reserves, so that only that turn can drop the hold.
    */
   reserve(agentId: string, threadId: string, manual = false, turnId: string | null = null, rotate = false): boolean {
+    if (this.#isStopping() || this.#startsHeld()) return false;
     const agent = this.#store.list().find((candidate) => candidate.id === agentId);
     const mode = agent ? this.#providers.clientForAgent(agent)?.contextCompaction : undefined;
     if (!agent || (!rotate && !compactsOnRequest(mode))) return false;

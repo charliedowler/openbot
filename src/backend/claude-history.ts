@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, readdirSync, statSync } from "node:fs";
 import { mkdir, open, readdir, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -917,6 +917,36 @@ export async function claudeSessionExists(
   options: ClaudeHistoryOptions,
 ): Promise<boolean> {
   return (await findTranscript(threadId, cwd, options.configDirectory, options.projectDirectoryName)) !== null;
+}
+
+export function claudeRepairSessionExists(sessionId: string, cwd: string, roots: readonly string[]): boolean {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId))
+    throw new Error("The Claude session id is invalid.");
+  let found = false;
+  for (const root of new Set(roots)) {
+    const projects = join(root, "projects");
+    let entries: string[];
+    try {
+      entries = readdirSync(projects);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
+      throw error;
+    }
+    const preferred = process.env.CLAUDE_CODE_PROJECT_DIR_NAME ?? sanitizeProjectPath(resolve(cwd));
+    for (const directory of new Set([preferred, ...entries])) {
+      try {
+        const project = join(projects, directory);
+        if (!statSync(project).isDirectory()) continue;
+        const file = statSync(join(project, `${sessionId}.jsonl`));
+        if (!file.isFile()) throw new Error("The Claude transcript path is not a regular file.");
+        found = true;
+      } catch (error) {
+        if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
+        throw error;
+      }
+    }
+  }
+  return found;
 }
 
 async function findTranscript(

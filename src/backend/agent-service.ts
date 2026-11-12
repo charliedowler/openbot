@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { agentProviderDescriptor, customAgentIdOfModel } from "@openbot/contracts/agent-providers";
 import { sortConversationMessages } from "@openbot/contracts/conversation-order";
 import { developmentStartingModel } from "@openbot/contracts/development-defaults";
@@ -241,6 +243,7 @@ import { channelFailure, toChannelOperationError } from "./channel-effects";
 import { type ChannelImageFile, ChannelImages } from "./channel-images";
 import { ChannelRoutineScheduler } from "./channel-routine-scheduler";
 import { ChannelService } from "./channel-service";
+import { claudeRepairSessionExists } from "./claude-history";
 import type { BundledProviderExecutables } from "./cli";
 import type { ConversationMarkerExclusions } from "./conversation-read-store";
 import type { ProviderSession } from "./database/provider-sessions";
@@ -476,6 +479,24 @@ const MAX_SECTION_TEAMMATES = 32;
 /** How long an archive waits for the provider to end the turn that it stopped. After it, the archive is refused. */
 const TASK_STOP_WAIT_MS = 15_000;
 
+export interface ProviderSessionRepairEntry {
+  id: string;
+  agentId: string;
+  threadId: string;
+  externalSessionId: string;
+  reason?: string;
+}
+
+export interface ProviderSessionRepairResult {
+  applied: boolean;
+  count: number;
+  repaired: ProviderSessionRepairEntry[];
+  missing: ProviderSessionRepairEntry[];
+  skipped: ProviderSessionRepairEntry[];
+  errors: ProviderSessionRepairEntry[];
+  busy: boolean;
+}
+
 /** The user's update, and the browser profile choice that the profile operations set after their checks. */
 export type AgentUpdate = UpdateAgentInput & {
   ownBrowserSession?: boolean;
@@ -561,9 +582,20 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
   readonly #planContinuation = new PlanContinuation({ limit: 8 });
   #initialized = false;
   #stopping = false;
+  #sessionRepairing = false;
+  readonly #claudeRepairRoots: () => string[];
 
   constructor(options: AgentServiceOptions) {
     super();
+    const repairAccounts = options.providerAccounts;
+    this.#claudeRepairRoots = () => [
+      options.credentials?.agentEnvironment?.().CLAUDE_CONFIG_DIR ??
+        process.env.CLAUDE_CONFIG_DIR ??
+        join(homedir(), ".claude"),
+      ...(process.env.CLAUDE_CONFIG_DIR ? [process.env.CLAUDE_CONFIG_DIR] : []),
+      join(homedir(), ".claude"),
+      ...(repairAccounts?.list("claude").map((account) => repairAccounts.home(account)) ?? []),
+    ];
     this.#watchRegistry = options.watchRegistry ?? (() => null);
     this.#watchRegistryV2 = options.watchRegistryV2 ?? this.#watchRegistry;
     this.#watchTasks = options.watchTasks ?? (() => null);
@@ -935,7 +967,8 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
           }),
         sharedRoot: () => this.#store.sharedRoot,
         isStopping: () => this.#stopping,
-        isProviderBusy: (provider) => this.#isProviderBusy(provider),
+        isProviderBusy: (provider) => this.#sessionRepairing || this.#isProviderBusy(provider),
+        startsHeld: () => this.#sessionRepairing,
         isAgentBusy: (agentId) => this.#runsTurn(agentId) || this.#drain.hasStartingDeliveriesFor(agentId),
         isProviderAssigned: (provider) => this.#store.list().some((agent) => providerForAgent(agent) === provider),
         captureConfigRevision: () => this.#endpoints.committedRevision(),
@@ -1032,6 +1065,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
       },
     });
     this.#compaction = new ContextCompaction({
+      startsHeld: () => this.#sessionRepairing,
       timeoutMs: options.contextCompactionTimeoutMs,
       changed: () => this.#emitRuntimeSnapshot(),
       store,
@@ -1161,6 +1195,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
       hasTakeover: (agentId) => this.#attention.hasBrowserTakeoverForAgent(agentId),
     });
     this.#threads = new ThreadLifecycle({
+      startsHeld: () => this.#sessionRepairing,
       store,
       mailbox,
       conversation: this.#conversation,
@@ -2180,7 +2215,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
   }
 
   hasActiveWork(): string[] {
-    const reasons: string[] = [];
+    const reasons: string[] = this.#sessionRepairing ? ["provider-session-repair"] : [];
     for (const [, snapshot] of this.#conversation.activeSnapshots()) {
       if (snapshot.activeTurnId && !this.#conversation.isExecutionThread(snapshot.threadId)) {
         reasons.push("agent-turn");
@@ -2225,6 +2260,128 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
       reasons,
     };
   }
+
+  readonly repairClaudeProviderSessions = Effect.fn("AgentService.repairClaudeProviderSessions")(function* (
+    this: AgentService,
+    apply: boolean,
+    reason: string | null,
+  ) {
+    const empty = (): ProviderSessionRepairResult => ({
+      applied: false,
+      count: 0,
+      repaired: [],
+      missing: [],
+      skipped: [],
+      errors: [],
+      busy: false,
+    });
+    if (this.#sessionRepairing || this.#stopping) return { ...empty(), busy: true };
+    this.#sessionRepairing = true;
+    const releaseDrain = this.#drain.holdProviderSessionRepair();
+    return yield* Effect.gen({ self: this }, function* () {
+      const selected = yield* lifecycleStep("scan Claude provider sessions", () => {
+        const result = empty();
+        const database = this.#store.database;
+        const sessions = database.allProviderSessions("claude");
+        const agents = new Map(this.#store.list().map((agent) => [agent.id, agent]));
+        const busy =
+          this.#compaction.activeThreadCount() > 0 ||
+          this.#providers.activeProcessCount() > 0 ||
+          [...this.#conversation.activeSnapshots()].some(([, snapshot]) => snapshot.activeTurnId !== null) ||
+          this.#store
+            .list()
+            .some(
+              (agent) => this.#threads.providerContextBusy(agent) || this.#drain.hasStartingDeliveriesFor(agent.id),
+            );
+        if (busy) {
+          result.busy = true;
+          result.skipped = sessions
+            .filter((session) => session.state === "active")
+            .map((session) => ({
+              id: session.id,
+              agentId: session.agentId ?? "",
+              threadId: session.threadId,
+              externalSessionId: session.externalSessionId,
+              reason: "native-work-active",
+            }));
+          return { result, repaired: [] };
+        }
+        const roots = this.#claudeRepairRoots();
+        const missing: (typeof sessions)[number][] = [];
+        for (const session of sessions) {
+          const entry: ProviderSessionRepairEntry = {
+            id: session.id,
+            agentId: session.agentId ?? "",
+            threadId: session.threadId,
+            externalSessionId: session.externalSessionId,
+          };
+          if (session.state !== "active") {
+            result.skipped.push({ ...entry, reason: "already-retired" });
+            continue;
+          }
+          const agent = session.agentId ? agents.get(session.agentId) : undefined;
+          if (!agent) {
+            result.errors.push({ ...entry, reason: "unknown-agent" });
+            continue;
+          }
+          if (
+            database.readActiveTurnId(agent.id, session.threadId) !== null ||
+            this.#threads.providerSessionBusy(session)
+          ) {
+            result.busy = true;
+            result.skipped.push({ ...entry, reason: "active-turn" });
+            continue;
+          }
+          try {
+            if (claudeRepairSessionExists(session.externalSessionId, agent.workspacePath, roots))
+              result.skipped.push({ ...entry, reason: "transcript-present" });
+            else {
+              result.missing.push(entry);
+              missing.push(session);
+            }
+          } catch (error) {
+            const code =
+              error instanceof Error && "code" in error && typeof error.code === "string"
+                ? error.code
+                : "invalid-transcript";
+            result.errors.push({ ...entry, reason: `transcript-check-failed:${code}` });
+          }
+        }
+        if (!apply || result.errors.length || result.busy) return { result, repaired: [] };
+        if (!reason?.trim() || reason.length > 500) throw new Error("A session repair needs a reason.");
+        for (const session of missing) {
+          const agent = session.agentId ? agents.get(session.agentId) : undefined;
+          try {
+            if (!agent || claudeRepairSessionExists(session.externalSessionId, agent.workspacePath, roots))
+              throw new Error("A selected Claude transcript changed during repair.");
+          } catch {
+            const entry = result.missing.find((one) => one.id === session.id);
+            if (entry) result.errors.push({ ...entry, reason: "transcript-recheck-failed" });
+          }
+        }
+        if (result.errors.length) return { result, repaired: [] };
+        try {
+          database.retireSelectedProviderSessions(missing, reason);
+        } catch {
+          result.errors.push(...result.missing.map((entry) => ({ ...entry, reason: "selection-changed" })));
+          return { result, repaired: [] };
+        }
+        result.applied = true;
+        result.repaired = [...result.missing];
+        result.count = result.repaired.length;
+        return { result, repaired: missing };
+      });
+      if (selected.repaired.length) yield* this.#threads.releaseRepairedProviderSessions(selected.repaired);
+      return selected.result;
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          this.#sessionRepairing = false;
+          releaseDrain();
+        }),
+      ),
+    );
+  }, Effect.uninterruptible).bind(this);
 
   listMemories(agentId: string): AgentMemory[] {
     return this.#memories.list(agentId);
@@ -3831,6 +3988,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     agentId: string,
     mode: "compact" | "rotate",
   ) {
+    if (this.#sessionRepairing) return { kind: "busy" as const };
     const agent = this.#store.list().find((entry) => entry.id === agentId);
     if (!agent) return { kind: "unknown-agent" as const };
     if (this.#threads.mainContextBusy(agent)) return { kind: "busy" as const };

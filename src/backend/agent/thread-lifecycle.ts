@@ -174,6 +174,7 @@ export interface ThreadLifecycleHooks {
 }
 
 export interface ThreadLifecycleOptions {
+  startsHeld?: () => boolean;
   store: AgentStore;
   mailbox: MailboxStore;
   conversation: ConversationRuntime;
@@ -221,6 +222,7 @@ export interface ThreadLifecycleOptions {
  * Never imports the facade; the drain scheduler takes this class directly.
  */
 export class ThreadLifecycle {
+  readonly #startsHeld: () => boolean;
   readonly #sessionStarts = new Map<string, number>();
   readonly #store: AgentStore;
   readonly #mailbox: MailboxStore;
@@ -262,6 +264,7 @@ export class ThreadLifecycle {
   readonly #pendingMainStarts = new Map<string, number>();
 
   constructor(options: ThreadLifecycleOptions) {
+    this.#startsHeld = options.startsHeld ?? (() => false);
     this.#store = options.store;
     this.#mailbox = options.mailbox;
     this.#conversation = options.conversation;
@@ -461,6 +464,8 @@ export class ThreadLifecycle {
     client: AgentClient,
     executionThreadId?: string,
   ) {
+    if (this.#startsHeld())
+      return yield* new ThreadOperationFailed({ cause: new Error(sourceText("error.provider.useBusy")) });
     const publicThreadId =
       executionThreadId ?? (yield* this.#store.ensureThreadId(agent.id).pipe(toThreadOperationFailed));
     if (executionThreadId) this.#conversation.registerExecutionThread(agent.id, executionThreadId);
@@ -545,6 +550,8 @@ export class ThreadLifecycle {
     publicThreadId: string,
     reason?: "configuration-change" | "missing-session",
   ) {
+    if (this.#startsHeld())
+      return yield* new ThreadOperationFailed({ cause: new Error(sourceText("error.provider.useBusy")) });
     return yield* Effect.acquireUseRelease(
       Effect.sync(() => this.holdRuntimeRefresh(agent.id, this.#conversation.isTaskThread(publicThreadId))),
       () => this.#startProviderThread(agent, client, publicThreadId, reason),
@@ -1421,6 +1428,25 @@ export class ThreadLifecycle {
     this.#conversation.unloadThread(externalThreadId);
     this.#compaction.forgetThread(externalThreadId);
     this.#pendingHandoffs.delete(externalThreadId);
+  }
+
+  readonly releaseRepairedProviderSessions = Effect.fn("ThreadLifecycle.releaseRepairedProviderSessions")(function* (
+    this: ThreadLifecycle,
+    sessions: readonly ProviderSession[],
+  ) {
+    for (const session of sessions) {
+      yield* this.#releaseProviderSession(session.externalSessionId);
+      this.#conversation.unbindThread(session.externalSessionId);
+      this.#conversation.unloadThread(session.externalSessionId);
+      this.#compaction.forgetThread(session.externalSessionId);
+      this.#pendingHandoffs.delete(session.externalSessionId);
+    }
+  }, Effect.uninterruptible).bind(this);
+
+  providerSessionBusy(session: ProviderSession): boolean {
+    return (
+      this.#conversation.openClientFor(session.externalSessionId)?.hasActiveTurn?.(session.externalSessionId) === true
+    );
   }
 
   readonly requestWithArchivedThreadRecovery = Effect.fn("ThreadLifecycle.requestWithArchivedThreadRecovery")(

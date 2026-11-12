@@ -295,6 +295,7 @@ export interface ProviderHooks {
   onClientStopped(client: AgentClient): Effect.Effect<void>;
   /** True once stop() has begun, so a client exiting during shutdown does not trigger a restart. */
   isStopping(): boolean;
+  startsHeld?(): boolean;
   /** True while a turn on this provider runs or starts, which replacing its CLI would cut short. */
   isProviderBusy(provider: AgentProvider): boolean;
   /** True while a turn of this agent runs. An agent's own process stays while its own turn runs. */
@@ -925,6 +926,7 @@ export class ProviderRuntime implements ProviderPort {
    * as the agent's own process does, so the generation does not spend the limit of the provider's own sign-in.
    */
   createProfileClient(provider: AgentProvider, accountId?: string): AgentClient {
+    if (this.#hooks.startsHeld?.()) throw new Error(sourceText("error.provider.useBusy"));
     this.requireProviderOn(provider);
     if (provider === "acp" && this.#removingCustomRuntime)
       throw new Error(sourceText("error.provider.registryRemoveBusy"));
@@ -1396,6 +1398,8 @@ export class ProviderRuntime implements ProviderPort {
     yield* providerStep(() => this.requireProviderOn(provider));
     this.#lastUsed.set(provider, Date.now());
     if (this.#clients.has(provider)) return;
+    if (this.#hooks.startsHeld?.())
+      return yield* new ProviderOperationFailed({ cause: new Error(sourceText("error.provider.useBusy")) });
     const wake = this.#released.has(provider);
     yield* this.#startProvider(provider, wake ? { notifyReady: false } : {});
     if (this.#clients.has(provider)) return;
@@ -1415,6 +1419,8 @@ export class ProviderRuntime implements ProviderPort {
     this: ProviderRuntime,
     options: { automatic: boolean },
   ) {
+    if (this.#hooks.startsHeld?.())
+      return yield* new ProviderOperationFailed({ cause: new Error(sourceText("error.provider.useBusy")) });
     if (!options.automatic) this.#startFailures.clear();
     // A refresh cancels a sign-in that has not finished. The sign-in process of an expired account
     // writes a 401 for the old token, and the renderer refreshes after each auth error, so the
@@ -1453,6 +1459,8 @@ export class ProviderRuntime implements ProviderPort {
     options: { notifyReady?: boolean; preserveCheckErrors?: boolean; refreshRuntimeInBackground?: boolean },
     phase: "starting" | "restarting" = "starting",
   ) {
+    if (this.#hooks.startsHeld?.())
+      return yield* new ProviderOperationFailed({ cause: new Error(sourceText("error.provider.useBusy")) });
     if (this.#off.has(provider) || (provider === "acp" && this.#removingCustomRuntime)) return;
     const pending = this.#providerStarts.get(provider);
     if (pending) return yield* Deferred.await(pending);
@@ -2730,6 +2738,8 @@ export class ProviderRuntime implements ProviderPort {
     command: () => Effect.Effect<T, ProviderOperationFailed>,
     requireOn = true,
   ) {
+    if (this.#hooks.startsHeld?.())
+      return yield* new ProviderOperationFailed({ cause: new Error(sourceText("error.provider.useBusy")) });
     if (requireOn) yield* providerStep(() => this.requireProviderOn(provider));
     const previous = this.#providerConnectionCommands.get(provider);
     const completion = Deferred.makeUnsafe<void, ProviderOperationFailed>();
@@ -2920,6 +2930,10 @@ export class ProviderRuntime implements ProviderPort {
         interruptibleStart?: boolean;
       } = {},
     ) {
+      if (this.#hooks.startsHeld?.())
+        return yield* new ProviderOperationFailed({
+          cause: new Error(sourceText("error.provider.useBusy")),
+        });
       const driver = requireProviderDriver(provider);
       let transferred = false;
       return yield* Effect.acquireUseRelease(
@@ -3952,6 +3966,10 @@ export class ProviderRuntime implements ProviderPort {
     provider: AgentProvider,
     afterTimeout = false,
   ) {
+    if (this.#hooks.startsHeld?.()) {
+      this.#scheduleRestart(provider, 1000, afterTimeout);
+      return;
+    }
     const disposals = this.#disposals;
     // A turn in the backoff may have started the provider already: a second connect would replace
     // that client and leave it running. That start can also end with no client, when the client it

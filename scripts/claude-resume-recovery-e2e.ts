@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -274,6 +274,7 @@ async function openFixture(userData = join(root, `data-${++index}`)) {
     send,
     end,
     close,
+    clients,
     exitCount: () => clients.reduce((total, client) => total + client.exitCount, 0),
   };
 }
@@ -503,6 +504,59 @@ try {
     assert.notEqual(attempts[0]?.sessionId, attempts[1]?.sessionId);
     assert.equal(f.database.activeProviderSession(agent.threadId, "claude")?.externalSessionId, mainSession);
     return { deliveryId: id, assignmentId: assignment.id, attempts: attempts.length };
+  });
+  await check("bulk repair releases an idle native binding and wakes work queued during its start hold", async () => {
+    const f = await openFixture();
+    const agent = await f.create("Repair native binding");
+    assert.ok(agent.threadId);
+    const old = f.database.activeProviderSession(agent.threadId, "claude");
+    assert.ok(old);
+    for (const project of readdirSync(join(home, ".claude", "projects")))
+      await rm(join(home, ".claude", "projects", project, `${old.externalSessionId}.jsonl`), { force: true });
+    await waitFor("native idle before repair", () => f.service.nativeWorkSnapshot().idle);
+    const client = f.clients[0];
+    assert.ok(client);
+    const release = client.releaseThread.bind(client);
+    let releaseReached: () => void = () => {};
+    const reached = new Promise<void>((done) => {
+      releaseReached = done;
+    });
+    let continueRelease: () => void = () => {};
+    const held = new Promise<void>((done) => {
+      continueRelease = done;
+    });
+    client.releaseThread = (id) =>
+      id === old.externalSessionId
+        ? Effect.gen(function* () {
+            releaseReached();
+            yield* Effect.promise(() => held);
+            yield* release(id);
+          })
+        : release(id);
+    const boundary = rows().length;
+    const repair = runCauseEffect(f.service.repairClaudeProviderSessions(true, "Host repair of missing transcript"));
+    let queued: string | undefined;
+    try {
+      const early = await Promise.race([reached.then(() => null), repair]);
+      assert.equal(early, null, JSON.stringify(early));
+      assert.equal((await runCauseEffect(f.service.controlAgentContext(agent.id, "rotate"))).kind, "busy");
+      await assert.rejects(runCauseEffect(f.service.refreshProviders({ automatic: false })));
+      queued = await f.send(agent.id, "Queued during session repair.");
+      assert.equal(f.mailbox.getDelivery(queued)?.delivery.status, "queued");
+      assert.equal(rows().length, boundary);
+    } finally {
+      continueRelease();
+    }
+    const report = await repair;
+    assert.equal(report.count, 1);
+    assert.equal(report.repaired[0]?.id, old.id);
+    assert.ok(queued);
+    assert.equal((await f.end(queued)).status, "completed");
+    const active = f.database.activeProviderSession(agent.threadId, "claude");
+    assert.ok(active);
+    assert.notEqual(active.externalSessionId, old.externalSessionId);
+    assert.equal(f.exitCount(), 0);
+    return { repaired: old.id, nextSession: active.externalSessionId, queuedDelivery: queued };
   });
 } finally {
   for (const resource of resources) {

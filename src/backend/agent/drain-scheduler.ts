@@ -206,6 +206,8 @@ export interface DrainSchedulerOptions {
  * `ThreadLifecycle` directly — thread recovery is a dependency, not a hook.
  */
 export class DrainScheduler {
+  #sessionRepairHold = false;
+  readonly #sessionRepairWaiters = new Set<string>();
   readonly #store: AgentStore;
   readonly #mailbox: MailboxStore;
   readonly #mailboxSync: MailboxSync;
@@ -466,8 +468,24 @@ export class DrainScheduler {
     this.#startupDeliveryHolds.delete(agentId);
   }
 
+  holdProviderSessionRepair(): () => void {
+    this.#sessionRepairHold = true;
+    return () => {
+      this.#sessionRepairHold = false;
+      const waiting = [...this.#sessionRepairWaiters];
+      this.#sessionRepairWaiters.clear();
+      queueMicrotask(() => {
+        for (const agentId of waiting) this.scheduleDrain(agentId);
+      });
+    };
+  }
+
   #readHold(lane: Lane): string | null {
     const { agentId, taskId } = lane;
+    if (this.#sessionRepairHold) {
+      this.#sessionRepairWaiters.add(agentId);
+      return "provider-session-repair";
+    }
     if (this.#hooks.isDeleting(agentId)) return "deleting";
     if (taskId === null && this.#startupDeliveryHolds.has(agentId)) return "host-delivery-cleanup";
     const key = laneKey(lane);

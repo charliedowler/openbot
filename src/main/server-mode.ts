@@ -94,7 +94,7 @@ export interface ServerModeOptions {
   nativeWork?: () => { idle: boolean; compactions: number; providerOperations: number; reasons: string[] };
   usageLimits?: Pick<AgentService, "releaseUsageLimits">;
   agents?: Pick<AgentService, "listAgents" | "interruptRunningTurn" | "updateAgentRuntime" | "agentQueues"> &
-    Partial<Pick<AgentService, "controlAgentContext" | "cancelControlDeliveries">>;
+    Partial<Pick<AgentService, "controlAgentContext" | "cancelControlDeliveries" | "repairClaudeProviderSessions">>;
   routines?: Pick<HostEventsService, "listRoutines" | "saveRoutine">;
   channelIds?: () => readonly string[];
   cpuProfiler?: Pick<CpuProfiler, "take">;
@@ -243,6 +243,8 @@ export class ServerMode {
         return this.#resetUsage(body.get("provider") ?? "", body.get("accountId"));
       case "POST /v1/deliveries/cancel":
         return this.#cancelDeliveries(body);
+      case "POST /v1/provider-sessions/repair":
+        return this.#repairProviderSessions(body);
       case "POST /v1/turns/interrupt":
         return this.#interruptTurn(body);
       case "POST /v1/agents/compact":
@@ -364,6 +366,22 @@ export class ServerMode {
     const ids = await runCauseEffect(agents.cancelControlDeliveries(agentId, senderKind, createdBefore, statuses));
     if (ids === null) return failure(404, "unknown_agent");
     return { status: 200, lines: { count: String(ids.length), ids: JSON.stringify(ids) } };
+  }
+
+  async #repairProviderSessions(body: URLSearchParams): Promise<Answer> {
+    const agents = this.#options.agents;
+    if (!agents?.repairClaudeProviderSessions) return failure(404, "not_found");
+    const allowed = new Set(["provider", "apply", "reason"]);
+    for (const key of body.keys())
+      if (!allowed.has(key) || body.getAll(key).length !== 1) return failure(400, "invalid_fields");
+    if (body.get("provider") !== "claude") return failure(400, "invalid_provider");
+    const apply = body.get("apply") ?? "false";
+    if (apply !== "false" && apply !== "true") return failure(400, "invalid_apply");
+    const reason = body.get("reason")?.trim() ?? null;
+    if ((apply === "true" && !reason) || (reason !== null && (!reason || reason.length > 500)))
+      return failure(400, "invalid_reason");
+    const result = await runCauseEffect(agents.repairClaudeProviderSessions(apply === "true", reason));
+    return { status: result.busy || result.errors.length ? 409 : 200, lines: { result: JSON.stringify(result) } };
   }
 
   async #interruptTurn(body: URLSearchParams): Promise<Answer> {

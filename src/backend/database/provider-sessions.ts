@@ -79,6 +79,52 @@ export class ProviderSessions {
     ).map((row) => toProviderSession(requiredSessionRow(row)));
   }
 
+  allProviderSessions(provider: AgentProviderId): (ProviderSession & { agentId: string | null })[] {
+    return databaseRows(
+      this.#core.connection
+        .prepare(`
+        SELECT session.*, thread.agent_id
+        FROM projection_provider_sessions session
+        LEFT JOIN projection_threads thread ON thread.thread_id = session.thread_id
+        WHERE session.provider = ? ORDER BY session.thread_id, session.id
+      `)
+        .all(provider),
+    ).map((row) => ({ ...toProviderSession(requiredSessionRow(row)), agentId: optionalStringColumn(row, "agent_id") }));
+  }
+
+  retireSelectedProviderSessions(sessions: readonly ProviderSession[], reason: string): void {
+    if (sessions.length === 0) return;
+    this.#core.dispatch(
+      `provider-session:repair:${randomUUID()}`,
+      sessions.map((session) => ({
+        aggregateType: "thread",
+        aggregateId: session.threadId,
+        eventType: "provider-session.deactivated",
+        payload: { sessionIds: [session.id], reason },
+      })),
+      (db, sequences) => {
+        for (const session of sessions) {
+          const current = decodeSessionRow(
+            db.prepare("SELECT * FROM projection_provider_sessions WHERE id = ?").get(session.id),
+          );
+          if (
+            current?.state !== "active" ||
+            current.updated_at !== session.updatedAt ||
+            current.external_session_id !== session.externalSessionId
+          )
+            throw new Error("The selected provider session changed during repair.");
+        }
+        const update = db.prepare(
+          "UPDATE projection_provider_sessions SET state = 'inactive', updated_at = ?, last_event_sequence = ? WHERE id = ? AND state = 'active'",
+        );
+        sessions.forEach((session, index) => {
+          update.run(new Date().toISOString(), sequences[index] ?? 0, session.id);
+        });
+        return null;
+      },
+    );
+  }
+
   listProviderSessionIds(externalSessionId?: string): string[] {
     return databaseRows(
       this.#core.connection
