@@ -3501,10 +3501,10 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
             : reasoningEffort,
       };
     };
-    if (agent.usageLimitReturn && this.#usageLimitReady(agent.usageLimitReturn))
+    if (agent.usageLimitReturn && this.#usageLimitReady(agent.usageLimitReturn, agentId))
       return { input: move(agent.usageLimitReturn, agent.usageLimitReturn.reasoningEffort), move: "return" };
-    const limited = !this.#usageLimits.mayDrain(agentId);
-    const failed = !limited && this.#usageLimits.isFailed(usageLimitOf(agentModelChoice(agent)));
+    const limited = !this.#usageLimits.mayDrain(agentId) && !this.#usageLimits.mayTry(agentId);
+    const failed = !limited && this.#usageLimits.isFailed(usageLimitOf(agentModelChoice(agent)), agentId);
     if (!limited && !failed) return null;
     const taskWork = () =>
       this.#mailbox.queuedTaskIds(agentId).some((taskId) => this.#mailbox.nextQueued(agentId, taskId));
@@ -3535,9 +3535,13 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
   }
 
   /** Whether the model is ready, and no usage limit or provider error holds it. */
-  #usageLimitReady(choice: AgentModelChoice): boolean {
+  #usageLimitReady(choice: AgentModelChoice, agentId?: string): boolean {
     const limit = usageLimitOf(choice);
-    return this.#modelChoiceReady(choice) && !this.#usageLimits.isLimited(limit) && !this.#usageLimits.isFailed(limit);
+    return (
+      this.#modelChoiceReady(choice) &&
+      !this.#usageLimits.isLimited(limit, agentId) &&
+      !this.#usageLimits.isFailed(limit, agentId)
+    );
   }
 
   /**
@@ -4213,8 +4217,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
         ),
       );
     // `nothingToReset` says that no limit of the account is spent, so a hold on it is out of date too.
-    if (outcome === "reset" || outcome === "nothingToReset")
-      yield* this.#usageLimits.accountReset(provider, accountId === DEFAULT_PROVIDER_ACCOUNT_ID ? null : accountId);
+    if (outcome === "reset" || outcome === "nothingToReset") yield* this.#usageLimits.accountReset(provider, accountId);
     return outcome;
   }).bind(this);
 
@@ -4300,21 +4303,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     provider: AgentProvider,
     accountId: string | null,
   ) {
-    const accounts =
-      accountId === null
-        ? [
-            ...new Set(
-              this.#usageLimits
-                .limitedModels()
-                .filter((limit) => limit.provider === provider)
-                .map((limit) => limit.providerAccountId ?? null),
-            ),
-          ]
-        : [accountId === DEFAULT_PROVIDER_ACCOUNT_ID ? null : accountId];
-    const released: UsageLimitKey[] = [];
-    for (const account of accounts)
-      released.push(...(yield* this.#usageLimits.accountReset(provider, account, "host-reset")));
-    return released;
+    return yield* this.#usageLimits.accountReset(provider, accountId, "host-reset");
   }).bind(this);
 
   /**
@@ -4450,7 +4439,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
       .pipe(
         Effect.tap(() =>
           usedKey || this.#providers.ownSignInUsesKey(provider)
-            ? this.#usageLimits.accountReset(provider, null)
+            ? this.#usageLimits.accountReset(provider, DEFAULT_PROVIDER_ACCOUNT_ID)
             : Effect.void,
         ),
         Effect.mapError(

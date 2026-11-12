@@ -1,6 +1,12 @@
 import { closeSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
-import { type AccountUsage, type AgentEvent, type AgentRuntimeSnapshot, isAgentProvider } from "@openbot/contracts/ipc";
+import {
+  type AccountUsage,
+  type AgentEvent,
+  type AgentRuntimeSnapshot,
+  DEFAULT_PROVIDER_ACCOUNT_ID,
+  isAgentProvider,
+} from "@openbot/contracts/ipc";
 import { isDynamicRecord } from "@openbot/contracts/runtime-values";
 import { createOpenBotLogger } from "@openbot/logging";
 import { Effect, Exit, Schema, Scope } from "effect";
@@ -78,6 +84,8 @@ interface ProviderFailure extends UsageLimitKey {
   /** Epoch milliseconds when the hold ends. */
   endsAt: number;
   timer: ReturnType<typeof setTimeout>;
+  probeTimer: ReturnType<typeof setTimeout> | null;
+  lastProbeAgentId: string | null;
 }
 
 interface UsageLimit extends UsageLimitKey {
@@ -105,7 +113,8 @@ type UsageLimitReleaseReason =
   | "reset-passed"
   | "usage-reading"
   | "account-reset"
-  | "host-reset";
+  | "host-reset"
+  | "hold-passed";
 
 interface UsageLimitRelease {
   reason: UsageLimitReleaseReason;
@@ -228,7 +237,10 @@ export class UsageLimitGate {
 
   mayDrain(agentId: string): boolean {
     const agent = this.#agent(agentId);
-    return !agent || !this.#limits.has(limitKey(providerForAgent(agent), accountOf(agent), agent.model));
+    if (!agent) return true;
+    const key = limitKey(providerForAgent(agent), accountOf(agent), agent.model);
+    const probe = this.#probes.get(key);
+    return !this.#limits.has(key) && !(this.#failures.has(key) && probe?.agentId === agentId && probe.started);
   }
 
   /**
@@ -261,8 +273,9 @@ export class UsageLimitGate {
   }
 
   /** Whether a limit holds this provider account and model. */
-  isLimited(limit: UsageLimitKey): boolean {
-    return this.#limits.has(limitKey(limit.provider, limit.accountId, limit.model));
+  isLimited(limit: UsageLimitKey, agentId?: string): boolean {
+    const key = limitKey(limit.provider, limit.accountId, limit.model);
+    return this.#limits.has(key) && (agentId === undefined || this.#probes.get(key)?.agentId !== agentId);
   }
 
   /**
@@ -275,8 +288,9 @@ export class UsageLimitGate {
   }
 
   /** Whether a provider error passes over this provider account and model. */
-  isFailed(limit: UsageLimitKey): boolean {
-    return this.#failures.has(limitKey(limit.provider, limit.accountId, limit.model));
+  isFailed(limit: UsageLimitKey, agentId?: string): boolean {
+    const key = limitKey(limit.provider, limit.accountId, limit.model);
+    return this.#failures.has(key) && (agentId === undefined || this.#probes.get(key)?.agentId !== agentId);
   }
 
   /**
@@ -292,23 +306,38 @@ export class UsageLimitGate {
     const turnModel = model ?? agent.model;
     const key = limitKey(provider, accountId, turnModel);
     const previous = this.#failures.get(key);
+    const probeRefused = this.#probes.get(key)?.agentId === agentId;
+    if (probeRefused) {
+      this.#probes.delete(key);
+      if (this.#tries.get(agentId) === key) this.#tries.delete(agentId);
+    }
     // A later error with no reset, such as from another agent on the same model, keeps the named reset.
     const hold = Math.max(PROVIDER_FAILURE_HOLD_MS, (resetDelayMs ?? 0) + RESET_GRACE_MS);
     const endsAt = Math.max(previous?.endsAt ?? 0, Date.now() + hold);
     this.#holdFailure(key, { provider, accountId, model: turnModel }, endsAt);
+    if (probeRefused) {
+      const failure = this.#failures.get(key);
+      if (failure) this.#armFailureProbe(key, failure);
+      const limit = this.#limits.get(key);
+      if (limit) this.#armProbe(key, limit);
+    }
     this.#save();
   }
 
   #holdFailure(key: string, failure: UsageLimitKey, endsAt: number): void {
     const previous = this.#failures.get(key);
     if (previous) clearTimeout(previous.timer);
-    this.#failures.set(key, {
+    const held: ProviderFailure = {
       provider: failure.provider,
       accountId: failure.accountId,
       model: failure.model,
       endsAt,
       timer: this.#armFailure(key, endsAt),
-    });
+      probeTimer: previous?.probeTimer ?? null,
+      lastProbeAgentId: previous?.lastProbeAgentId ?? null,
+    };
+    this.#failures.set(key, held);
+    if (!previous) this.#armFailureProbe(key, held);
   }
 
   /** Releases the failure at `endsAt`. A wait longer than `MAX_TIMER_MS` is armed again when it fires. */
@@ -317,7 +346,7 @@ export class UsageLimitGate {
       () => {
         const failure = this.#failures.get(key);
         if (failure && failure.endsAt > Date.now()) failure.timer = this.#armFailure(key, failure.endsAt);
-        else Effect.runFork(this.#releaseFailure(key).pipe(Effect.forkIn(this.#scope)));
+        else Effect.runFork(this.#releaseFailure(key, { reason: "hold-passed" }).pipe(Effect.forkIn(this.#scope)));
       },
       Math.min(MAX_TIMER_MS, endsAt - Date.now()),
     );
@@ -421,32 +450,36 @@ export class UsageLimitGate {
     if (!agent) return;
     const provider = providerForAgent(agent);
     const key = limitKey(provider, accountOf(agent), model ?? agent.model);
-    if (this.#limits.has(key))
-      yield* this.#release(key, false, {
-        reason: this.#probes.get(key)?.agentId === agentId ? "probe-completed" : "turn-completed",
-        agentId,
-      });
-    if (this.#failures.has(key)) yield* this.#releaseFailure(key);
+    const cause: UsageLimitRelease = {
+      reason: this.#probes.get(key)?.agentId === agentId ? "probe-completed" : "turn-completed",
+      agentId,
+    };
+    if (this.#limits.has(key)) yield* this.#release(key, false, cause);
+    if (this.#failures.has(key)) yield* this.#releaseFailure(key, cause);
     if (![...this.#limits.values()].some((limit) => limit.provider === provider)) this.#announced.delete(provider);
   }).bind(this);
 
-  /**
-   * The user spent a usage reset credit of a provider account, so each limit of that account ends now
-   * and its agents take turns again. A null account is the provider's own sign-in.
-   */
   readonly accountReset = Effect.fn("UsageLimitGate.accountReset")(function* (
     this: UsageLimitGate,
     provider: AgentProvider,
     accountId: string | null,
     reason: "account-reset" | "host-reset" = "account-reset",
   ) {
-    const released: UsageLimitKey[] = [];
+    const selectedAccount = accountId === DEFAULT_PROVIDER_ACCOUNT_ID ? null : accountId;
+    const matches = (entry: UsageLimitKey) =>
+      entry.provider === provider && (accountId === null || entry.accountId === selectedAccount);
+    const released = new Map<string, UsageLimitKey>();
     for (const [key, limit] of [...this.#limits]) {
-      if (limit.provider !== provider || limit.accountId !== accountId) continue;
-      released.push({ provider: limit.provider, accountId: limit.accountId, model: limit.model });
+      if (!matches(limit)) continue;
+      released.set(key, { provider: limit.provider, accountId: limit.accountId, model: limit.model });
       yield* this.#release(key, true, { reason });
     }
-    return released;
+    for (const [key, failure] of [...this.#failures]) {
+      if (!matches(failure)) continue;
+      released.set(key, { provider: failure.provider, accountId: failure.accountId, model: failure.model });
+      yield* this.#releaseFailure(key, { reason });
+    }
+    return [...released.values()];
   }).bind(this);
 
   readonly dispose = Effect.fn("UsageLimitGate.dispose")(function* (this: UsageLimitGate) {
@@ -456,7 +489,10 @@ export class UsageLimitGate {
     }
     this.#limits.clear();
     this.#probes.clear();
-    for (const failure of this.#failures.values()) clearTimeout(failure.timer);
+    for (const failure of this.#failures.values()) {
+      clearTimeout(failure.timer);
+      if (failure.probeTimer) clearTimeout(failure.probeTimer);
+    }
     this.#failures.clear();
     for (const timer of this.#retries.values()) clearTimeout(timer);
     this.#retries.clear();
@@ -507,7 +543,7 @@ export class UsageLimitGate {
       this.#probes.delete(key);
       if (this.#tries.get(current.agentId) === key) this.#tries.delete(current.agentId);
     }
-    const waiting = this.#heldAgents(limit).filter((agent) => this.#hooks.waiting?.(agent.id) ?? false);
+    const waiting = this.#probeAgents(limit).filter((agent) => this.#hooks.waiting?.(agent.id) ?? false);
     if (waiting.length === 0) return;
     const after = waiting.findIndex((agent) => agent.id === limit.lastProbeAgentId);
     const agent = waiting[(after + 1) % waiting.length];
@@ -521,6 +557,54 @@ export class UsageLimitGate {
       waitingAgents: waiting.length,
     });
     this.#hooks.scheduleDrain(agent.id);
+  }
+
+  #armFailureProbe(key: string, failure: ProviderFailure): void {
+    if (failure.probeTimer) clearTimeout(failure.probeTimer);
+    failure.probeTimer = setTimeout(() => this.#probeFailure(key), Math.max(0, Math.min(this.#probeMs, MAX_TIMER_MS)));
+  }
+
+  #probeFailure(key: string): void {
+    const failure = this.#failures.get(key);
+    if (!failure) return;
+    this.#armFailureProbe(key, failure);
+    if (this.#limits.has(key)) return;
+    const current = this.#probes.get(key);
+    if (current) {
+      if (current.started && (this.#hooks.busy?.(current.agentId) ?? false)) return;
+      this.#probes.delete(key);
+      if (this.#tries.get(current.agentId) === key) this.#tries.delete(current.agentId);
+    }
+    const waiting = this.#probeAgents(failure).filter(
+      (agent) => (this.#hooks.waiting?.(agent.id) ?? false) && !(this.#hooks.busy?.(agent.id) ?? false),
+    );
+    if (!waiting.length) return;
+    const after = waiting.findIndex((agent) => agent.id === failure.lastProbeAgentId);
+    const agent = waiting[(after + 1) % waiting.length];
+    if (!agent) return;
+    failure.lastProbeAgentId = agent.id;
+    this.#probes.set(key, { agentId: agent.id, started: false });
+    this.#tries.set(agent.id, key);
+    logger.info("A provider failure lets one waiting turn try.", {
+      provider: failure.provider,
+      accountId: failure.accountId,
+      model: failure.model,
+      agentId: agent.id,
+      waitingAgents: waiting.length,
+    });
+    this.#hooks.scheduleDrain(agent.id);
+  }
+
+  #probeAgents(limit: UsageLimitKey) {
+    const key = limitKey(limit.provider, limit.accountId, limit.model);
+    return this.#store.list().filter((agent) => {
+      const returning = agent.usageLimitReturn;
+      return (
+        limitKey(providerForAgent(agent), accountOf(agent), agent.model) === key ||
+        (returning !== undefined &&
+          limitKey(returning.provider, returning.providerAccountId ?? null, returning.model) === key)
+      );
+    });
   }
 
   readonly #fire = Effect.fn("UsageLimitGate.fire")(function* (this: UsageLimitGate, key: string, limit: UsageLimit) {
@@ -604,12 +688,28 @@ export class UsageLimitGate {
     yield* this.#hooks.released({ provider: limit.provider, accountId: limit.accountId, model: limit.model });
   });
 
-  readonly #releaseFailure = Effect.fn("UsageLimitGate.releaseFailure")(function* (this: UsageLimitGate, key: string) {
+  readonly #releaseFailure = Effect.fn("UsageLimitGate.releaseFailure")(function* (
+    this: UsageLimitGate,
+    key: string,
+    cause: UsageLimitRelease,
+  ) {
     const failure = this.#failures.get(key);
     if (!failure) return;
     clearTimeout(failure.timer);
+    if (failure.probeTimer) clearTimeout(failure.probeTimer);
     this.#failures.delete(key);
+    if (!this.#limits.has(key)) {
+      this.#probes.delete(key);
+      for (const [agentId, tryKey] of this.#tries) if (tryKey === key) this.#tries.delete(agentId);
+    }
     this.#save();
+    logger.info("A provider failure ended.", {
+      provider: failure.provider,
+      accountId: failure.accountId,
+      model: failure.model,
+      reason: cause.reason,
+      ...(cause.agentId ? { agentId: cause.agentId } : {}),
+    });
     yield* this.#hooks.released({ provider: failure.provider, accountId: failure.accountId, model: failure.model });
   });
 
