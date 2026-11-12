@@ -212,13 +212,15 @@ const assistant = (text) =>
 const log = (row) => fs.appendFileSync(${JSON.stringify(turnLog)}, JSON.stringify(row) + "\\n");
 let count = 0;
 let budgetTimer = null;
+let ignoreBudgetInterrupt = false;
 const turn = (message) => {
   record(message);
   const input = JSON.stringify(message);
   const id = sessionId + "-" + (++count);
   const mode = fs.existsSync(${JSON.stringify(modeFile)}) ? fs.readFileSync(${JSON.stringify(modeFile)}, "utf8").trim() : "accept";
   const startedAt = Date.now();
-  log({ id, phase: "start", model, mode, startedAt, input });
+  log({ id, phase: "start", pid: process.pid, model, mode, startedAt, input });
+  ignoreBudgetInterrupt = input.includes("TURN-CALL-BUDGET-IGNORE");
   const refuse = () => {
     const resetsAt = Math.floor(Date.now() / 1000) + 86400 + Math.floor(Math.random() * 3000) + 1;
     write({ type: "rate_limit_event", rate_limit_info: { status: "rejected", rateLimitType: "seven_day", resetsAt },
@@ -231,9 +233,35 @@ const turn = (message) => {
     result({ is_error: false, result: "Done." });
     log({ id, phase: "end", model, mode, startedAt, endedAt: Date.now(), refused: false, input });
   };
+  if (input.includes("BUDGET-SLOW-CONTROL")) {
+    let chunks = 0;
+    const timer = setInterval(() => {
+      write({ type: "stream_event", event: {type: "content_block_delta", index: 0, delta: {type: "text_delta", text: "Slow peer output."}}, parent_tool_use_id: null, session_id: sessionId, uuid: randomUUID() });
+      if (++chunks === 30) { clearInterval(timer); complete(); }
+    }, 200);
+    return;
+  }
+  if (input.includes("TURN-CALL-BUDGET")) {
+    write({ type: "assistant", message: { id: "stale-child-request", type: "message", role: "assistant", model,
+      content: [{ type: "text", text: "Previous turn child." }], usage: { input_tokens: 100000000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+      parent_tool_use_id: "previous-turn-child", session_id: sessionId, uuid: randomUUID() });
+    let calls = 0;
+    const step = () => {
+      calls++;
+      const frame = { type: "assistant", message: { id: "call-budget-" + calls, type: "message", role: "assistant", model,
+        content: [{ type: "text", text: "Working." }], stop_reason: null,
+        usage: { input_tokens: 1, cache_read_input_tokens: 1, cache_creation_input_tokens: 0, output_tokens: 1 } },
+        parent_tool_use_id: null, session_id: sessionId, uuid: randomUUID() };
+      write(frame); write(frame);
+      log({ phase: "model-call", calls });
+      if (calls >= 60 && !ignoreBudgetInterrupt) { clearInterval(budgetTimer); complete(); }
+    };
+    budgetTimer = setInterval(step, 30);
+    return;
+  }
   if (input.includes("TURN-BUDGET-CHECK")) {
     const request = (requestId, child = false) => write({ type: "assistant", message: { id: requestId, type: "message", role: "assistant", model,
-      content: [{ type: "text", text: "Working." }], stop_reason: null,
+      content: [{ type: "text", text: "Working." }, ...(requestId === "budget-request-1" ? [{type: "tool_use", id: "child-call-0068", name: "Agent", input: {description: "Fixture child"}}] : [])], stop_reason: null,
       usage: { input_tokens: 300, cache_read_input_tokens: 100, cache_creation_input_tokens: 0, output_tokens: 999999 } },
       parent_tool_use_id: child ? "child-call-0068" : null, session_id: sessionId, uuid: randomUUID() });
     request("budget-request-1");
@@ -263,7 +291,7 @@ process.stdin.on("data", (chunk) => {
     if (message.type === "control_request") {
       if (message.request?.subtype === "set_model") model = message.request.model ?? model;
       write({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: message.request?.subtype === "get_context_usage" ? { totalTokens: JSON.parse(fs.readFileSync(${JSON.stringify(controlPath)}, "utf8")).usedTokens, rawMaxTokens: JSON.parse(fs.readFileSync(${JSON.stringify(controlPath)}, "utf8")).windowTokens, categories: [] } : {} } });
-      if (message.request?.subtype === "interrupt") {
+      if (message.request?.subtype === "interrupt" && !ignoreBudgetInterrupt) {
         clearTimeout(budgetTimer);
         log({ phase: "budget-interrupt", at: Date.now() });
         result({ is_error: true, result: "Interrupted.", terminal_reason: "aborted_streaming" });
@@ -295,6 +323,10 @@ class ClaudeStandIn extends EventEmitter<ClientEvents> implements AgentClient {
     this.#real.on("request", (request) => this.emit("request", request));
     this.#real.on("diagnostic", (message) => this.emit("diagnostic", message));
     this.#real.on("exit", (error) => this.emit("exit", error));
+  }
+
+  killTurnProcess(threadId: string, turnId: string) {
+    return this.#real.killTurnProcess?.(threadId, turnId) ?? Effect.succeed(false);
   }
 
   get running(): boolean {
@@ -564,13 +596,13 @@ async function fixture(provider: AgentProviderId = "codex", mode: AgentClient["c
 
 try {
   delete process.env.OPENBOT_SESSION_TOKEN_CAP;
-  await check("an existing agent without a cap compacts above the default 200000 token cap", async () => {
-    controlUsage(201000);
+  await check("an existing agent without a cap compacts above the default 300000 token cap", async () => {
+    controlUsage(301000);
     const f = await fixture();
     assert.equal(f.store.list().find((item) => item.id === f.agent.id)?.sessionTokenCap, undefined);
     await f.send("Default session cap.");
     await waitFor("default-cap compaction", () => f.compactRows().length > 0);
-    return { cap: 200000, used: 201000, compactions: f.compactRows().length };
+    return { cap: 300000, used: 301000, compactions: f.compactRows().length };
   });
   await check("an explicit agent cap persists and null removes the override", async () => {
     controlUsage(1000);
@@ -662,6 +694,20 @@ try {
           row.input.includes("After native rotation."),
       ),
     );
+  });
+  await check("a replacement session uses its own cap baseline and repeated ineffective rotations stop", async () => {
+    controlUsage(800000);
+    const f = await fixture("codex", "handoff");
+    await f.send("Rotate the old 800k session.");
+    await waitFor("the first 800k rotation", () => f.database.listProviderSessions(f.threadId).length === 2);
+    controlUsage(400000);
+    await f.send("The replacement still exceeds 300k.");
+    await waitFor("the replacement cap rotation", () => f.database.listProviderSessions(f.threadId).length === 3);
+    await f.send("A second ineffective replacement must warn and stop rotating.");
+    await waitFor("ineffective rotation settlement", () => f.service.nativeWorkSnapshot().idle);
+    await f.send("The same fixed context cannot rotate forever.");
+    assert.equal(f.database.listProviderSessions(f.threadId).length, 3);
+    return { oldContext: 800000, replacementContext: 400000, cap: 300000, rotations: 2 };
   });
   await check("the manual route rejects an unknown agent and closed-field validation errors", async () => {
     controlUsage(1000);
@@ -832,6 +878,23 @@ try {
         runId: run.run_id,
         deliveryId,
       });
+      const journal = new BridgeWorkStore(f.database);
+      for (let index = 0; index < 40; index++) {
+        const closedId = `closed-after-open-${index}`;
+        journal.record({
+          authority: "fixture:carryover",
+          refs: [`delivery:${closedId}`],
+          owner: { kind: "agent", id: f.agent.id },
+          routineId: saved.routine.id,
+          runId: closedId,
+          deliveryId: closedId,
+        });
+        journal.close("fixture:carryover", {
+          idempotencyKey: closedId,
+          reason: "Fixture closed work",
+          deliveryIds: [closedId],
+        });
+      }
       const oldThreadId = f.agent.threadId;
       const rotated = await f.control(`agentId=${f.agent.id}&mode=rotate`);
       assert.equal(rotated.status, 202, rotated.text);
@@ -907,10 +970,110 @@ try {
       assert.equal(failures.filter((code) => code === "turn_input_budget_exceeded").length, 1);
       const deliveryId = receipt.deliveries[0]?.id;
       assert.ok(deliveryId);
-      assert.notEqual(f.mailbox.getDelivery(deliveryId)?.delivery.status, "queued");
+      const delivery = f.mailbox.getDelivery(deliveryId)?.delivery;
+      assert.equal(delivery?.status, "failed");
+      assert.match(delivery?.error ?? "", /input token budget.*fresh turn/u);
       return { stops: 1, distinctInputRequests: 3, inputTokensIncludingCache: 1200 };
     },
   );
+  await check("the default model call budget fails at forty distinct requests without retrying in place", async () => {
+    delete process.env.OPENBOT_TURN_MODEL_CALL_BUDGET;
+    controlUsage(1000);
+    const f = await fixture("claude", "native");
+    const before = readFileSync(turnLog, "utf8").split("\n").filter(Boolean).length;
+    const receipt = await runCauseEffect(
+      f.service.sendMessage({ agentId: f.agent.id, text: "TURN-CALL-BUDGET-CHECK", attachmentDraftIds: [] }),
+    );
+    const deliveryId = receipt.deliveries[0]?.id;
+    assert.ok(deliveryId);
+    await waitFor(
+      "the call-budget terminal delivery",
+      () => f.mailbox.getDelivery(deliveryId)?.delivery.status === "failed",
+    );
+    await waitFor("call-budget native idle", () => f.service.nativeWorkSnapshot().idle);
+    const rows = readFileSync(turnLog, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .slice(before)
+      .map((line) => JSON.parse(line));
+    assert.equal(rows.filter((row) => row.phase === "start").length, 1);
+    assert.equal(rows.filter((row) => row.phase === "model-call").length, 40);
+    assert.equal(rows.filter((row) => row.phase === "budget-interrupt").length, 1);
+    assert.match(f.mailbox.getDelivery(deliveryId)?.delivery.error ?? "", /model call budget.*fresh turn/u);
+    return { modelCalls: 40, duplicateFrames: 40, inputTokens: 80, deliveryStatus: "failed", replacementTurns: 0 };
+  });
+  await check("an ignored budget interrupt kills only its exact query and fails the native delivery", async () => {
+    process.env.OPENBOT_TURN_MODEL_CALL_BUDGET = "3";
+    controlUsage(1000);
+    const f = await fixture("claude", "native");
+    const before = readFileSync(turnLog, "utf8").split("\n").filter(Boolean).length;
+    const peer = await runCauseEffect(
+      f.service.createAgent({
+        name: "Budget slow peer",
+        description: "Fixture",
+        avatarSeed: "budget-peer",
+        avatarHue: null,
+        initialMessage: "Peer ready.",
+        provider: "claude",
+        model: f.agent.model,
+      }),
+    );
+    await waitFor("the peer initial turn", () =>
+      f.service.listQueue(peer.id).deliveries.every((row) => row.status === "completed"),
+    );
+    const peerReceipt = await runCauseEffect(
+      f.service.sendMessage({ agentId: peer.id, text: "BUDGET-SLOW-CONTROL", attachmentDraftIds: [] }),
+    );
+    const peerDeliveryId = peerReceipt.deliveries[0]?.id;
+    assert.ok(peerDeliveryId);
+    await waitFor("the slow peer to start", () => f.mailbox.getDelivery(peerDeliveryId)?.delivery.status === "running");
+    const receipt = await runCauseEffect(
+      f.service.sendMessage({ agentId: f.agent.id, text: "TURN-CALL-BUDGET-IGNORE", attachmentDraftIds: [] }),
+    );
+    const deliveryId = receipt.deliveries[0]?.id;
+    assert.ok(deliveryId);
+    await waitFor(
+      "the ignored interrupt to settle",
+      () => f.mailbox.getDelivery(deliveryId)?.delivery.status === "failed",
+    );
+    const rows = readFileSync(turnLog, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .slice(before)
+      .map((line) => JSON.parse(line));
+    const pid = rows.find((row) => row.phase === "start" && row.input?.includes("TURN-CALL-BUDGET-IGNORE"))?.pid;
+    assert.equal(typeof pid, "number");
+    await waitFor("the over-budget query process to exit", () => {
+      try {
+        process.kill(pid, 0);
+        return false;
+      } catch {
+        return true;
+      }
+    });
+    assert.match(f.mailbox.getDelivery(deliveryId)?.delivery.error ?? "", /model call budget.*fresh turn/u);
+    assert.equal(
+      rows.filter((row) => row.phase === "start" && row.input?.includes("TURN-CALL-BUDGET-IGNORE")).length,
+      1,
+    );
+    assert.equal(f.mailbox.getDelivery(peerDeliveryId)?.delivery.status, "running");
+    const peerPid = rows.find((row) => row.phase === "start" && row.input?.includes("BUDGET-SLOW-CONTROL"))?.pid;
+    assert.equal(typeof peerPid, "number");
+    assert.doesNotThrow(() => process.kill(peerPid, 0));
+    await waitFor(
+      "the slow peer to complete",
+      () => f.mailbox.getDelivery(peerDeliveryId)?.delivery.status === "completed",
+      12000,
+    );
+    delete process.env.OPENBOT_TURN_MODEL_CALL_BUDGET;
+    return {
+      configuredCalls: 3,
+      queryExited: true,
+      deliveryStatus: "failed",
+      replacementTurns: 0,
+      slowPeerCompleted: true,
+    };
+  });
   report.passed = report.checks.every((item) => item.passed);
   if (!report.passed) process.exitCode = 1;
 } catch (error) {
@@ -918,6 +1081,7 @@ try {
   process.exitCode = 1;
 } finally {
   delete process.env.OPENBOT_SESSION_TOKEN_CAP;
+  delete process.env.OPENBOT_TURN_MODEL_CALL_BUDGET;
   for (const resource of resources.reverse()) {
     if (resource.server) await runCauseEffect(resource.server.close()).catch(() => {});
     await runCauseEffect(resource.service.stop()).catch(() => {});

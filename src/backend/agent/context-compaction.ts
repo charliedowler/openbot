@@ -696,7 +696,7 @@ export class ContextCompaction {
     // The hold keeps no client: `clientEnded` must not release the queue while the rotation runs.
     // The rotation ends the hold itself, also when the client exits.
     const compaction = this.#display.get(threadId)?.compaction;
-    const compactedTokens = this.#budgets.get(threadId)?.usedTokens ?? null;
+    const ineffectiveCompactions = this.#budgets.get(threadId)?.ineffectiveCompactions ?? 0;
     const next = yield* this.#rotateSession(agentId, client, threadId).pipe(
       Effect.catch((failure) =>
         Effect.sync(() => {
@@ -713,8 +713,6 @@ export class ContextCompaction {
         compaction: { id, startedAt, status: "completed", ...(expectedMs === undefined ? {} : { expectedMs }) },
       });
     }
-    // The growth rule moves to the new session, as it stays on a Codex thread: a session that starts
-    // above the threshold does not rotate again at each turn.
     if (next)
       this.#budgets.set(next, {
         agentId,
@@ -723,8 +721,8 @@ export class ContextCompaction {
         pending: false,
         phase: "idle",
         compactionTurnId: null,
-        lastCompactedTokens: compactedTokens,
-        ineffectiveCompactions: this.#budgets.get(threadId)?.ineffectiveCompactions ?? 0,
+        lastCompactedTokens: null,
+        ineffectiveCompactions,
         awaitingUsage: true,
       });
     // A session that was not replaced keeps its budget; the growth rule stops an immediate retry.

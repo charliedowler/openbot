@@ -239,6 +239,8 @@ interface ThreadRuntime {
   /** The usage of each API request since the last result, by message id. */
   requestUsage: Map<string, { model: string; usage: unknown }>;
   turnRequestUsage: Map<string, { model: string; usage: unknown }>;
+  toolTurns: Map<string, string>;
+  killProcess: () => void;
   contextRequest: number;
   compacting: boolean;
   config: ThreadConfig;
@@ -497,6 +499,18 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
     const runtime = this.#threads.get(threadId);
     if (!runtime) return;
     yield* this.#threads.close(runtime).pipe(toProviderClientOperationError);
+  });
+
+  readonly killTurnProcess = Effect.fn("ClaudeAgentClient.killTurnProcess")(function* (
+    this: ClaudeAgentClient,
+    threadId: string,
+    turnId: string,
+  ) {
+    const runtime = this.#threads.get(threadId);
+    if (!runtime || runtime.activeTurn?.id !== turnId) return false;
+    runtime.killProcess();
+    yield* this.releaseThread(threadId);
+    return true;
   });
 
   readonly #closeRuntime = Effect.fn("ClaudeAgentClient.closeRuntime")(function* (
@@ -966,12 +980,40 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
       // The CLI loads this file and the SDK's own `--mcp-config` value together.
       ...(mcpConfigFile ? { "mcp-config": mcpConfigFile } : {}),
     };
+    let killProcess = () => {};
     const claudeQuery = yield* providerSync(() =>
       this.#createQuery({
         prompt: input,
         options: {
           cwd: config.cwd,
           ...this.#sdkLaunch,
+          spawnClaudeCodeProcess: (options) => {
+            const child =
+              this.#sdkLaunch.spawnClaudeCodeProcess?.(options) ??
+              spawn(options.command, options.args, {
+                cwd: options.cwd,
+                env: options.env,
+                stdio: ["pipe", "pipe", "pipe"],
+                windowsHide: true,
+              });
+            const kill = () => {
+              if (child.exitCode === null && child.signalCode == null) child.kill("SIGKILL");
+            };
+            killProcess = kill;
+            options.signal.addEventListener("abort", kill, { once: true });
+            child.once("exit", () => options.signal.removeEventListener("abort", kill));
+            child.on("error", () => {});
+            if (options.signal.aborted) kill();
+            if (
+              "stderr" in child &&
+              child.stderr &&
+              typeof child.stderr === "object" &&
+              "resume" in child.stderr &&
+              typeof child.stderr.resume === "function"
+            )
+              child.stderr.resume();
+            return child;
+          },
           ...(config.model ? { model: this.#sdkModel(config.model) } : {}),
           ...(appliedEffort ? { effort: appliedEffort } : {}),
           ...(resume ? { resume: threadId } : { sessionId: threadId }),
@@ -1040,6 +1082,8 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
       resumedUsage: resume,
       requestUsage: new Map(),
       turnRequestUsage: new Map(),
+      toolTurns: new Map(),
+      killProcess: () => killProcess(),
       contextRequest: 0,
       compacting: false,
       config,
@@ -1176,6 +1220,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
       unprompted,
     };
     runtime.turnRequestUsage.clear();
+    runtime.toolTurns.clear();
     runtime.activeTurn = turn;
     runtime.nextTurnId = null;
     startClaudePlanTurn(runtime.plan);
@@ -1285,7 +1330,13 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
       const model = getString(message.message, "model");
       if (runtime.resumedUsage && id && model && isRecord(message.message))
         runtime.requestUsage.set(id, { model, usage: message.message.usage });
-      if (id && model && isRecord(message.message)) {
+      const ownerTurn = message.parent_tool_use_id
+        ? runtime.toolTurns.get(message.parent_tool_use_id)
+        : runtime.activeTurn?.id;
+      if (ownerTurn && ownerTurn === runtime.activeTurn?.id) {
+        for (const call of messageToolCalls(message.message)) runtime.toolTurns.set(call.id, ownerTurn);
+      }
+      if (ownerTurn && ownerTurn === runtime.activeTurn?.id && id && model && isRecord(message.message)) {
         runtime.turnRequestUsage.set(id, { model, usage: message.message.usage });
         const totals = Object.values(claudeTurnModelUsage(runtime.turnRequestUsage.values()));
         const counts = totals.flatMap((entry) => [
@@ -1293,19 +1344,19 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
           entry.cacheReadInputTokens,
           entry.cacheCreationInputTokens,
         ]);
-        if (
-          runtime.activeTurn &&
-          counts.length &&
+        const completeInput =
+          counts.length > 0 &&
           counts.every(
             (value): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
-          )
-        )
+          );
+        if (runtime.activeTurn)
           this.emit("notification", {
             method: "openbot/turn-input",
             params: {
               threadId: runtime.id,
               turnId: runtime.activeTurn.id,
-              inputTokens: counts.reduce((sum, value) => sum + value, 0),
+              ...(completeInput ? { inputTokens: counts.reduce((sum, value) => sum + value, 0) } : {}),
+              modelCalls: runtime.turnRequestUsage.size,
             },
           });
       }

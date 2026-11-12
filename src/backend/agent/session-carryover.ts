@@ -10,19 +10,25 @@ const safeId = (value: unknown): value is string =>
   typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:@/#-]{0,255}$/u.test(value);
 
 export function sessionCarryover(database: OpenBotDatabase, agentId: string, threadId: string): string {
-  const tasks = databaseRows(
-    database.connection
-      .prepare(
-        "SELECT COALESCE(legacy_task_id,thread_id) AS task_id,thread_id,outcome FROM projection_agent_threads WHERE agent_id=? AND archived_at IS NULL ORDER BY updated_at DESC,thread_id LIMIT ?",
-      )
-      .all(agentId, LIMIT + 1),
-  );
+  const context = database.connection
+    .prepare("SELECT channel_id FROM projection_channel_contexts WHERE thread_id=?")
+    .get(threadId);
+  const channelId = isDynamicRecord(context) && typeof context.channel_id === "string" ? context.channel_id : null;
+  const tasks = channelId
+    ? []
+    : databaseRows(
+        database.connection
+          .prepare(
+            "SELECT COALESCE(legacy_task_id,thread_id) AS task_id,thread_id,outcome FROM projection_agent_threads WHERE agent_id=? AND archived_at IS NULL ORDER BY updated_at DESC,thread_id LIMIT ?",
+          )
+          .all(agentId, LIMIT + 1),
+      );
   const assignments = databaseRows(
     database.connection
       .prepare(
-        "SELECT a.assignment_json FROM projection_channel_assignments a JOIN projection_channel_tasks t ON t.task_id=a.task_id AND t.channel_id=a.channel_id WHERE json_extract(a.assignment_json,'$.agentId')=? AND (json_extract(a.assignment_json,'$.state') IN ('queued','starting','running') OR (json_extract(t.task_json,'$.state') IN ('waiting','paused') AND json_extract(a.assignment_json,'$.taskRevision')=json_extract(t.task_json,'$.revision'))) ORDER BY a.rowid DESC LIMIT ?",
+        "SELECT a.assignment_json FROM projection_channel_assignments a JOIN projection_channel_tasks t ON t.task_id=a.task_id AND t.channel_id=a.channel_id WHERE json_extract(a.assignment_json,'$.agentId')=? AND (? IS NULL OR a.channel_id=?) AND (json_extract(a.assignment_json,'$.state') IN ('queued','starting','running') OR (json_extract(t.task_json,'$.state') IN ('waiting','paused') AND json_extract(a.assignment_json,'$.taskRevision')=json_extract(t.task_json,'$.revision'))) ORDER BY a.rowid DESC LIMIT ?",
       )
-      .all(agentId, LIMIT + 1),
+      .all(agentId, channelId, channelId, LIMIT + 1),
   )
     .map((row) => JSON.parse(requiredStringColumn(row, "assignment_json")))
     .filter(isDynamicRecord);
@@ -30,9 +36,18 @@ export function sessionCarryover(database: OpenBotDatabase, agentId: string, thr
   const rows = databaseRows(
     database.connection
       .prepare(
-        "SELECT aggregate_id FROM orchestration_events WHERE aggregate_type='bridge-work-run' AND event_type='bridge.work.linked' AND (json_extract(payload_json,'$.owner.id')=? OR (json_extract(payload_json,'$.owner.kind')='channel' AND EXISTS (SELECT 1 FROM projection_channel_assignments a WHERE a.channel_id=json_extract(payload_json,'$.owner.id') AND json_extract(a.assignment_json,'$.agentId')=?))) ORDER BY sequence DESC LIMIT ?",
+        `SELECT e.aggregate_id FROM orchestration_events e WHERE e.aggregate_type='bridge-work-run' AND e.event_type='bridge.work.linked'
+AND ((? IS NULL AND json_extract(e.payload_json,'$.owner.kind')='agent' AND json_extract(e.payload_json,'$.owner.id')=?)
+OR (json_extract(e.payload_json,'$.owner.kind')='channel' AND (? IS NULL OR json_extract(e.payload_json,'$.owner.id')=?)
+AND EXISTS (SELECT 1 FROM projection_channel_assignments a JOIN projection_channel_tasks t ON t.channel_id=a.channel_id AND t.task_id=a.task_id
+WHERE a.channel_id=json_extract(e.payload_json,'$.owner.id') AND json_extract(a.assignment_json,'$.agentId')=?
+AND (json_extract(a.assignment_json,'$.state') IN ('queued','starting','running') OR (json_extract(t.task_json,'$.state') IN ('waiting','paused') AND json_extract(a.assignment_json,'$.taskRevision')=json_extract(t.task_json,'$.revision'))))))
+AND NOT EXISTS (SELECT 1 FROM orchestration_events c, json_each(e.payload_json,'$.refs') r
+WHERE c.aggregate_type='bridge-work' AND c.event_type='bridge.work.closed'
+AND json_extract(c.payload_json,'$.authority')=json_extract(e.payload_json,'$.authority') AND json_extract(c.payload_json,'$.ref')=r.value)
+ORDER BY e.sequence DESC LIMIT ?`,
       )
-      .all(agentId, agentId, LIMIT + 1),
+      .all(channelId, agentId, channelId, channelId, agentId, LIMIT + 1),
   );
   let referencesTruncated = false;
   const references = rows.slice(0, LIMIT).flatMap((row) => {
@@ -118,7 +133,9 @@ export function sessionCarryover(database: OpenBotDatabase, agentId: string, thr
     version: 1,
     agentId,
     threadId,
-    workScope: "agent-owned native work; references include historical runs with explicit status",
+    workScope: channelId
+      ? "current channel native work"
+      : "agent-owned native work; references include historical runs with explicit status",
     summary: redactText(
       savedSummary?.text ??
         latestAnswer ??

@@ -67,7 +67,7 @@ import {
 } from "./provider-diagnostics";
 import type { ProviderRuntime } from "./provider-runtime";
 import { isNoUpdateAnswer, settleQuietRoutineTurn } from "./routine-quiet-runs";
-import { turnTokenBudget } from "./session-budgets";
+import { turnModelCallBudget, turnTokenBudget } from "./session-budgets";
 import {
   foldCodexChildItem,
   foldCodexSubagentItem,
@@ -320,7 +320,7 @@ export class TurnLifecycle {
   readonly #turnErrors = new Map<string, string>();
   /** How many times the provider retried a request of each running turn. */
   readonly #turnRetries = new Map<string, number>();
-  readonly #budgetStops = new Set<string>();
+  readonly #budgetStops = new Map<string, string>();
   /**
    * The client, provider thread and start time of each running turn, from its `turn/started`.
    * `produced` is set by the first item or delta: a refused turn is run again only without one.
@@ -527,6 +527,7 @@ export class TurnLifecycle {
       this.#runningTurns.delete(turnId);
       // A routine run's own session saves no history, so its turn ends now and closes the session.
       if (
+        !this.#budgetStops.has(turnId) &&
         options.keepRecoverable &&
         !this.#conversation.isRoutineSession(turn.threadId) &&
         this.#mailbox
@@ -670,27 +671,50 @@ export class TurnLifecycle {
           ? values.reduce((sum, value) => sum + value, 0)
           : null;
     }
-    if (input === null || input < turnTokenBudget(agent)) return;
-    this.#budgetStops.add(turnId);
-    logger.warn("A turn reached its input token budget.", {
+    const modelCalls = isRecord(params) ? params.modelCalls : undefined;
+    const callsExceeded =
+      typeof modelCalls === "number" && Number.isSafeInteger(modelCalls) && modelCalls >= turnModelCallBudget();
+    if (!callsExceeded && (input === null || input < turnTokenBudget(agent))) return;
+    const reason = sourceText(
+      callsExceeded ? "error.backend.turnModelCallBudgetExceeded" : "error.backend.turnInputBudgetExceeded",
+    );
+    this.#budgetStops.set(turnId, reason);
+    this.#turnErrors.set(turnId, reason);
+    this.#failoverTurns.delete(turnId);
+    this.#limitedTurns.delete(turnId);
+    logger.warn("A turn reached its model work budget.", {
       agentId,
       turnId,
       inputTokens: input,
       budget: turnTokenBudget(agent),
+      modelCalls,
+      modelCallBudget: turnModelCallBudget(),
     });
     this.#hooks.emitError(
-      "turn_input_budget_exceeded",
-      new Error(sourceText("error.backend.turnInputBudgetExceeded")),
+      callsExceeded ? "turn_model_call_budget_exceeded" : "turn_input_budget_exceeded",
+      new Error(reason),
       agentId,
     );
     if (this.#runningTurns.get(turnId) !== running || this.#conversation.loadedClientFor(threadId) !== source) return;
-    yield* source
-      .request("turn/interrupt", { threadId, turnId }, decodeRecordResponse)
-      .pipe(
-        Effect.catch((failure) =>
-          Effect.sync(() => this.#hooks.emitError("turn_budget_stop_failed", failure, agentId)),
-        ),
-      );
+    yield* Effect.gen({ self: this }, function* () {
+      yield* Effect.sleep("2 seconds");
+      if (this.#runningTurns.get(turnId) !== running || !this.#budgetStops.has(turnId)) return;
+      const stopped = source.killTurnProcess
+        ? yield* source.killTurnProcess(threadId, turnId).pipe(Effect.catch(() => Effect.succeed(false)))
+        : false;
+      if (stopped && this.#runningTurns.get(turnId) === running)
+        yield* this.#completeTurn(agentId, threadId, turnId, "failed");
+      else if (!stopped)
+        this.#hooks.emitError(
+          "turn_budget_stop_failed",
+          new Error("The provider did not end the budget-stopped turn."),
+          agentId,
+        );
+    }).pipe(Effect.forkIn(this.#scope, { startImmediately: true }));
+    yield* source.request("turn/interrupt", { threadId, turnId }, decodeRecordResponse).pipe(
+      Effect.timeout("2 seconds"),
+      Effect.catch((failure) => Effect.sync(() => this.#hooks.emitError("turn_budget_stop_failed", failure, agentId))),
+    );
   });
 
   readonly handleNotification = Effect.fn("TurnLifecycle.handleNotification")(function* (
@@ -927,7 +951,6 @@ export class TurnLifecycle {
             source,
           );
         }
-        this.#budgetStops.delete(turnId);
         this.#compaction.threadTurnEnded(threadId);
         if (this.#compaction.isCompactionTurn(threadId, turnId)) {
           this.#compaction.finish(agentId, threadId, status);
@@ -1202,6 +1225,9 @@ export class TurnLifecycle {
 
   readonly #completeTurn = Effect.fn("TurnLifecycle.completeTurn")(
     function* (this: TurnLifecycle, agentId: string, threadId: string, turnId: string, status: string) {
+      const budgetReason = this.#budgetStops.get(turnId);
+      const budgetExceeded = budgetReason !== undefined;
+      if (budgetExceeded) status = "failed";
       const running = this.#runningTurns.get(turnId);
       this.#runningTurns.delete(turnId);
       this.#budgetStops.delete(turnId);
@@ -1226,19 +1252,19 @@ export class TurnLifecycle {
           durationMs: Date.now() - running.startedAt,
         });
       }
-      const reportedError = this.#turnErrors.get(turnId);
+      const reportedError = budgetReason ?? this.#turnErrors.get(turnId);
       this.#turnErrors.delete(turnId);
       this.#turnRetries.delete(turnId);
       // The error is kept only while the turn runs, so a refused turn always has its entry.
       const refusedFailure =
-        running !== undefined && status === "failed" && reportedError !== undefined
+        !budgetExceeded && running !== undefined && status === "failed" && reportedError !== undefined
           ? refusedSessionFailure(running.client.provider, reportedError)
           : null;
       const refused = running !== undefined && refusedFailure !== null;
-      const limited = status === "failed" && this.#limitedTurns.has(turnId);
+      const limited = !budgetExceeded && status === "failed" && this.#limitedTurns.has(turnId);
       const resetsAt = this.#limitedTurns.get(turnId) ?? null;
       this.#limitedTurns.delete(turnId);
-      const failover = this.#failoverTurns.get(turnId);
+      const failover = budgetExceeded ? undefined : this.#failoverTurns.get(turnId);
       this.#failoverTurns.delete(turnId);
       this.#deltas.flushTurn(turnId);
       yield* this.#images.waitForOperations(threadId, turnId);
