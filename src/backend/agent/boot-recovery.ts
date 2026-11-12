@@ -1,3 +1,4 @@
+import { createOpenBotLogger } from "@openbot/logging";
 import { Cause, Effect, Schema } from "effect";
 import type { AgentProvider } from "../agent-client";
 import type { AgentStore } from "../agent-store";
@@ -16,6 +17,8 @@ import { stopRunningSubagents } from "./subagent-updates";
 import { isCodexMissingRollout, isCodexRolloutPending, providerForAgent } from "./thread-items";
 import type { ThreadLifecycle } from "./thread-lifecycle";
 
+const logger = createOpenBotLogger("delivery-recovery");
+
 type UnresolvedDelivery = DeliveryContext["delivery"];
 
 export interface BootRecoveryHooks {
@@ -25,6 +28,7 @@ export interface BootRecoveryHooks {
   deliveryThreadId?(deliveryId: string): string | null;
   /** Tells the external conversation of a delivery that the recovery settled it. */
   deliverySettled?(deliveryId: string, terminal: "completed" | "failed" | "interrupted"): void;
+  startingDeliverySettled?(deliveryId: string): Effect.Effect<void, { readonly cause: unknown }>;
   /**
    * Whether this routine delivery can have ended quiet: a scheduled run, or a run of a deleted
    * routine, whose record is gone. A Test, script or webhook run cannot.
@@ -137,6 +141,7 @@ export class BootRecovery {
   readonly reconcileUnresolvedDeliveries = Effect.fn("BootRecovery.reconcileUnresolvedDeliveries")(function* (
     this: BootRecovery,
   ) {
+    yield* this.reconcileStartingDeliveries();
     const unresolved = yield* recoveryStep(() => this.#mailbox.unresolvedDeliveries());
     // A delivery settled by another path never becomes unresolved again, so its mark goes too.
     const unresolvedIds = new Set(unresolved.map(({ delivery }) => delivery.id));
@@ -169,6 +174,31 @@ export class BootRecovery {
               }),
         ),
       );
+    }
+  });
+
+  readonly reconcileStartingDeliveries = Effect.fn("BootRecovery.reconcileStartingDeliveries")(function* (
+    this: BootRecovery,
+    now: number = Date.now(),
+  ) {
+    const configured = Number(process.env.OPENBOT_STARTING_DELIVERY_MINUTES ?? 10);
+    const ceilingMs = Math.min(10, Number.isFinite(configured) && configured > 0 ? configured : 10) * 60_000;
+    for (const { delivery } of this.#mailbox.staleStartingDeliveries(now, ceilingMs)) {
+      const current = this.#mailbox.getDelivery(delivery.id)?.delivery;
+      if (current?.status !== "starting" || current.turnId) continue;
+      const reason = "The delivery exceeded its starting ceiling without a confirmed turn.";
+      yield* this.#mailbox.markTerminal(delivery.id, "interrupted", reason).pipe(toBootRecoveryFailed);
+      logger.warn("delivery.starting-expired", {
+        deliveryId: delivery.id,
+        agentId: delivery.recipientAgentId,
+        ceilingMs,
+        reason,
+      });
+      this.#orphanedDeliveryIds.delete(delivery.id);
+      this.#hooks.deliverySettled?.(delivery.id, "interrupted");
+      if (this.#hooks.startingDeliverySettled)
+        yield* this.#hooks.startingDeliverySettled(delivery.id).pipe(toBootRecoveryFailed);
+      this.#mailboxSync.emitQueue(delivery.recipientAgentId);
     }
   });
 

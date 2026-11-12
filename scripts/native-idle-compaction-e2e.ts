@@ -474,7 +474,8 @@ try {
   await waitFor(
     "native compaction before provider exit",
     () =>
-      protocol().filter((entry) => entry.method === "fixture/native-compaction-running").length > compactionsBeforeExit,
+      protocol().filter((entry) => entry.method === "fixture/native-compaction-running").length >
+        compactionsBeforeExit && agents.nativeWorkSnapshot().compactions === 1,
   );
   assert.equal(agents.nativeWorkSnapshot().compactions, 1);
   assert.equal(

@@ -94,7 +94,7 @@ export interface ServerModeOptions {
   nativeWork?: () => { idle: boolean; compactions: number; providerOperations: number; reasons: string[] };
   usageLimits?: Pick<AgentService, "releaseUsageLimits">;
   agents?: Pick<AgentService, "listAgents" | "interruptRunningTurn" | "updateAgentRuntime" | "agentQueues"> &
-    Partial<Pick<AgentService, "controlAgentContext">>;
+    Partial<Pick<AgentService, "controlAgentContext" | "cancelControlDeliveries">>;
   routines?: Pick<HostEventsService, "listRoutines" | "saveRoutine">;
   channelIds?: () => readonly string[];
   cpuProfiler?: Pick<CpuProfiler, "take">;
@@ -241,6 +241,8 @@ export class ServerMode {
         return runCauseEffect(this.#mobileConnect());
       case "POST /v1/usage/reset":
         return this.#resetUsage(body.get("provider") ?? "", body.get("accountId"));
+      case "POST /v1/deliveries/cancel":
+        return this.#cancelDeliveries(body);
       case "POST /v1/turns/interrupt":
         return this.#interruptTurn(body);
       case "POST /v1/agents/compact":
@@ -331,6 +333,37 @@ export class ServerMode {
         limits: released.map((limit) => `${limit.provider}/${limit.accountId ?? "default"}/${limit.model}`).join(" "),
       },
     };
+  }
+
+  async #cancelDeliveries(body: URLSearchParams): Promise<Answer> {
+    const agents = this.#options.agents;
+    if (!agents?.cancelControlDeliveries) return failure(404, "not_found");
+    const allowed = new Set(["agentId", "senderKind", "createdBefore", "statuses"]);
+    for (const key of body.keys())
+      if (!allowed.has(key) || body.getAll(key).length !== 1) return failure(400, "invalid_fields");
+    const agentId = body.get("agentId")?.trim() ?? "";
+    if (!agentId || agentId.length > INPUT_LIMITS.identifier) return failure(400, "invalid_agent");
+    const senderKind = body.get("senderKind") ?? "";
+    if (!["routine", "agent", "user"].includes(senderKind)) return failure(400, "invalid_sender_kind");
+    const cutoff = body.get("createdBefore") ?? "";
+    const createdBefore = Date.parse(cutoff);
+    if (
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(cutoff) ||
+      !Number.isFinite(createdBefore) ||
+      new Date(createdBefore).toISOString() !== cutoff ||
+      createdBefore > Date.now()
+    )
+      return failure(400, "invalid_created_before");
+    const statuses = (body.get("statuses") ?? "queued,starting").split(",");
+    if (
+      !statuses.length ||
+      statuses.some((status) => !["queued", "starting"].includes(status)) ||
+      new Set(statuses).size !== statuses.length
+    )
+      return failure(400, "invalid_statuses");
+    const ids = await runCauseEffect(agents.cancelControlDeliveries(agentId, senderKind, createdBefore, statuses));
+    if (ids === null) return failure(404, "unknown_agent");
+    return { status: 200, lines: { count: String(ids.length), ids: JSON.stringify(ids) } };
   }
 
   async #interruptTurn(body: URLSearchParams): Promise<Answer> {

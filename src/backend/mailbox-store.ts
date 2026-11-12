@@ -151,6 +151,7 @@ interface StoredDelivery {
   turnId: string | null;
   error: string | null;
   createdAt: string;
+  startingAt?: string;
   /** Time this delivery joined a running turn. The mailbox keeps the original send time. */
   steeredAt?: string;
   /** Sent to steer the running turn, and waiting in the queue instead. Shown only while queued. */
@@ -2560,7 +2561,11 @@ export class MailboxStore {
       const queued = this.#state.deliveries.find((candidate) => candidate.id === deliveryId)?.status === "queued";
       if (beside && queued) this.#besideDeliveries.add(deliveryId);
       else if (queued) this.#besideDeliveries.delete(deliveryId);
-      yield* this.#updateDeliveryEffect(deliveryId, ["queued"], { status: "starting", error: null });
+      yield* this.#updateDeliveryEffect(deliveryId, ["queued"], {
+        status: "starting",
+        error: null,
+        startingAt: new Date().toISOString(),
+      });
     } catch (cause) {
       return yield* new StoredStateFailure({ cause });
     }
@@ -2754,13 +2759,15 @@ export class MailboxStore {
     this.#finishCancellation(delivery, false);
   }
 
-  #finishCancellation(delivery: StoredDelivery, cancelDelivery: boolean): void {
+  #finishCancellation(delivery: StoredDelivery, cancelDelivery: boolean, reason?: string): void {
     const editId = delivery.editId;
     const previousStatus = delivery.status;
+    const previousError = delivery.error;
     const previousOutcomes = delivery.finishedEditOutcomes;
     const released = editId ? this.#state.drafts.filter((draft) => draft.ownerEditId === editId) : [];
     const previousRetention = released.map((draft) => draft.preserveOnRestart);
     if (cancelDelivery) delivery.status = "cancelled";
+    if (reason !== undefined) delivery.error = redactText(reason);
     if (editId) recordFinishedQueueEdit(delivery, editId, { action: "cancel" });
     delete delivery.editId;
     for (const draft of released) {
@@ -2775,6 +2782,7 @@ export class MailboxStore {
       this.#persist(cancelDelivery ? "delivery.cancelled" : "delivery.edit-finished");
     } catch (error) {
       delivery.status = previousStatus;
+      delivery.error = previousError;
       if (editId === undefined) delete delivery.editId;
       else delivery.editId = editId;
       if (previousOutcomes === undefined) delete delivery.finishedEditOutcomes;
@@ -3191,6 +3199,44 @@ export class MailboxStore {
       (delivery) =>
         delivery.recipientAgentId === agentId && (delivery.status === "starting" || delivery.status === "running"),
     );
+  }
+
+  staleStartingDeliveries(now: number, ceilingMs: number): DeliveryContext[] {
+    return this.#contexts(
+      this.#state.deliveries.filter((delivery) => {
+        const startedAt = Date.parse(delivery.startingAt ?? delivery.createdAt);
+        return (
+          delivery.status === "starting" &&
+          delivery.turnId === null &&
+          Number.isFinite(startedAt) &&
+          now - startedAt > ceilingMs
+        );
+      }),
+    );
+  }
+
+  cancelSelectedDeliveries(
+    agentId: string,
+    senderKind: string,
+    createdBefore: number,
+    statuses: readonly string[],
+    reason: string,
+  ): string[] {
+    const selected = this.#contexts(
+      this.#state.deliveries.filter(
+        (delivery) =>
+          delivery.recipientAgentId === agentId &&
+          statuses.includes(delivery.status) &&
+          (delivery.status === "queued" || (delivery.status === "starting" && delivery.turnId === null)) &&
+          Date.parse(delivery.createdAt) < createdBefore,
+      ),
+    ).filter(({ delivery }) => delivery.sender.kind === senderKind);
+    for (const { delivery } of selected) this.#assertQueueNotEditing(delivery.id);
+    for (const { delivery } of selected) {
+      const stored = this.#state.deliveries.find((candidate) => candidate.id === delivery.id);
+      if (stored) this.#finishCancellation(stored, true, reason);
+    }
+    return selected.map(({ delivery }) => delivery.id);
   }
 
   unresolvedDeliveries(): DeliveryContext[] {
@@ -4032,6 +4078,7 @@ function isStoredDelivery(value: unknown): value is StoredDelivery {
     (isString(value.turnId) || value.turnId === null) &&
     (isString(value.error) || value.error === null) &&
     isString(value.createdAt) &&
+    (value.startingAt === undefined || (isString(value.startingAt) && Number.isFinite(Date.parse(value.startingAt)))) &&
     (value.steeredAt === undefined || (isString(value.steeredAt) && Number.isFinite(Date.parse(value.steeredAt)))) &&
     (value.steerFallback === undefined || isOneOf(QUEUE_STEER_FALLBACKS, value.steerFallback)) &&
     (value.resumeAfterUsageLimit === undefined ||

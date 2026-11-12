@@ -545,6 +545,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
   readonly #removal: AgentRemoval;
   readonly #tools: OpenBotToolRouter;
   readonly #reaper: TurnReaper;
+  #startupDeliveryHoldAt = 0;
   readonly #sidebarLayout: AgentSidebar | null;
   readonly #localSkillTools: (() => LocalSkillTools) | undefined;
   readonly #routineFlowTools: (() => RoutineFlowTools) | undefined;
@@ -1212,6 +1213,14 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
         taskThreads: () => this.#tasks.executionThreads(),
         deliveryThreadId: (deliveryId) => this.#deliveryThreadId(deliveryId),
         deliverySettled: (deliveryId, terminal) => this.messaging.deliverySettled(deliveryId, terminal),
+        startingDeliverySettled: (deliveryId) =>
+          Effect.gen({ self: this }, function* () {
+            yield* this.#drain.cancelStartingDeliveries([deliveryId]);
+            if (this.channels.store.assignmentForDelivery(deliveryId))
+              yield* this.channels.deliveryFailed(deliveryId, "The delivery did not start before its ceiling.");
+            const agentId = this.#mailbox.getDelivery(deliveryId)?.delivery.recipientAgentId;
+            if (agentId) this.#drain.scheduleDrain(agentId);
+          }),
       },
     });
     this.channels = new ChannelService(store.database, mailbox, new ChannelImages(store.channelImagesRoot), {
@@ -1806,6 +1815,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
       lastProviderEventAt: (agentId) => this.#turn.lastEventAt(agentId),
       providerTurnLive: (_agentId, turnId) => this.#turn.reaperTurnLive(turnId),
       refresh: () => this.#turn.refreshReaperProcesses(),
+      recoverStarting: () => this.#boot.reconcileStartingDeliveries(),
       kill: (stop) => this.#killReaperTurn(stop),
       pendingAttention: (agentId, turnId) => this.#attention.hasPendingForTurn(agentId, turnId),
       nobodyToAnswer: (agentId, turnId, threadId) => this.#tools.nobodyToAnswer(agentId, turnId, threadId),
@@ -4048,6 +4058,12 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
           (failure) => new AgentLifecycleFailed({ operation: "initialize mailbox", cause: failure.cause }),
         ),
       );
+    const heldAgentId = process.env.OPENBOT_STARTUP_DELIVERY_HOLD_AGENT?.trim();
+    if (heldAgentId && this.#store.list().some((agent) => agent.id === heldAgentId)) {
+      this.#startupDeliveryHoldAt = Date.now();
+      this.#drain.holdStartupDeliveries(heldAgentId);
+      logger.warn("delivery.startup-hold", { agentId: heldAgentId });
+    }
     yield* lifecycleStep("restore channel links", () => {
       this.#mcp.migrateCatalogBridgesToHttp();
       this.channels.restoreDeliveryLinks();
@@ -5248,6 +5264,40 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
   acknowledgeFailedTurn(agentId: string, turnId: string): void {
     this.#turn.acknowledgeFailedTurn(agentId, turnId);
   }
+
+  readonly cancelControlDeliveries = Effect.fn("AgentService.cancelControlDeliveries")(function* (
+    this: AgentService,
+    agentId: string,
+    senderKind: string,
+    createdBefore: number,
+    statuses: readonly string[],
+  ) {
+    if (!this.#store.list().some((agent) => agent.id === agentId)) return null;
+    const reason = `Host control cancels stale ${senderKind} deliveries created before ${new Date(createdBefore).toISOString()}.`;
+    const ids = yield* Effect.try({
+      try: () => this.#mailbox.cancelSelectedDeliveries(agentId, senderKind, createdBefore, statuses, reason),
+      catch: (cause) => new AgentLifecycleFailed({ operation: "cancelControlDeliveries", cause }),
+    });
+    yield* this.#drain.cancelStartingDeliveries(ids);
+    for (const id of ids) {
+      logger.info("delivery.host-cancelled", { deliveryId: id, agentId, senderKind, createdBefore, reason });
+      this.messaging.deliverySettled(id, "interrupted");
+      if (this.channels.store.assignmentForDelivery(id)) yield* this.channels.deliveryFailed(id, reason);
+    }
+    if (
+      senderKind === "routine" &&
+      statuses.includes("queued") &&
+      statuses.includes("starting") &&
+      createdBefore <= this.#startupDeliveryHoldAt &&
+      createdBefore >= this.#startupDeliveryHoldAt - 300_000
+    ) {
+      this.#drain.releaseStartupDeliveries(agentId);
+      logger.info("delivery.startup-hold-released", { agentId, createdBefore });
+    }
+    this.#mailboxSync.emitQueue(agentId);
+    this.#drain.scheduleDrain(agentId);
+    return ids;
+  }, Effect.uninterruptible).bind(this);
 
   cancelQueuedMessage(agentId: string, deliveryId: string): Effect.Effect<void, AgentLifecycleFailed> {
     return this.#queue

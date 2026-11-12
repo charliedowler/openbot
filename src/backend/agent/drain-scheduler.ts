@@ -260,6 +260,8 @@ export class DrainScheduler {
    * has no turn yet, and this count is what keeps that process alive until the turn starts.
    */
   readonly #startingAgents = new Map<string, number>();
+  readonly #startingCancellation = new Map<string, Deferred.Deferred<void>>();
+  readonly #startupDeliveryHolds = new Set<string>();
   readonly #scheduledDrains = new Set<string>();
   readonly #drainTasks = new Map<string, Deferred.Deferred<void, DeliveryStartFailed>>();
 
@@ -446,9 +448,28 @@ export class DrainScheduler {
     return pass ? remembered(pass.heldBy, laneKey(lane), () => this.#readHold(lane)) : this.#readHold(lane);
   }
 
+  readonly cancelStartingDeliveries = Effect.fn("DrainScheduler.cancelStartingDeliveries")(function* (
+    this: DrainScheduler,
+    ids: readonly string[],
+  ) {
+    for (const id of ids) {
+      const signal = this.#startingCancellation.get(id);
+      if (signal) yield* Deferred.succeed(signal, undefined);
+    }
+  });
+
+  holdStartupDeliveries(agentId: string): void {
+    this.#startupDeliveryHolds.add(agentId);
+  }
+
+  releaseStartupDeliveries(agentId: string): void {
+    this.#startupDeliveryHolds.delete(agentId);
+  }
+
   #readHold(lane: Lane): string | null {
     const { agentId, taskId } = lane;
     if (this.#hooks.isDeleting(agentId)) return "deleting";
+    if (taskId === null && this.#startupDeliveryHolds.has(agentId)) return "host-delivery-cleanup";
     const key = laneKey(lane);
     if (this.#settingsHolds.has(agentId)) return "session-settings";
     if (this.#liveVoiceHolds.has(agentId)) return "live-voice";
@@ -881,6 +902,10 @@ export class DrainScheduler {
       planNote !== undefined || delivery.sender.kind === "user"
         ? [...replies, context, ...laterMessages]
         : [context, ...replies, ...laterMessages];
+    const cancellation = Deferred.makeUnsafe<void>();
+    const startingIds = batch.map((item) => item.delivery.id);
+    for (const id of startingIds) this.#startingCancellation.set(id, cancellation);
+    let cancelledBeforeTurn = false;
     let confirmedTurnId: string | null = null;
     // The session of a routine run in its own session. Closed here when no turn starts on it.
     let routineThreadId: string | null = null;
@@ -1125,6 +1150,7 @@ export class DrainScheduler {
       // Claude, ACP and Pi take the delivery id as the turn id. A delivery that a refused turn put back
       // in the queue keeps its id, and the end of that turn must not end this new run (#2468).
       this.#hooks.turnRestarting(delivery.id);
+      if (batch.some((item) => this.#mailbox.getDelivery(item.delivery.id)?.delivery.status !== "starting")) return;
       const firstStart = yield* Effect.result(startTurn(threadId));
       let response: Effect.Success<ReturnType<typeof startTurn>>;
       if (Result.isSuccess(firstStart)) response = firstStart.success;
@@ -1201,6 +1227,17 @@ export class DrainScheduler {
         ),
       );
     }).pipe(
+      Effect.interruptible,
+      Effect.raceFirst(
+        Deferred.await(cancellation).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              cancelledBeforeTurn = true;
+            }),
+          ),
+        ),
+      ),
+      Effect.interruptible,
       // Synchronous store/event failures used the same reconciliation path before migration.
       Effect.catchDefect((cause) => Effect.fail(new DeliveryStartFailed({ cause }))),
       Effect.catch((failure) =>
@@ -1309,6 +1346,20 @@ export class DrainScheduler {
           // A turn that started, or that may still start, closes the session when it ends.
           if (routineThreadId && !confirmedTurnId && !turnMayRun)
             yield* this.#threads.closeRoutineThread(routineThreadId);
+          for (const id of startingIds) {
+            this.#startingCancellation.delete(id);
+            const current = this.#mailbox.getDelivery(id)?.delivery;
+            if (cancelledBeforeTurn && current?.status === "starting" && !current.turnId)
+              yield* this.#mailbox
+                .restoreQueued(id)
+                .pipe(
+                  Effect.catch((failure) =>
+                    Effect.sync(() =>
+                      this.#hooks.emitError("delivery_cancel_requeue_failed", failure.cause, delivery.recipientAgentId),
+                    ),
+                  ),
+                );
+          }
           releaseRuntimeRefresh();
           if (!confirmedTurnId && !turnMayRun) releaseReservation();
           for (const provider of claimed) this.#startingDeliveries.set(provider, this.#starting(provider) - 1);

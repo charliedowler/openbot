@@ -35,6 +35,7 @@ export interface TurnReaperHost {
   stop(stop: TurnReaperStop): Effect.Effect<void, unknown>;
   kill?(stop: TurnReaperStop): Effect.Effect<void, unknown>;
   refresh?(): Effect.Effect<void, unknown>;
+  recoverStarting?(): Effect.Effect<void, unknown>;
 }
 
 export interface TurnReaperConfig {
@@ -107,6 +108,7 @@ export class TurnReaper {
     if (this.#sweeping) return;
     this.#sweeping = true;
     try {
+      if (this.#host.recoverStarting) yield* this.#host.recoverStarting();
       if (this.#host.refresh) yield* this.#host.refresh();
       const turns = this.#host.runningTurns();
       const running = new Set(turns.map((turn) => turn.turnId));
