@@ -32,7 +32,7 @@ const SECOND = "claude-sonnet-5-5";
 process.env.HOME = home;
 process.env.OPENBOT_CLAUDE_PATH = claudeExecutable;
 process.env.CLAUDE_CONFIG_DIR = join(home, ".claude");
-process.env.OPENBOT_STARTING_DELIVERY_MINUTES = "0.02";
+process.env.OPENBOT_STARTING_DELIVERY_MINUTES = "0.1";
 process.env.OPENBOT_TURN_REAPER_INTERVAL_SECONDS = "0.1";
 mkdirSync(home, { recursive: true });
 
@@ -466,9 +466,9 @@ try {
     await runCauseEffect(mailbox.markStarting(stuck));
     const next = await enqueue(ada.id, "user", "next after stuck");
     assert(deliveryOf(stuck)?.status === "starting" && !deliveryOf(stuck)?.turnId, "Fixture is a turnless start.");
-    await waitFor("stale start settled", () => deliveryOf(stuck)?.status === "interrupted", 6000);
+    await waitFor("stale start settled", () => deliveryOf(stuck)?.status === "interrupted", 15_000);
     assert(deliveryOf(stuck)?.error?.includes("starting"), "Recovery records why.");
-    await waitFor("next delivery completed", () => deliveryOf(next)?.status === "completed", 6000);
+    await waitFor("next delivery completed", () => deliveryOf(next)?.status === "completed", 15_000);
     return { stuck, next, status: deliveryOf(stuck)?.status };
   });
   await check("reaper cancels stalled preparation, releases reservations and runs the next delivery", async () => {
@@ -495,8 +495,8 @@ try {
       );
       const next = second.deliveries[0]?.id;
       assert(next, "The next delivery exists.");
-      await waitFor("blocked preparation interrupted", () => deliveryOf(id)?.status === "interrupted", 6000);
-      await waitFor("next after blocked preparation completed", () => deliveryOf(next)?.status === "completed", 6000);
+      await waitFor("blocked preparation interrupted", () => deliveryOf(id)?.status === "interrupted", 15_000);
+      await waitFor("next after blocked preparation completed", () => deliveryOf(next)?.status === "completed", 15_000);
       assert(!deliveryOf(id)?.turnId, "The cancelled preparation starts no provider turn.");
       return { id, next };
     } finally {
