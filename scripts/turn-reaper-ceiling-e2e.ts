@@ -460,6 +460,9 @@ try {
   );
   const pid = processRow.pid;
   assert(pid, "Exact child pid exists.");
+  const hangingNativeTurn = database.readRunningTurns().find((row) => row.turnId === turnId);
+  assert(hangingNativeTurn?.startedAt, "The hanging turn has a native start time.");
+  const hangingStartedAt = Date.parse(hangingNativeTurn.startedAt);
   await check("interrupt route distinguishes an acknowledged request from an ended turn", async () => {
     const answer = await control("/v1/turns/interrupt", "POST", `agentId=${hanging.id}&turnId=${turnId}`);
     assert(
@@ -479,9 +482,11 @@ try {
       await waitFor("the exact provider pid exits", () => !live(pid), 4000);
       const interrupted = turnRows().filter((row) => row.phase === "ignored-interrupt" && row.pid === pid);
       assert(interrupted.length >= 2, "Manual and reaper interrupts reach the hanging process.");
-      const age = Date.now() - (processRow.at ?? Date.now());
+      const age = Date.now() - hangingStartedAt;
       assert(age >= 5900 && age < 13000, `Ceiling plus grace: ${age}`);
-      return { age, pid, interrupts: interrupted.length };
+      const grace = Date.now() - (interrupted.at(-1)?.at ?? Date.now());
+      assert(grace >= 1900, `Interrupt grace: ${grace}`);
+      return { age, grace, pid, interrupts: interrupted.length };
     },
   );
   await check("a slow live tool that produces output survives another session's process kill", async () => {
@@ -520,6 +525,9 @@ try {
     turnRows().find((row) => row.phase === "start" && row.input.includes("Remain entirely silent")),
   );
   assert(silentProcess.pid, "The silent process has an exact pid.");
+  const silentNativeTurn = database.readRunningTurns().find((row) => row.turnId === silentTurn);
+  assert(silentNativeTurn?.startedAt, "The silent turn has a native start time.");
+  const silentStartedAt = Date.parse(silentNativeTurn.startedAt);
   await check("an entirely silent provider is killed and stores its terminal hung-provider event", async () => {
     await waitFor("silent settlement", () => deliveryOf(silentDelivery)?.status === "interrupted", 14000);
     await waitFor("silent process exit", () => !live(silentProcess.pid ?? 0));
@@ -532,11 +540,13 @@ try {
     );
     assert(detail.processKilled === true, "The terminal event confirms the exact process kill.");
     assert(detail.settledOrphan === true, "The terminal event confirms native settlement.");
-    const age = Date.now() - (silentProcess.at ?? Date.now());
+    const age = Date.now() - silentStartedAt;
     assert(age >= 5900 && age < 13000, `Silence ceiling plus grace: ${age}`);
     const interrupts = turnRows().filter((row) => row.phase === "ignored-interrupt" && row.pid === silentProcess.pid);
     assert(interrupts.length === 1, "The reaper sends one interrupt before escalation.");
-    return { age, pid: silentProcess.pid, detail, interrupts: interrupts.length };
+    const grace = Date.now() - (interrupts[0]?.at ?? Date.now());
+    assert(grace >= 1900, `Silent interrupt grace: ${grace}`);
+    return { age, grace, pid: silentProcess.pid, detail, interrupts: interrupts.length };
   });
   setMode("orphan");
   const orphanDelivery = await send(orphan.id, "Leave an orphan with a stale in-memory turn.");
