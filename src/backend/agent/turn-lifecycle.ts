@@ -501,10 +501,15 @@ export class TurnLifecycle {
     const turn = this.#runningTurns.get(turnId);
     if (!turn || this.isCompleting(turnId)) return false;
     const client = turn.client;
-    if (client.killTurnProcess) return yield* client.killTurnProcess(turn.threadId, turnId);
-    if ([...this.#runningTurns.entries()].some(([id, entry]) => id !== turnId && entry.client === client)) return false;
-    yield* client.stop();
-    yield* this.interruptTurnsOf(client);
+    if (client.killTurnProcess) {
+      if (!(yield* client.killTurnProcess(turn.threadId, turnId))) return false;
+    } else {
+      if ([...this.#runningTurns.entries()].some(([id, entry]) => id !== turnId && entry.client === client))
+        return false;
+      yield* client.stop();
+      yield* this.interruptTurnsOf(client);
+    }
+    yield* this.#hooks.dropRefusedSession(turn.agentId, turn.threadId);
     return true;
   });
 

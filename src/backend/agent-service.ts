@@ -1825,7 +1825,8 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     if (killed || !this.#turn.reaperTurnLive(turnId)) {
       yield* this.#turn.settleOrphanedTurn(agentId, threadId, turnId, "interrupted");
     }
-    logger.warn("Turn reaper escalated a silent turn.", { agentId, threadId, turnId, killed });
+    if (killed || !this.#turn.reaperTurnLive(turnId)) yield* this.#recordReaperStop(stop, "not-sent", true, killed);
+    else logger.warn("Turn reaper could not end a silent turn.", { agentId, threadId, turnId, killed });
   });
 
   readonly #reapTurn = Effect.fn("AgentService.reapTurn")(function* (this: AgentService, stop: TurnReaperStop) {
@@ -1845,15 +1846,30 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
       );
       sent = result !== null && result._tag === "Some" && result.value;
     }
+    yield* this.#recordReaperStop(stop, sent ? "sent" : "not-sent", settled);
+  });
+
+  readonly #recordReaperStop = Effect.fn("AgentService.recordReaperStop")(function* (
+    this: AgentService,
+    stop: TurnReaperStop,
+    interrupt: "sent" | "not-sent",
+    settledOrphan: boolean,
+    processKilled = false,
+  ) {
+    const { agentId, threadId, turnId } = stop.turn;
+    const agent = this.#store.list().find((candidate) => candidate.id === agentId);
+    if (!agent) return;
     const detail = {
       kind: stop.kind,
       agentId,
       turnId,
       idleSeconds: Math.round(stop.idleMs / 1000),
-      reason: stop.reason,
-      interrupt: sent ? "sent" : "not-sent",
+      reason: stop.kind === "silent" ? "hung-provider" : stop.reason,
+      explanation: stop.reason,
+      interrupt,
       ended: !this.#runningTurnsOf(agent).some((turn) => turn.turnId === turnId),
-      settledOrphan: settled,
+      settledOrphan,
+      processKilled,
     };
     yield* Effect.try({
       try: () =>

@@ -75,9 +75,9 @@ const turn = (message) => {
   const input = JSON.stringify(message);
   const mode = fs.existsSync(${JSON.stringify(modeFile)}) ? fs.readFileSync(${JSON.stringify(modeFile)}, "utf8").trim() : "accept";
   log({ phase: "start", pid: process.pid, sessionId, model, mode, at: Date.now(), input });
-  if (mode === "hang429") {
+  if (mode === "hang429" || mode === "silent") {
     held = { input, mode };
-    setInterval(() => write({ type: "system", subtype: "api_retry", attempt: 1, max_retries: 100,
+    if (mode === "hang429") setInterval(() => write({ type: "system", subtype: "api_retry", attempt: 1, max_retries: 100,
       error_status: 429, retry_delay_ms: 100, session_id: sessionId, uuid: randomUUID() }), 100).unref();
     return;
   }
@@ -121,10 +121,10 @@ process.stdin.on("data", (chunk) => {
     if (message.type === "control_request") {
       if (message.request?.subtype === "set_model") model = message.request.model ?? model;
       write({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: {} } });
-      if (message.request?.subtype === "interrupt" && held?.mode === "hang429") {
+      if (message.request?.subtype === "interrupt" && (held?.mode === "hang429" || held?.mode === "silent")) {
         log({ phase: "ignored-interrupt", pid: process.pid, sessionId, at: Date.now() });
       }
-      if (message.request?.subtype === "interrupt" && held && held.mode !== "hang429") {
+      if (message.request?.subtype === "interrupt" && held && held.mode !== "hang429" && held.mode !== "silent") {
         log({ phase: "interrupted", model, at: Date.now(), input: held.input });
         held = null;
         result({ subtype: "error_during_execution", is_error: true, errors: ["[Request interrupted by user]"] });
@@ -271,6 +271,7 @@ async function waitFor<T>(label: string, read: () => T | null | undefined | fals
 function turnRows(): {
   phase: string;
   input: string;
+  sessionId?: string;
   pid?: number;
   at?: number;
   code?: number;
@@ -286,7 +287,7 @@ function turnRows(): {
   }
 }
 
-function setMode(mode: "accept" | "hold" | "hang429" | "orphan" | "tool") {
+function setMode(mode: "accept" | "hold" | "hang429" | "orphan" | "tool" | "silent") {
   writeFileSync(modeFile, mode);
 }
 
@@ -447,6 +448,7 @@ try {
   const slow = await create("Slow");
   const hanging = await create("Hanging");
   const orphan = await create("Orphan");
+  const silent = await create("Silent");
   setMode("tool");
   const toolDelivery = await send(slow.id, "Run a slow tool.");
   await waitFor("actual tool process", () => turnRows().find((row) => row.phase === "tool-start"));
@@ -496,6 +498,46 @@ try {
     );
     return { status: deliveryOf(toolDelivery)?.status, processOutputSampling: process.platform === "linux" };
   });
+  setMode("accept");
+  await check("the next delivery opens a fresh provider session after an exact process kill", async () => {
+    const nextDelivery = await send(hanging.id, "A fresh turn after the provider kill.");
+    await waitFor("fresh turn completion", () => deliveryOf(nextDelivery)?.status === "completed", 5000);
+    const next = turnRows().find((row) => row.phase === "start" && row.input.includes("A fresh turn after"));
+    assert(
+      next && next.pid !== pid && next.sessionId !== processRow.sessionId,
+      "The next delivery uses a fresh exact process and session.",
+    );
+    assert(
+      turnRows().filter((row) => row.phase === "start" && row.input === processRow.input).length === 1,
+      "The old delivery is not retried in place.",
+    );
+    return { previousPid: pid, nextPid: next.pid, status: deliveryOf(nextDelivery)?.status };
+  });
+  setMode("silent");
+  const silentDelivery = await send(silent.id, "Remain entirely silent and ignore interrupts.");
+  const silentTurn = await waitFor("silent turn", () => deliveryOf(silentDelivery)?.turnId);
+  const silentProcess = await waitFor("silent process", () =>
+    turnRows().find((row) => row.phase === "start" && row.input.includes("Remain entirely silent")),
+  );
+  assert(silentProcess.pid, "The silent process has an exact pid.");
+  await check("an entirely silent provider is killed and stores its terminal hung-provider event", async () => {
+    await waitFor("silent settlement", () => deliveryOf(silentDelivery)?.status === "interrupted", 14000);
+    await waitFor("silent process exit", () => !live(silentProcess.pid ?? 0));
+    const detail = await waitFor("terminal reaper event", () =>
+      database.connection
+        .prepare("SELECT payload_json FROM orchestration_events WHERE event_type='turn.reaper-stopped'")
+        .all()
+        .map((row) => JSON.parse(String(row.payload_json)).detail)
+        .find((row) => row.turnId === silentTurn && row.ended === true && row.reason === "hung-provider"),
+    );
+    assert(detail.processKilled === true, "The terminal event confirms the exact process kill.");
+    assert(detail.settledOrphan === true, "The terminal event confirms native settlement.");
+    const age = Date.now() - (silentProcess.at ?? Date.now());
+    assert(age >= 5900 && age < 13000, `Silence ceiling plus grace: ${age}`);
+    const interrupts = turnRows().filter((row) => row.phase === "ignored-interrupt" && row.pid === silentProcess.pid);
+    assert(interrupts.length === 1, "The reaper sends one interrupt before escalation.");
+    return { age, pid: silentProcess.pid, detail, interrupts: interrupts.length };
+  });
   setMode("orphan");
   const orphanDelivery = await send(orphan.id, "Leave an orphan with a stale in-memory turn.");
   const orphanTurn = await waitFor("orphan turn", () => deliveryOf(orphanDelivery)?.turnId);
@@ -533,7 +575,7 @@ try {
   await runCauseEffect(server.close()).catch(() => {});
   await runCauseEffect(service.stop()).catch(() => {});
   database.close();
-  report.passed = report.checks.length === 5 && report.checks.every((row) => row.passed) && !report.error;
+  report.passed = report.checks.length === 7 && report.checks.every((row) => row.passed) && !report.error;
   report.checkedAt = new Date().toISOString();
   const rows = turnRows();
   report.fixtureRows = rows;
