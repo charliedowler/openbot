@@ -2143,12 +2143,14 @@ export class ChannelService {
     this: ChannelService,
     deliveryId: string,
     continueWork = false,
+    reason: "usage-limit" | "session-recovery" = "usage-limit",
   ) {
     const assignment = this.store.assignmentForDelivery(deliveryId);
     if (!assignment || !activeAssignment(assignment) || assignment.pendingRevision !== null) return false;
     const task = this.store.tasks(assignment.channelId).find((item) => item.id === assignment.taskId);
     const current = task?.revision === assignment.taskRevision && (task.state === "queued" || task.state === "running");
-    const skipped = task && current && this.hooks.skipAtLimit?.(task) ? this.#skippedTasks(task) : null;
+    const skipped =
+      reason === "usage-limit" && task && current && this.hooks.skipAtLimit?.(task) ? this.#skippedTasks(task) : null;
     if (continueWork) {
       if (!task || !current || skipped) return false;
       // The ready backup keeps this assignment and its delivery, including the interrupted work.

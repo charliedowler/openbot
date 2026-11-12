@@ -3813,7 +3813,8 @@ export class ProviderRuntime implements ProviderPort {
     // A process that ran for a while was a good start, and its exit is not one more failure.
     const ranFor = Date.now() - (this.#activatedAt.get(client.provider) ?? 0);
     if (ranFor >= STABLE_RUN_MS) this.#startFailures.delete(client.provider);
-    const startStopped = ranFor < STABLE_RUN_MS && this.#countStartFailure(client.provider);
+    const startStopped =
+      error instanceof AgentProcessExitError && ranFor < STABLE_RUN_MS && this.#countStartFailure(client.provider);
     const attempts = this.#restartAttempts.get(client.provider) ?? 0;
     const stopped = startStopped || attempts >= 3;
     const providers = updateProviderStatus(this.#status.providers, client.provider, {

@@ -1653,7 +1653,8 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
         turnModel: (agentId, turnId) => this.#drain.modelForTurn(agentId, turnId),
         mayFailOver: (agentId) => this.#usageLimitBackup(agentId) !== undefined,
         mayContinueOnBackup: (agentId) => this.#usageLimitBackup(agentId, true) !== undefined,
-        requeueChannelDelivery: (deliveryId, continueWork) => this.#requeueChannelDelivery(deliveryId, continueWork),
+        requeueChannelDelivery: (deliveryId, continueWork, reason) =>
+          this.#requeueChannelDelivery(deliveryId, continueWork, reason),
         quietRoutineDelivery: (deliveryId) => this.#routines.quietRunForDelivery(deliveryId),
         takeRoutinePreview: (deliveryId) => this.#routines.takePreviewBeforeRun(deliveryId),
         closeRoutineSession: (externalThreadId) => this.#threads.closeRoutineThread(externalThreadId),
@@ -5313,8 +5314,12 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
    * Gives a channel task that a spent plan holds back to its channel, so its assignment does not
    * reserve the host until the reset. A task of a channel routine set to skip is dropped instead.
    */
-  #requeueChannelDelivery(deliveryId: string, continueWork = false): Effect.Effect<boolean> {
-    return this.channels.requeueForLimit(deliveryId, continueWork);
+  #requeueChannelDelivery(
+    deliveryId: string,
+    continueWork = false,
+    reason: "usage-limit" | "session-recovery" = "usage-limit",
+  ): Effect.Effect<boolean> {
+    return this.channels.requeueForLimit(deliveryId, continueWork, reason);
   }
 
   /**

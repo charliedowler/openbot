@@ -911,6 +911,14 @@ function historyFragments(messages: readonly ClaudeSessionMessage[], includeItem
   return fragments.reverse();
 }
 
+export async function claudeSessionExists(
+  threadId: string,
+  cwd: string,
+  options: ClaudeHistoryOptions,
+): Promise<boolean> {
+  return (await findTranscript(threadId, cwd, options.configDirectory, options.projectDirectoryName)) !== null;
+}
+
 async function findTranscript(
   threadId: string,
   cwd: string | undefined,
@@ -932,8 +940,9 @@ async function findTranscript(
     directories = (await readdir(projects, { withFileTypes: true }))
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name);
-  } catch {
-    return null;
+  } catch (error) {
+    if (isMissingFile(error)) return null;
+    throw error;
   }
   for (const directory of directories) {
     const candidate = join(projects, directory, `${threadId}.jsonl`);
@@ -1113,9 +1122,13 @@ async function scanBoundaryHash(filePath: string, offset: number): Promise<strin
 
 async function exists(path: string): Promise<boolean> {
   try {
-    await stat(path);
-    return true;
-  } catch {
-    return false;
+    return (await stat(path)).isFile();
+  } catch (error) {
+    if (isMissingFile(error)) return false;
+    throw error;
   }
+}
+
+function isMissingFile(error: unknown): boolean {
+  return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR");
 }

@@ -501,6 +501,7 @@ export class ThreadLifecycle {
         const resumed = yield* Effect.result(this.resumeThread(currentAgent, client, session.externalSessionId));
         if (Result.isFailure(resumed)) {
           if (!isMissingProviderSessionError(resumed.failure.cause, client.provider)) return yield* resumed.failure;
+          yield* this.#releaseProviderSession(session.externalSessionId, client);
           yield* threadStep(() => this.retireProviderSession(currentAgent, session.externalSessionId));
           const replacement = yield* this.startProviderThread(currentAgent, client, publicThreadId, "missing-session");
           this.#hooks.logRecovery(currentAgent.id, client.provider, "replaced");

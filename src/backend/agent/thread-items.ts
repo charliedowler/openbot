@@ -113,11 +113,21 @@ function isMuseMcpStartupFault(provider: AgentProvider, message: string): boolea
   return provider === "muse" && /\bMCP startup audit failed\b/i.test(message);
 }
 
+export function isMissingClaudeSessionFailure(provider: AgentProvider, message: string): boolean {
+  return (
+    provider === "claude" &&
+    /\bNo conversation found with session ID:\s*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i.test(
+      message,
+    )
+  );
+}
+
 /**
  * The failure to show when the provider refused the session's own history, or null when it did
  * not. Each turn of a refused session fails the same way, so the caller closes the session.
  */
 export function refusedSessionFailure(provider: AgentProvider, message: string): string | null {
+  if (isMissingClaudeSessionFailure(provider, message)) return message;
   if (isForeignReasoningError(message))
     return sourceText("error.provider.foreignReasoning", { provider: providerLabel(provider) });
   if (isRejectedOpenCodeRequest(provider, message)) return sourceText("error.provider.opencodeSessionRejected");

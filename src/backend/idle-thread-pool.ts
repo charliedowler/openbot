@@ -79,7 +79,8 @@ export class IdleThreadPool<Thread extends IdleThread, Released> {
   }
 
   /** Removes a thread and its timer. The caller must release its resources. */
-  detach(thread: Thread): void {
+  detach(thread: Thread, retain = false): void {
+    if (retain) this.#released.set(thread.id, this.#options.snapshot(thread));
     this.#threads.delete(thread.id);
     this.#disarm(thread);
   }

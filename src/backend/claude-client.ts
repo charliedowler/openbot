@@ -58,13 +58,19 @@ import {
 import { claudeBridgedToolName, VISIBLE_TOOL_DEFINITIONS } from "./agent/tool-catalog";
 import { USAGE_LIMIT_METHOD } from "./agent/usage-limit-gate";
 import {
+  AgentProcessExitError,
   type AgentProvider,
   MissingClaudeSessionError,
   ProviderTurnActiveError,
   RequestTimeoutError,
 } from "./agent-client";
 import { claudeContextCategories } from "./claude-context-categories";
-import { type ClaudeHistoryOptions, claudeHistoryFromMessages, claudeHistoryReader } from "./claude-history";
+import {
+  type ClaudeHistoryOptions,
+  claudeHistoryFromMessages,
+  claudeHistoryReader,
+  claudeSessionExists,
+} from "./claude-history";
 import {
   CLAUDE_WORKSPACE_MANAGED_SETTINGS,
   claudeExcludedWriteMessage,
@@ -350,6 +356,8 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
   readonly #sdkLaunch: ClaudeSdkLaunch;
   readonly #createQuery: QueryFactory;
   readonly #readSessionMessages: SessionHistoryReader | undefined;
+  readonly #historyOptions: ClaudeHistoryOptions;
+  readonly #diskSessions: boolean;
   readonly #requestTimeoutMs: number;
   readonly #mcpServers: McpServerSource;
   readonly #reportMcpDrops: McpDropReporter | undefined;
@@ -441,6 +449,8 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
         : { projectDirectoryName: historyEnvironment.CLAUDE_CODE_PROJECT_DIR_NAME }),
       ...(resolvedHistoryIndexDirectory === undefined ? {} : { indexDirectory: resolvedHistoryIndexDirectory }),
     };
+    this.#historyOptions = historyOptions;
+    this.#diskSessions = createQuery === query;
     this.readHistory = readSessionMessages
       ? claudeHistoryFromMessages(readSessionMessages)
       : claudeHistoryReader(historyOptions);
@@ -899,6 +909,12 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
     config: ThreadConfig,
     resume: boolean,
   ): Effect.fn.Return<void, ProviderClientOperationError> {
+    if (
+      resume &&
+      this.#diskSessions &&
+      !(yield* providerCall(() => claudeSessionExists(threadId, config.cwd, this.#historyOptions)))
+    )
+      return yield* providerFailure(new MissingClaudeSessionError(threadId));
     this.#decideApiKey();
     const input = new AsyncMessageQueue();
     const appliedEffort = this.#resolveEffort(config.model, config.effort);
@@ -1017,7 +1033,11 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
             options.signal.addEventListener("abort", abort, { once: true });
             child.once("exit", () => options.signal.removeEventListener("abort", abort));
             if (options.signal.aborted) abort();
-            child.on("error", () => {});
+            const spawned = "pid" in child && typeof child.pid === "number";
+            child.once("error", (error) => {
+              if (!spawned)
+                this.#fail(new AgentProcessExitError("Claude Code could not start.", null, { cause: error }));
+            });
             if (
               "stderr" in child &&
               child.stderr &&
@@ -1309,13 +1329,14 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
         ),
       );
       if (this.#running && this.#threads.get(runtime.id) === runtime) {
-        this.#fail(new Error("Claude session stream ended unexpectedly."));
+        throw new Error("Claude session stream ended unexpectedly.");
       }
     } catch (error) {
       if (!this.#running || this.#threads.get(runtime.id) !== runtime) return;
-      const activeTurn = runtime.activeTurn;
-      if (activeTurn) yield* this.#completeTurn(runtime, "failed", error);
-      this.#fail(error instanceof Error ? error : new Error(String(error)));
+      this.#threads.detach(runtime, true);
+      runtime.consume = null;
+      yield* this.#closeRuntime(runtime);
+      if (runtime.activeTurn) yield* this.#completeTurn(runtime, "failed", error);
     }
   });
 
@@ -1995,14 +2016,15 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
         },
       });
     }
-    this.emit("notification", {
-      method: "item/completed",
-      params: {
-        threadId: runtime.id,
-        turnId: turn.id,
-        item: { id: turn.itemId, type: "agentMessage", text: turn.text },
-      },
-    });
+    if (turn.text || turn.publishedText)
+      this.emit("notification", {
+        method: "item/completed",
+        params: {
+          threadId: runtime.id,
+          turnId: turn.id,
+          item: { id: turn.itemId, type: "agentMessage", text: turn.text },
+        },
+      });
     if (status === "failed" && error) {
       this.emit("notification", {
         method: "error",
@@ -2015,7 +2037,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
       method: "turn/completed",
       params: { threadId: runtime.id, turn: { id: turn.id, status } },
     });
-    yield* this.#threads.markIdle(runtime);
+    if (this.#threads.get(runtime.id) === runtime) yield* this.#threads.markIdle(runtime);
   });
 
   readonly #readThreadEffect = Effect.fn("ClaudeAgentClient.readThread")(function* (

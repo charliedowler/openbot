@@ -76,6 +76,7 @@ import {
 } from "./subagent-updates";
 import { ThreadFileHistory } from "./thread-file-history";
 import {
+  isMissingClaudeSessionFailure,
   isNonActionableCodexWarning,
   isToolItem,
   refusedSessionFailure,
@@ -182,7 +183,11 @@ export interface TurnHooks {
    * Gives a channel task back to its channel's queue after a spent plan refused its turn. False
    * when the delivery is not an active channel assignment that can go back.
    */
-  requeueChannelDelivery(deliveryId: string, continueWork?: boolean): Effect.Effect<boolean>;
+  requeueChannelDelivery(
+    deliveryId: string,
+    continueWork?: boolean,
+    reason?: "usage-limit" | "session-recovery",
+  ): Effect.Effect<boolean>;
   /**
    * Whether this delivery is a routine run that may end without a message: a scheduled run whose
    * agent answers only the no-update marker or calls the no-update tool.
@@ -1396,13 +1401,24 @@ export class TurnLifecycle {
       const deliveries = this.#mailbox.findDeliveriesByTurn(agentId, turnId);
       // A task turn ends as a turn of the agent's own chat does, in the task's own lane.
       const taskTurn = this.#conversation.isTaskThread(snapshot.threadId);
-      // A channel task is not run again: an unfinished turn pauses it, and its Resume opens the new session.
-      const retry =
+      const missingResume =
+        running !== undefined &&
+        reportedError !== undefined &&
+        isMissingClaudeSessionFailure(running.client.provider, reportedError);
+      let retry =
         refused &&
         !running.produced &&
         deliveries.length > 0 &&
-        (taskTurn || !this.#conversation.isExecutionThread(snapshot.threadId)) &&
+        (taskTurn || !this.#conversation.isExecutionThread(snapshot.threadId) || missingResume) &&
         deliveries.every(({ delivery }) => !this.#refusedRetries.has(delivery.id));
+      if (retry && !taskTurn && this.#conversation.isExecutionThread(snapshot.threadId)) {
+        for (const { delivery, channelId } of deliveries) {
+          if (channelId && !(yield* this.#hooks.requeueChannelDelivery(delivery.id, true, "session-recovery"))) {
+            retry = false;
+            break;
+          }
+        }
+      }
       if (retry) {
         yield* this.#retryRefusedTurn(agentId, threadId, turnId, snapshot, deliveries);
         return;
@@ -1880,8 +1896,8 @@ export class TurnLifecycle {
     deliveries: readonly DeliveryContext[],
   ) {
     for (const { delivery } of deliveries) this.#refusedRetries.add(delivery.id);
-    yield* this.#requeueTurn(agentId, threadId, turnId, snapshot, deliveries);
     yield* this.#hooks.dropRefusedSession(agentId, threadId);
+    yield* this.#requeueTurn(agentId, threadId, turnId, snapshot, deliveries);
     this.#hooks.scheduleDrain(agentId);
   }, Effect.uninterruptible);
 
