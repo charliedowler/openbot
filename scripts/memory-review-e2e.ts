@@ -87,6 +87,9 @@ process.stdout.on("error", (error) => {
   throw error;
 });
 const log = (entry) => fs.appendFileSync(LOG, JSON.stringify(entry) + "\\n");
+process.on("exit", () => log({ method: "client-close", pid: process.pid }));
+process.on("SIGTERM", () => process.exit(0));
+process.stdin.on("end", () => process.exit(0));
 const write = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
 const finish = (turn, text) => {
   const item = { type: "agentMessage", id: "message-" + turn.turnId, text, phase: "final_answer" };
@@ -114,7 +117,11 @@ const answer = (message) => {
     case "plugin/list": return write({ id: message.id, result: { marketplaces: [] } });
     case "config/read": return write({ id: message.id, result: config });
     case "config/batchWrite": return write({ id: message.id, result: {} });
-    case "thread/start": return write({ id: message.id, result: { thread: { id: "thread-" + (++threads), turns: [] } } });
+    case "thread/start": {
+      const threadId = "thread-" + process.pid + "-" + (++threads);
+      log({ method: "thread/start", threadId, pid: process.pid, ephemeral: params.ephemeral ?? null, persistSession: params.persistSession ?? null });
+      return write({ id: message.id, result: { thread: { id: threadId, turns: [] } } });
+    }
     case "thread/resume": return write({ id: message.id, result: { thread: { id: params.threadId, turns: [] } } });
     case "thread/unsubscribe": return write({ id: message.id, result: { status: "Unsubscribed" } });
     case "thread/turns/list":
@@ -128,7 +135,7 @@ const answer = (message) => {
       const turn = { threadId: params.threadId, turnId, calls: [] };
       if (text.includes(${JSON.stringify(REVIEW_MARKER)})) {
         const control = JSON.parse(fs.readFileSync(CONTROL, "utf8"));
-        log({ method: "review", text, model: params.model });
+        log({ method: "review", text, model: params.model, threadId: params.threadId, pid: process.pid });
         return setTimeout(() => finish(turn, control.answer), control.delayMs || 5);
       }
       const named = /<<CALLS([\\s\\S]*?)CALLS>>/.exec(text.split("--- current message ---").at(-1));
@@ -205,7 +212,18 @@ async function waitFor<T>(label: string, read: () => T | null | undefined | fals
   }
 }
 
-function logged(method: string): { text: string; model: string; result: unknown }[] {
+interface FakeLogEntry {
+  method: string;
+  text: string;
+  model: string;
+  result: unknown;
+  pid?: number;
+  threadId?: string;
+  ephemeral?: boolean | null;
+  persistSession?: boolean | null;
+}
+
+function logged(method: string): FakeLogEntry[] {
   let text = "";
   try {
     text = readFileSync(fakeLog, "utf8");
@@ -215,7 +233,7 @@ function logged(method: string): { text: string; model: string; result: unknown 
   return text
     .split("\n")
     .filter(Boolean)
-    .map((line): { method: string; text: string; model: string; result: unknown } => JSON.parse(line))
+    .map((line): FakeLogEntry => JSON.parse(line))
     .filter((entry) => entry.method === method);
 }
 
@@ -376,6 +394,32 @@ try {
     assert.ok(prompt.includes("favourite island is Zanzibar"), "The related memory is shown.");
     assert.ok(prompt.includes("The user prefers green tea."), "The essential memory is shown.");
     return { memories: service.listMemories(first.id).length, notShown, characters: prompt.length };
+  });
+
+  await check("two memory reviews use distinct unsaved sessions and close their clients", async () => {
+    const reviewTurns = logged("review").slice(0, 2);
+    assert.equal(reviewTurns.length, 2);
+    const sessionIds = reviewTurns.map((entry) => entry.threadId);
+    const pids = reviewTurns.map((entry) => entry.pid);
+    assert.ok(sessionIds.every((id) => typeof id === "string"));
+    assert.equal(new Set(sessionIds).size, 2, "Each review starts a different provider session.");
+    assert.equal(new Set(pids).size, 2, "Each review uses a fresh helper client.");
+    for (const turn of reviewTurns) {
+      const start = logged("thread/start").find((entry) => entry.threadId === turn.threadId && entry.pid === turn.pid);
+      assert.equal(start?.ephemeral, true);
+      assert.equal(start?.persistSession, false);
+    }
+    await waitFor("both review clients to close", () =>
+      pids.every((pid) => logged("client-close").some((entry) => entry.pid === pid)),
+    );
+    const publicId = store.list().find((agent) => agent.id === first.id)?.threadId;
+    assert.ok(publicId);
+    const sessions = database.listProviderSessions(publicId);
+    assert.ok(
+      sessions.every((session) => !sessionIds.includes(session.externalSessionId)),
+      "Review sessions stay outside durable agent session history.",
+    );
+    return { sessionIds, distinctClients: pids.length, ephemeral: true, persisted: false, clientsClosed: true };
   });
 
   const second = await createAgent("Keeper");

@@ -1,6 +1,12 @@
 import { closeSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { INPUT_LIMITS } from "@openbot/contracts/input-limits";
-import { type AccountUsage, type AgentEvent, type AgentRuntimeSnapshot, isAgentProvider } from "@openbot/contracts/ipc";
+import {
+  type AccountUsage,
+  type AgentEvent,
+  type AgentModelChoice,
+  type AgentRuntimeSnapshot,
+  isAgentProvider,
+} from "@openbot/contracts/ipc";
 import { isDynamicRecord } from "@openbot/contracts/runtime-values";
 import { createOpenBotLogger } from "@openbot/logging";
 import { Effect, Exit, Schema, Scope } from "effect";
@@ -226,8 +232,8 @@ export class UsageLimitGate {
     return this.#retries.has(agentId);
   }
 
-  mayDrain(agentId: string): boolean {
-    const agent = this.#agent(agentId);
+  mayDrain(agentId: string, execution?: AgentModelChoice): boolean {
+    const agent = this.#agent(agentId, execution);
     return !agent || !this.#limits.has(limitKey(providerForAgent(agent), accountOf(agent), agent.model));
   }
 
@@ -244,8 +250,8 @@ export class UsageLimitGate {
   }
 
   /** Whether the agent may start a turn that its limit holds, because the user sent it a message. */
-  mayTry(agentId: string): boolean {
-    const agent = this.#agent(agentId);
+  mayTry(agentId: string, execution?: AgentModelChoice): boolean {
+    const agent = this.#agent(agentId, execution);
     return (
       agent !== undefined &&
       this.#tries.get(agentId) === limitKey(providerForAgent(agent), accountOf(agent), agent.model)
@@ -269,8 +275,8 @@ export class UsageLimitGate {
    * The provider account and model that `failed` would hold for this agent's turn on `model`, as one
    * key. Null when the agent no longer exists.
    */
-  failureKey(agentId: string, model: string | null = null): string | null {
-    const agent = this.#agent(agentId);
+  failureKey(agentId: string, model: string | null = null, execution?: AgentModelChoice): string | null {
+    const agent = this.#agent(agentId, execution);
     return agent ? limitKey(providerForAgent(agent), accountOf(agent), model ?? agent.model) : null;
   }
 
@@ -284,8 +290,13 @@ export class UsageLimitGate {
    * The model is passed over until the hold ends or a turn on it completes. Then the agents that
    * left it go back. `resetDelayMs` is the wait until the reset that the error names, when it names one.
    */
-  failed(agentId: string, model: string | null = null, resetDelayMs: number | null = null): void {
-    const agent = this.#agent(agentId);
+  failed(
+    agentId: string,
+    model: string | null = null,
+    resetDelayMs: number | null = null,
+    execution?: AgentModelChoice,
+  ): void {
+    const agent = this.#agent(agentId, execution);
     if (!agent) return;
     const provider = providerForAgent(agent);
     const accountId = accountOf(agent);
@@ -349,8 +360,9 @@ export class UsageLimitGate {
     agentId: string,
     resetsAt: number | null,
     model: string | null = null,
+    execution?: AgentModelChoice,
   ) {
-    const agent = this.#agent(agentId);
+    const agent = this.#agent(agentId, execution);
     if (!agent) return;
     const provider = providerForAgent(agent);
     const turnModel = model ?? agent.model;
@@ -416,8 +428,9 @@ export class UsageLimitGate {
     this: UsageLimitGate,
     agentId: string,
     model: string | null = null,
+    execution?: AgentModelChoice,
   ) {
-    const agent = this.#agent(agentId);
+    const agent = this.#agent(agentId, execution);
     if (!agent) return;
     const provider = providerForAgent(agent);
     const key = limitKey(provider, accountOf(agent), model ?? agent.model);
@@ -466,8 +479,9 @@ export class UsageLimitGate {
     this.#scope = Scope.makeUnsafe();
   }).bind(this);
 
-  #agent(agentId: string) {
-    return this.#store.list().find((candidate) => candidate.id === agentId);
+  #agent(agentId: string, execution?: AgentModelChoice) {
+    const agent = this.#store.list().find((candidate) => candidate.id === agentId);
+    return agent && execution ? { ...agent, ...execution, providerAccountId: execution.providerAccountId } : agent;
   }
 
   #announce(agentId: string, limit: UsageLimit): void {
@@ -600,7 +614,7 @@ export class UsageLimitGate {
     if (reset && ![...this.#limits.values()].some((other) => other.provider === limit.provider))
       this.#announced.delete(limit.provider);
     this.#hooks.emitRuntimeSnapshot();
-    for (const agent of this.#heldAgents(limit)) this.#hooks.scheduleDrain(agent.id);
+    for (const agent of this.#affectedAgents(limit)) this.#hooks.scheduleDrain(agent.id);
     yield* this.#hooks.released({ provider: limit.provider, accountId: limit.accountId, model: limit.model });
   });
 
@@ -663,6 +677,20 @@ export class UsageLimitGate {
           providerForAgent(agent) === limit.provider &&
           accountOf(agent) === limit.accountId &&
           agent.model === limit.model,
+      );
+  }
+
+  #affectedAgents(limit: UsageLimit) {
+    return this.#store
+      .list()
+      .filter((agent) =>
+        [agent, agent.routineModel, agent.channelSummaryModel].some(
+          (choice) =>
+            choice &&
+            providerForAgent(choice) === limit.provider &&
+            accountOf(choice) === limit.accountId &&
+            choice.model === limit.model,
+        ),
       );
   }
 }

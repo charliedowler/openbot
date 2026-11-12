@@ -532,18 +532,21 @@ try {
     const signature = `v1,${randomBytes(32).toString("base64")} v1,${digest}`;
     return Effect.runPromise(
       events.receive({ routeId, deliveryId, timestamp, signature, body: payload, format: STANDARD_WEBHOOKS_FORMAT }),
-    );
+    ).then((receipt) => ({ ...receipt, deliveryId }));
   };
   const statuses: Record<string, number> = {};
-  statuses.rawKey = (await deliverStandard(rawSecret, standardBody("GMAIL_NEW_GMAIL_MESSAGE"))).status;
-  statuses.otherSlug = (await deliverStandard(rawSecret, standardBody("SLACK_RECEIVE_MESSAGE"))).status;
+  const rawDelivery = await deliverStandard(rawSecret, standardBody("GMAIL_NEW_GMAIL_MESSAGE"));
+  statuses.rawKey = rawDelivery.status;
+  const slugDelivery = await deliverStandard(rawSecret, standardBody("SLACK_RECEIVE_MESSAGE"));
+  statuses.otherSlug = slugDelivery.status;
   statuses.wrongKey = (await deliverStandard("not-the-secret", standardBody("GMAIL_NEW_GMAIL_MESSAGE"))).status;
   statuses.oldSecret = (await deliver(secret)).status;
   const encoded = randomBytes(24);
   await Effect.runPromise(
     events.setSecret({ owner, id: result.routineId, secret: `whsec_${encoded.toString("base64")}` }),
   );
-  statuses.whsecKey = (await deliverStandard(encoded, standardBody("GMAIL_NEW_GMAIL_MESSAGE"))).status;
+  const whsecDelivery = await deliverStandard(encoded, standardBody("GMAIL_NEW_GMAIL_MESSAGE"));
+  statuses.whsecKey = whsecDelivery.status;
   // Node skips characters that are not base64: this value decodes to one byte, which is not a key.
   const malformed = "whsec_!!!!!!!!!!!!!!!!AA==";
   await Effect.runPromise(events.setSecret({ owner, id: result.routineId, secret: malformed }));
@@ -552,7 +555,9 @@ try {
   ).status;
   const standardActivity = await Effect.runPromise(events.listActivity({ owner, routineId: result.routineId }));
   report.standard = { refusals: { shortSecret, scheduleRoutine }, statuses, activity: standardActivity };
-  const [whsecReceipt, slugReceipt, rawReceipt] = standardActivity;
+  const whsecReceipt = standardActivity.find((receipt) => receipt.deliveryId === whsecDelivery.deliveryId);
+  const slugReceipt = standardActivity.find((receipt) => receipt.deliveryId === slugDelivery.deliveryId);
+  const rawReceipt = standardActivity.find((receipt) => receipt.deliveryId === rawDelivery.deliveryId);
   pass(
     "A Standard Webhooks request signed with the raw sender's secret starts the routine",
     statuses.rawKey === 202 && rawReceipt?.status === "started" && rawReceipt.eventType === "composio.trigger.message",

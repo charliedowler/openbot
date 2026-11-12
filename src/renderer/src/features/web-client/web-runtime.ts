@@ -1419,12 +1419,16 @@ export function createWebWorkspaceRuntime(
       return { agent: value.agent, layout } satisfies DuplicateAgentResult;
     },
     async updateAgent(input) {
+      if (input.channelSummaryModel !== undefined || input.routineModel !== undefined)
+        throw new Error(currentText().t("error.agent.settingsLocalOnly"));
       // The released agent route ignores the account, so it goes on `provider-accounts-v1` after the
       // profile: a provider change there returns the agent to the new provider's own sign-in.
       // Backup models stay on the host computer: the Team API does not carry them.
       const {
         providerAccountId,
         backupModels: _backupModels,
+        channelSummaryModel: _channelSummaryModel,
+        routineModel: _routineModel,
         leaveUsageLimit: _leaveUsageLimit,
         avatarColor,
         chatColor,

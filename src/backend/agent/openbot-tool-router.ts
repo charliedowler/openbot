@@ -2062,6 +2062,8 @@ export class OpenBotToolRouter {
       return yield* this.#hooks.updateAgent({
         agentId,
         ...this.#runtimeInput(target, fields),
+        ...(fields.channelSummaryModel === undefined ? {} : { channelSummaryModel: fields.channelSummaryModel }),
+        ...(fields.routineModel === undefined ? {} : { routineModel: fields.routineModel }),
         ...(fields.sessionTokenCap === undefined ? {} : { sessionTokenCap: fields.sessionTokenCap }),
         ...(fields.turnTokenBudget === undefined ? {} : { turnTokenBudget: fields.turnTokenBudget }),
       });

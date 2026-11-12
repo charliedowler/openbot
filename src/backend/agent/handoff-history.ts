@@ -187,7 +187,7 @@ export function renderRoutineHandoff(
 ): string | null {
   const header = [
     HANDOFF_START,
-    "This routine run has its own session. These are the newest messages of your conversation. Do not repeat completed work.",
+    "This turn has its own session. These are the newest messages of your conversation. Do not repeat completed work.",
     "Omitted details remain available: discover openbot.history_search and openbot.history_read.",
   ].join("\n");
   const runsHeader = "--- earlier runs of this routine (its own thread) ---";

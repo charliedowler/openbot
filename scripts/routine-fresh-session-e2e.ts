@@ -14,6 +14,7 @@
 // Computer Use, as the chat does: a scheduled run can drive a desktop app.
 // `bun scripts/routine-fresh-session-e2e.ts`. Writes .openbot-build/routine-fresh-session-e2e/report.json.
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -49,6 +50,8 @@ mkdirSync(home, { recursive: true });
 
 const { AgentService } = await import("../src/backend/agent-service");
 const { AgentStore } = await import("../src/backend/agent-store");
+const { ProviderAccountStore } = await import("../src/backend/agent/provider-account-store");
+const { UsageLimitGate } = await import("../src/backend/agent/usage-limit-gate");
 const { runCauseEffect } = await import("../src/backend/effect-boundary");
 const { MailboxStore } = await import("../src/backend/mailbox-store");
 const { OpenBotDatabase } = await import("../src/backend/openbot-database");
@@ -71,7 +74,7 @@ const CODE = "739182";
  * numbered report; other turns answer "Done.".
  */
 const FAKE_CODEX = `#!/usr/bin/env node
-const { appendFileSync, existsSync } = require("node:fs");
+const { appendFileSync, existsSync, readFileSync } = require("node:fs");
 if (process.argv.includes("--version")) {
   process.stdout.write("codex-cli 0.160.1\\n");
   process.exit(0);
@@ -110,12 +113,12 @@ const answer = (message) => {
     case "initialize": return write({ id: message.id, result: {} });
     case "account/read": return write({ id: message.id, result: { account: { type: "chatgpt", email: "codex@example.com" } } });
     case "account/rateLimits/read": return write({ id: message.id, result: { rateLimits: { limitId: "codex", primary: null, secondary: null }, rateLimitsByLimitId: null } });
-    case "model/list": return write({ id: message.id, result: { data: [{ model: "gpt-6-luna", displayName: "GPT-6 Luna" }] } });
+    case "model/list": return write({ id: message.id, result: { data: [{ model: "gpt-6-luna", displayName: "GPT-6 Luna" }, { model: "gpt-6-sol", displayName: "GPT-6 Sol" }] } });
     case "plugin/list": return write({ id: message.id, result: { marketplaces: [] } });
     case "config/read": return write({ id: message.id, result: config });
     case "config/batchWrite": return write({ id: message.id, result: {} });
     case "thread/start": {
-      const id = "thread-" + (++threads);
+      const id = "thread-" + process.pid + "-" + (++threads);
       log({ method: "thread/start", threadId: id, ephemeral: params.ephemeral ?? null, persistSession: params.persistSession ?? null, instructions: params.developerInstructions, mcpServers: Object.entries((params.config && params.config.mcp_servers) || {}).filter(([, server]) => server.enabled !== false).map(([name]) => name) });
       return write({ id: message.id, result: { thread: { id, turns: [] } } });
     }
@@ -129,7 +132,7 @@ const answer = (message) => {
     case "thread/items/list": return write({ id: message.id, result: { data: [], nextCursor: null } });
     case "thread/read": return write({ id: message.id, result: { thread: { id: params.threadId, turns: [] } } });
     case "turn/start": {
-      const turnId = "turn-" + (++turns);
+      const turnId = "turn-" + process.pid + "-" + (++turns);
       const text = (params.input || []).map((item) => item.text || "").join("\\n");
       const state = context.get(params.threadId) ?? { characters: 0, prompt: 0, input: 0, cached: 0, output: 0 };
       state.characters += text.length;
@@ -137,14 +140,14 @@ const answer = (message) => {
       const cached = Math.min(state.prompt, prompt);
       Object.assign(state, { prompt, input: state.input + prompt, cached: state.cached + cached, output: state.output + 100 });
       context.set(params.threadId, state);
-      log({ method: "turn/start", threadId: params.threadId, turnId, characters: text.length, prompt, text });
+      log({ method: "turn/start", threadId: params.threadId, turnId, accountHome: process.env.CODEX_HOME, model: params.model, characters: text.length, prompt, text });
       write({ id: message.id, result: { turn: { id: turnId, status: "inProgress", items: [] } } });
       write({ method: "turn/started", params: { threadId: params.threadId, turn: { id: turnId } } });
       const tokenUsage = { total: breakdown(state.input, state.cached, state.output), last: breakdown(prompt, cached, 100), modelContextWindow: 1000000 };
       write({ method: "thread/tokenUsage/updated", params: { threadId: params.threadId, turnId, tokenUsage } });
       const second = text.includes(${JSON.stringify(SECOND_MARK)});
       const routine = !second && text.includes(${JSON.stringify(ROUTINE_MARK)});
-      const reply = second ? "Second routine report: the docs are current." : routine ? "Routine report " + (++reports) + ": the build is green." : "Done.";
+      const reply = second ? "Second routine report: the docs are current." : routine ? "Routine report " + readFileSync(LOG, "utf8").split("\\n").filter((line) => line.includes('"method":"turn/start"') && line.includes(${JSON.stringify(ROUTINE_MARK)}) && !line.includes(${JSON.stringify(SECOND_MARK)})).length + ": the build is green." : "Done.";
       const answerTurn = () => {
         const item = { type: "agentMessage", id: "message-" + turnId, text: reply, phase: "final_answer" };
         write({ method: "item/completed", params: { threadId: params.threadId, turnId, item } });
@@ -209,6 +212,8 @@ interface LogEntry {
   method: string;
   threadId: string;
   turnId?: string;
+  model?: string;
+  accountHome?: string;
   ephemeral?: boolean | null;
   persistSession?: boolean | null;
   characters?: number;
@@ -341,6 +346,10 @@ function pass(name: string, condition: boolean, detail?: string) {
 }
 
 await writeFile(fakeCodex, FAKE_CODEX, { mode: 0o755 });
+const accounts = new ProviderAccountStore(join(userData, "openbot-provider-accounts-v1.json"), join(root, "accounts"));
+await runCauseEffect(accounts.load());
+const helperAccount = await runCauseEffect(accounts.create("codex"));
+assert.ok(helperAccount);
 const database = new OpenBotDatabase(userData);
 const store = new AgentStore(userData, home, database);
 const mailbox = new MailboxStore(userData, store.sharedRoot, store.database);
@@ -348,6 +357,7 @@ const agents = new AgentService({
   store,
   mailbox,
   browser,
+  providerAccounts: accounts,
   preferredProvider: "codex",
   passwordVault: {
     connected: () => true,
@@ -487,6 +497,20 @@ try {
     const filler = `History message ${index}. ${"The quarterly numbers look stable this week. ".repeat(1_000)}`;
     await send(agent.id, filler.slice(0, HISTORY_CHARACTERS), `history message ${index}`);
   }
+  const helperChoice = { provider: "codex" as const, model: "gpt-6-sol" as const, providerAccountId: helperAccount.id };
+  const configured = await runCauseEffect(
+    agents.updateAgentRuntime({
+      agentId: agent.id,
+      routineModel: helperChoice,
+      channelSummaryModel: helperChoice,
+    }),
+  );
+  pass(
+    "Helper model choices are saved without changing the main model",
+    configured.model === agent.model &&
+      configured.routineModel?.model === helperChoice.model &&
+      configured.channelSummaryModel?.model === helperChoice.model,
+  );
   const [mainBefore] = mainSession(chatThread);
   assert.ok(mainBefore, "The chat has an active provider session.");
   const lastChatTurn = fakeEntries()
@@ -747,6 +771,191 @@ try {
   pass(
     "A routine with no run place answers in the chat and gets no thread",
     report.chatRoutine.threads === 0 && report.chatRoutine.answersInChat === 1 && chatRunStatus === "succeeded",
+  );
+  const configuredRoutineTurns = fakeEntries().filter(
+    (entry) => entry.method === "turn/start" && entry.model === helperChoice.model,
+  );
+  pass(
+    "Each configured routine uses its own model and named account",
+    configuredRoutineTurns.length >= 4 &&
+      configuredRoutineTurns.every((entry) => entry.accountHome === accounts.home(helperAccount)),
+  );
+  pass(
+    "Main turns retain their original account and model",
+    fakeEntries()
+      .filter((entry) => entry.method === "turn/start" && entry.threadId === mainBefore)
+      .every((entry) => entry.model === agent.model && entry.accountHome !== accounts.home(helperAccount)),
+  );
+  const channelId = randomUUID();
+  await runCauseEffect(
+    agents.channels.command(
+      {
+        type: "save",
+        operationId: randomUUID(),
+        channelId,
+        draft: {
+          name: "routine-fixture",
+          title: "",
+          instructions: "Complete the check.",
+          members: [{ agentId: agent.id }],
+          leadAgentId: agent.id,
+        },
+      },
+      { id: "local", name: "Fixture" },
+    ),
+  );
+  const channelRoutine = agents.createChannelRoutine({
+    channelId,
+    name: "Channel check",
+    instruction: "CHANNEL-ROUTINE-FRESH: complete the check.",
+    active: false,
+    timezone: "UTC",
+    schedule: { kind: "daily", time: "11:00" },
+  });
+  const channelRun = await runCauseEffect(agents.testChannelRoutine({ channelId, routineId: channelRoutine.id }));
+  const channelTurn = await waitFor("the channel routine turn", () =>
+    fakeEntries().find(
+      (entry) =>
+        entry.method === "turn/start" &&
+        entry.model === helperChoice.model &&
+        entry.text?.includes("CHANNEL-ROUTINE-FRESH"),
+    ),
+  );
+  await waitFor("the channel routine session to close", () =>
+    fakeEntries().some((entry) => entry.method === "thread/unsubscribe" && entry.threadId === channelTurn.threadId),
+  );
+  const channelAssignment = agents.channels.store
+    .assignments(channelId)
+    .find((item) => item.requestMessageId === channelRun.requestMessageId);
+  const channelDelivery = channelAssignment?.deliveryId
+    ? mailbox.getDelivery(channelAssignment.deliveryId)?.delivery
+    : undefined;
+  const channelStart = fakeEntries().find(
+    (entry) => entry.method === "thread/start" && entry.threadId === channelTurn.threadId,
+  );
+  pass(
+    "A native channel routine runs in a fresh session despite its user sender",
+    channelDelivery?.sender.kind === "user" &&
+      channelStart?.ephemeral === true &&
+      channelStart.persistSession === false &&
+      channelTurn.model === helperChoice.model &&
+      channelTurn.accountHome === accounts.home(helperAccount),
+    JSON.stringify({
+      delivery: channelDelivery?.id,
+      sender: channelDelivery?.sender.kind,
+      ephemeral: channelStart?.ephemeral,
+      account: channelTurn.accountHome,
+      model: channelTurn.model,
+    }),
+  );
+  const channelTask = agents.channels.store
+    .tasks(channelId)
+    .find((item) => item.requestMessageId === channelRun.requestMessageId);
+  pass(
+    "A fresh channel routine retains its native request and assignment",
+    Boolean(
+      channelTask &&
+        channelDelivery &&
+        agents.channels.store.assignmentForDelivery(channelDelivery.id)?.requestMessageId ===
+          channelRun.requestMessageId,
+    ),
+  );
+  const summaryLead = store.list().find((item) => item.id === agent.id);
+  assert.ok(summaryLead);
+  const beforeSummary = fakeEntries().length;
+  await runCauseEffect(agents.channels.hooks.generate(summaryLead, "Summarise this channel fixture.", [], true));
+  const summaryTurn = fakeEntries()
+    .slice(beforeSummary)
+    .find((entry) => entry.method === "turn/start");
+  pass(
+    "The channel summary uses its configured model and account",
+    summaryTurn?.model === helperChoice.model && summaryTurn.accountHome === accounts.home(helperAccount),
+  );
+  const helperUsage = sqlite()
+    .prepare("SELECT provider,model FROM agent_usage_records WHERE turn_id = ?")
+    .all(summaryTurn?.turnId ?? "");
+  pass(
+    "Summary usage records the actual configured model",
+    helperUsage.length > 0 && helperUsage.every((row) => row.provider === "codex" && row.model === helperChoice.model),
+  );
+  const reloaded = new AgentStore(userData, home, database);
+  await runCauseEffect(reloaded.initialize());
+  const persisted = reloaded.list().find((item) => item.id === agent.id);
+  pass(
+    "Helper choices survive a fresh settings reader",
+    persisted?.routineModel?.providerAccountId === helperAccount.id &&
+      persisted.channelSummaryModel?.model === helperChoice.model,
+  );
+  await assert.rejects(
+    runCauseEffect(
+      agents.updateAgentRuntime({
+        agentId: agent.id,
+        routineModel: { ...helperChoice, providerAccountId: "missing-account" },
+      }),
+    ),
+  );
+  pass(
+    "An unavailable helper account leaves the saved choice intact",
+    store.list().find((item) => item.id === agent.id)?.routineModel?.providerAccountId === helperAccount.id,
+  );
+  const held: string[][] = [];
+  const scheduled: string[] = [];
+  const gate = new UsageLimitGate({
+    store,
+    statePath: null,
+    hooks: {
+      emit: () => {},
+      emitRuntimeSnapshot: () => {},
+      scheduleDrain: (id) => scheduled.push(id),
+      readUsage: () => Effect.succeed(null),
+      held: (ids) =>
+        Effect.sync(() => {
+          held.push([...ids]);
+        }),
+      released: () => Effect.void,
+    },
+  });
+  try {
+    await runCauseEffect(
+      gate.reached(agent.id, Math.floor(Date.now() / 1000) + 3600, helperChoice.model, helperChoice),
+    );
+    pass(
+      "A helper limit holds only its actual provider account and model",
+      gate.mayDrain(agent.id) &&
+        !gate.mayDrain(agent.id, helperChoice) &&
+        gate.mayDrain(agent.id, { ...helperChoice, providerAccountId: undefined }) &&
+        held.every((ids) => ids.length === 0),
+    );
+    const crossProvider = {
+      provider: "claude" as const,
+      model: "claude-haiku-4-5" as const,
+      providerAccountId: "fixture-cross-account",
+    };
+    await runCauseEffect(
+      gate.reached(agent.id, Math.floor(Date.now() / 1000) + 3600, crossProvider.model, crossProvider),
+    );
+    pass(
+      "A cross-provider helper refusal keeps main work available",
+      gate.mayDrain(agent.id) &&
+        !gate.mayDrain(agent.id, crossProvider) &&
+        gate.isLimited({ provider: "claude", accountId: crossProvider.providerAccountId, model: crossProvider.model }),
+    );
+    await runCauseEffect(gate.accountReset("codex", helperAccount.id));
+    pass(
+      "A helper account reset wakes the owner without changing main settings",
+      gate.mayDrain(agent.id, helperChoice) &&
+        scheduled.includes(agent.id) &&
+        store.list().find((item) => item.id === agent.id)?.model === agent.model,
+    );
+  } finally {
+    await runCauseEffect(gate.dispose());
+  }
+  const reset = await runCauseEffect(
+    agents.updateAgentRuntime({ agentId: agent.id, routineModel: null, channelSummaryModel: null }),
+  );
+  pass(
+    "Null clears helper overrides while preserving the main model",
+    reset.routineModel === undefined && reset.channelSummaryModel === undefined && reset.model === agent.model,
   );
   report.passed = true;
 } catch (error) {

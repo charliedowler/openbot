@@ -1229,16 +1229,22 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
       failureCause: (error) => failureMessages(error).map((message) => this.#mcp.redact(message)),
       generate: (lead, prompt, fallbacks = [], background = false) =>
         Effect.gen({ self: this }, function* () {
+          const configured = background ? lead.channelSummaryModel : undefined;
+          const actualLead = configured
+            ? yield* lifecycleStep("choose channel summary model", () =>
+                this.#providers.executionAgent(lead, configured),
+              )
+            : lead;
           const modelOf = (agent: AgentSummary) =>
-            (background
+            (background && !configured
               ? backgroundModel(agent, this.#endpoints.available())
               : this.#endpoints
                   .available()
                   .find((item) => item.provider === agent.provider && item.id === agent.model)) ?? undefined;
-          const leadStarted = yield* Effect.result(this.#providers.ensureProvider(lead.provider));
-          let selected = lead;
-          let model = Result.isSuccess(leadStarted) ? modelOf(lead) : undefined;
-          for (const fallback of fallbacks) {
+          const leadStarted = yield* Effect.result(this.#providers.ensureProvider(actualLead.provider));
+          let selected = actualLead;
+          let model = Result.isSuccess(leadStarted) ? modelOf(actualLead) : undefined;
+          for (const fallback of configured ? [] : fallbacks) {
             if (model) break;
             // A provider of a fallback that does not start leaves the next fallback to try.
             if (Result.isFailure(yield* Effect.result(this.#providers.ensureProvider(fallback.provider)))) continue;
@@ -1252,7 +1258,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
               cause: new Error(sourceText("error.backend.channelLeadModelUnavailable")),
             });
           }
-          if (selected !== lead)
+          if (selected !== actualLead)
             logger.info("A channel used a member's model because the lead's model is unavailable.", {
               leadProvider: lead.provider,
               leadModel: lead.model,
@@ -1288,9 +1294,9 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
               // does, and the channel keeps the task queued for the reset.
               Effect.tapError((failure) =>
                 failure instanceof GenerationUsageLimitError
-                  ? this.#usageLimits.reached(selected.id, failure.resetsAt, selected.model)
+                  ? this.#usageLimits.reached(selected.id, failure.resetsAt, model.id, { ...selected, model: model.id })
                   : failure.cause instanceof Error && isPlanLimitDiagnostic(failure.cause.message)
-                    ? this.#usageLimits.reached(selected.id, null, selected.model)
+                    ? this.#usageLimits.reached(selected.id, null, model.id, { ...selected, model: model.id })
                     : Effect.void,
               ),
             );
@@ -1515,6 +1521,10 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
       planContinuation: this.#planContinuation,
       tasks: this.#tasks,
       hooks: {
+        routineOrigin: (deliveryId) => {
+          const requestId = this.channels.store.assignmentForDelivery(deliveryId)?.requestMessageId;
+          return Boolean(requestId && this.#channelRoutines.runForRequest(requestId));
+        },
         emitError: (code, error, agentId) => this.#emitError(code, error, agentId),
         redactMcp: (text) => this.#mcp.redact(text),
         tagReferences: (agentId, threadId) => this.#tagReferences(agentId, threadId),
@@ -1657,6 +1667,8 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
         quietRoutineDelivery: (deliveryId) => this.#routines.quietRunForDelivery(deliveryId),
         takeRoutinePreview: (deliveryId) => this.#routines.takePreviewBeforeRun(deliveryId),
         closeRoutineSession: (externalThreadId) => this.#threads.closeRoutineThread(externalThreadId),
+        executionAgent: (externalThreadId) => this.#threads.executionAgent(externalThreadId),
+        executionPurpose: (externalThreadId) => this.#threads.executionPurpose(externalThreadId),
         conversationTurnEnded: (agentId, sideThreadId, counts, memoryCommitted) =>
           this.#memoryReview.turnEnded(agentId, sideThreadId, counts, memoryCommitted),
         turnStopped: (agentId, taskId, turnId) =>
@@ -3259,6 +3271,10 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
               this.#providers.status().providers ?? [],
             ).message,
           );
+        }
+        if (previous) {
+          for (const choice of [input.routineModel, input.channelSummaryModel])
+            if (choice) this.#providers.executionAgent(previous, choice);
         }
         const requestedProvider = input.provider ?? requestedModel?.provider ?? previous?.provider;
         if (input.provider && requestedModel && requestedModel.provider !== input.provider) {
@@ -5486,6 +5502,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     const receipt = yield* this.#mailbox
       .enqueue({
         sender: { kind: "user" },
+        ...(input.executionPurpose ? { executionPurpose: input.executionPurpose } : {}),
         ...(sender ? { senderMember: sender } : {}),
         ...(task ? { taskId: task.taskId } : {}),
         recipientAgentIds: [agent.id],

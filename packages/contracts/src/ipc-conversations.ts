@@ -168,6 +168,7 @@ export interface MarkConversationUnreadInput {
 }
 
 export interface SendMessageInput {
+  executionPurpose?: "review";
   agentId: string;
   text: string;
   attachmentDraftIds?: string[];

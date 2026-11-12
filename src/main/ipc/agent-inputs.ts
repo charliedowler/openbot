@@ -29,6 +29,7 @@ import {
   isAgentAccess,
   isAgentBackupModels,
   isAgentModel,
+  isAgentModelChoice,
   isAgentProvider,
   isAgentTaskLimit,
   isAgentTokenBudget,
@@ -546,6 +547,8 @@ function parsePageLimit(value: unknown): number {
 
 export function parseSendMessage(value: unknown): SendMessageInput {
   if (!isObject(value)) throw new Error("Invalid send message request.");
+  if (value.executionPurpose !== undefined && value.executionPurpose !== "review")
+    throw new Error("Invalid execution purpose.");
   const attachmentDraftIds = value.attachmentDraftIds ?? [];
   if (
     !Array.isArray(attachmentDraftIds) ||
@@ -587,6 +590,7 @@ export function parseSendMessage(value: unknown): SendMessageInput {
   return {
     agentId: requireString(value.agentId, "agentId"),
     text: value.text,
+    ...(value.executionPurpose === undefined ? {} : { executionPurpose: value.executionPurpose }),
     attachmentDraftIds,
     replyToMessageId: replyToMessageId?.trim() || null,
     ...(clientMessageId === undefined ? {} : { clientMessageId }),
@@ -769,6 +773,20 @@ export function parseUpdateAgent(value: unknown): UpdateAgentInput {
       throw new Error("Invalid busy message mode.");
     }
     result.busyMessageMode = value.busyMessageMode;
+  }
+  for (const field of ["channelSummaryModel", "routineModel"] as const) {
+    const choice = value[field];
+    if (choice !== undefined) {
+      if (choice !== null && !isAgentModelChoice(choice)) throw new Error("Invalid helper model.");
+      result[field] =
+        choice === null
+          ? null
+          : {
+              provider: choice.provider,
+              model: choice.model,
+              ...(choice.providerAccountId ? { providerAccountId: choice.providerAccountId } : {}),
+            };
+    }
   }
   if (value.sessionTokenCap !== undefined) {
     if (value.sessionTokenCap !== null && !isAgentTokenBudget(value.sessionTokenCap))

@@ -222,6 +222,10 @@ export interface ThreadLifecycleOptions {
  */
 export class ThreadLifecycle {
   readonly #sessionStarts = new Map<string, number>();
+  readonly #freshExecutions = new Map<
+    string,
+    { agent: AgentSummary; purpose: "routine" | "review"; release?: Effect.Effect<void> }
+  >();
   readonly #store: AgentStore;
   readonly #mailbox: MailboxStore;
   readonly #conversation: ConversationRuntime;
@@ -323,6 +327,14 @@ export class ThreadLifecycle {
       yield* this.applyPendingRuntimeRefresh(agent);
     }
   }, Effect.uninterruptible).bind(this);
+
+  executionAgent(threadId: string): AgentSummary | undefined {
+    return this.#freshExecutions.get(threadId)?.agent;
+  }
+
+  executionPurpose(threadId: string): "routine" | "review" | undefined {
+    return this.#freshExecutions.get(threadId)?.purpose;
+  }
 
   consumePendingHandoff(threadId: string): string | undefined {
     return this.#pendingHandoffs.get(threadId);
@@ -449,6 +461,7 @@ export class ThreadLifecycle {
   }).bind(this);
 
   dispose(): void {
+    this.#freshExecutions.clear();
     this.#pendingHandoffs.clear();
     this.#pendingRuntimeRefreshes.clear();
     this.#pendingStarts.clear();
@@ -563,6 +576,8 @@ export class ThreadLifecycle {
     owner: AgentSummary,
     client: AgentClient,
     routineThreadId?: string,
+    releaseClient?: Effect.Effect<void>,
+    purpose: "routine" | "review" = "routine",
   ) {
     const chatThreadId = yield* this.#store.ensureThreadId(owner.id).pipe(toThreadOperationFailed);
     const publicThreadId = routineThreadId ?? chatThreadId;
@@ -581,7 +596,12 @@ export class ThreadLifecycle {
     const externalThreadId = response.thread.id;
     this.#conversation.bindThread(externalThreadId, owner.id, publicThreadId);
     this.#conversation.markThreadLoaded(externalThreadId, client);
-    this.#conversation.registerRoutineSession(owner.id, externalThreadId);
+    if (purpose === "routine") this.#conversation.registerRoutineSession(owner.id, externalThreadId);
+    this.#freshExecutions.set(externalThreadId, {
+      agent: { ...owner },
+      purpose,
+      ...(releaseClient ? { release: releaseClient } : {}),
+    });
     // Only in memory: the session ends with the run, and a restart ends the run.
     if (handoff) this.#pendingHandoffs.set(externalThreadId, handoff);
     return externalThreadId;
@@ -592,13 +612,21 @@ export class ThreadLifecycle {
     this: ThreadLifecycle,
     externalThreadId: string,
   ) {
-    if (!this.#conversation.isRoutineSession(externalThreadId)) return;
+    const execution = this.#freshExecutions.get(externalThreadId);
+    if (!execution && !this.#conversation.isRoutineSession(externalThreadId)) return;
+    this.#freshExecutions.delete(externalThreadId);
     this.#conversation.forgetRoutineSession(externalThreadId);
-    yield* this.#releaseProviderSession(externalThreadId);
-    this.#conversation.unbindThread(externalThreadId);
-    this.#conversation.unloadThread(externalThreadId);
-    this.#compaction.forgetThread(externalThreadId);
-    this.#pendingHandoffs.delete(externalThreadId);
+    yield* this.#releaseProviderSession(externalThreadId).pipe(
+      Effect.ensuring(
+        Effect.gen({ self: this }, function* () {
+          this.#conversation.unbindThread(externalThreadId);
+          this.#conversation.unloadThread(externalThreadId);
+          this.#compaction.forgetThread(externalThreadId);
+          this.#pendingHandoffs.delete(externalThreadId);
+          if (execution?.release) yield* execution.release;
+        }),
+      ),
+    );
   }, Effect.uninterruptible).bind(this);
 
   /**

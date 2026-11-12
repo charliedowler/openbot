@@ -111,6 +111,10 @@ export class ChannelRoutineScheduler implements RoutineDueSource {
     this.#routines = new ChannelRoutineStore(options.channels.store.database);
   }
 
+  runForRequest(requestMessageId: string): ChannelRoutineRun | null {
+    return this.#routines.runForRequest(requestMessageId);
+  }
+
   list(channelId: string): ChannelRoutine[] {
     return this.#routines.list(this.#requireChannel(channelId));
   }
