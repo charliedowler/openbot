@@ -287,7 +287,7 @@ export interface HostRunningTurn {
 }
 
 export type HostInterruptOutcome =
-  | { kind: "stopped"; turn: HostRunningTurn }
+  | { kind: "stopped"; turn: HostRunningTurn; ended?: boolean; interruptSent?: boolean }
   | { kind: "unknown-agent" }
   | { kind: "no-running-turn" }
   | { kind: "turn-mismatch"; running: HostRunningTurn[] }
@@ -1803,49 +1803,84 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     });
     this.#reaper = new TurnReaper({
       runningTurns: () =>
-        this.#store.database.readRunningTurnProgress(TURN_REAPER_QUEUE_EVENTS).map((turn) => ({
-          agentId: turn.agentId,
-          threadId: turn.threadId,
-          turnId: turn.turnId,
-          startedAt: Date.parse(turn.startedAt) || 0,
-          lastThreadEventAt: turn.lastEventAt ? Date.parse(turn.lastEventAt) || null : null,
-        })),
+        this.#store.database
+          .readRunningTurnProgress(TURN_REAPER_QUEUE_EVENTS)
+          .filter((turn) => !this.#turn.isCompleting(turn.turnId))
+          .map((turn) => ({
+            agentId: turn.agentId,
+            threadId: turn.threadId,
+            turnId: turn.turnId,
+            startedAt: Date.parse(turn.startedAt) || 0,
+            lastThreadEventAt: turn.lastEventAt ? Date.parse(turn.lastEventAt) || null : null,
+            lastOutputAt: this.#turn.reaperOutputAt(turn.turnId),
+          })),
       lastProviderEventAt: (agentId) => this.#turn.lastEventAt(agentId),
-      providerTurnLive: (agentId, turnId) => {
-        const agent = this.#store.list().find((candidate) => candidate.id === agentId);
-        if (!agent) return false;
-        if (!this.#providers.clientForAgent(agent)?.running) return false;
-        return this.#turn.turnStartedAt(turnId) !== null || this.#turn.isCompleting(turnId);
-      },
+      providerTurnLive: (_agentId, turnId) => this.#turn.reaperTurnLive(turnId),
+      refresh: () => this.#turn.refreshReaperProcesses(),
+      kill: (stop) => this.#killReaperTurn(stop),
       pendingAttention: (agentId, turnId) => this.#attention.hasPendingForTurn(agentId, turnId),
       nobodyToAnswer: (agentId, turnId, threadId) => this.#tools.nobodyToAnswer(agentId, turnId, threadId),
       stop: (stop) => this.#reapTurn(stop),
     });
   }
 
+  readonly #killReaperTurn = Effect.fn("AgentService.killReaperTurn")(function* (
+    this: AgentService,
+    stop: TurnReaperStop,
+  ) {
+    const { agentId, threadId, turnId } = stop.turn;
+    if (this.#turn.isCompleting(turnId)) return;
+    const lastOutput = this.#turn.reaperOutputAt(turnId);
+    if (lastOutput !== null && Date.now() - lastOutput < this.#reaper.config.silenceMs) return;
+    const killed = yield* this.#turn.killReaperProcess(turnId).pipe(Effect.catch(() => Effect.succeed(false)));
+    if (killed || !this.#turn.reaperTurnLive(turnId)) {
+      yield* this.#turn.settleOrphanedTurn(agentId, threadId, turnId, "interrupted");
+    }
+    if (killed || !this.#turn.reaperTurnLive(turnId)) yield* this.#recordReaperStop(stop, "not-sent", true, killed);
+    else logger.warn("Turn reaper could not end a silent turn.", { agentId, threadId, turnId, killed });
+  });
+
   readonly #reapTurn = Effect.fn("AgentService.reapTurn")(function* (this: AgentService, stop: TurnReaperStop) {
     const { agentId, threadId, turnId } = stop.turn;
     const agent = this.#store.list().find((candidate) => candidate.id === agentId);
     if (!agent) return;
     const executionThreadId = threadId === agent.threadId ? undefined : threadId;
-    const interrupted = yield* Effect.result(this.interrupt(agentId, turnId, executionThreadId));
-    const stillRunning = () =>
-      this.#mailbox
-        .findDeliveriesByTurn(agentId, turnId)
-        .some(({ delivery }) => delivery.status === "starting" || delivery.status === "running");
     let settled = false;
-    if (stop.kind === "orphaned" && stillRunning() && this.#turn.turnStartedAt(turnId) === null) {
+    let sent = false;
+    if (!this.#turn.reaperTurnLive(turnId) && !this.#turn.isCompleting(turnId)) {
       yield* this.#turn.settleOrphanedTurn(agentId, threadId, turnId, "interrupted");
       settled = true;
+    } else {
+      const result = yield* this.#interruptTurn(agentId, turnId, executionThreadId).pipe(
+        Effect.timeoutOption(5000),
+        Effect.catch(() => Effect.succeed(null)),
+      );
+      sent = result !== null && result._tag === "Some" && result.value;
     }
+    yield* this.#recordReaperStop(stop, sent ? "sent" : "not-sent", settled);
+  });
+
+  readonly #recordReaperStop = Effect.fn("AgentService.recordReaperStop")(function* (
+    this: AgentService,
+    stop: TurnReaperStop,
+    interrupt: "sent" | "not-sent",
+    settledOrphan: boolean,
+    processKilled = false,
+  ) {
+    const { agentId, threadId, turnId } = stop.turn;
+    const agent = this.#store.list().find((candidate) => candidate.id === agentId);
+    if (!agent) return;
     const detail = {
       kind: stop.kind,
       agentId,
       turnId,
       idleSeconds: Math.round(stop.idleMs / 1000),
-      reason: stop.reason,
-      interrupt: interrupted._tag === "Success" ? "sent" : "failed",
-      settledOrphan: settled,
+      reason: stop.kind === "silent" ? "hung-provider" : stop.reason,
+      explanation: stop.reason,
+      interrupt,
+      ended: !this.#runningTurnsOf(agent).some((turn) => turn.turnId === turnId),
+      settledOrphan,
+      processKilled,
     };
     yield* Effect.try({
       try: () =>
@@ -4270,6 +4305,7 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
   ): Effect.fn.Return<HostInterruptOutcome, AgentLifecycleFailed> {
     const agent = this.listAgents().find((candidate) => candidate.id === agentId);
     if (!agent) return { kind: "unknown-agent" };
+    yield* this.#turn.refreshReaperProcesses();
     const running = this.#runningTurnsOf(agent);
     let turn: HostRunningTurn | undefined;
     if (turnId !== null) {
@@ -4283,8 +4319,26 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
       turn = choices[0];
     }
     if (!turn) return { kind: "no-running-turn" };
-    yield* this.interrupt(agentId, turn.turnId, turn.ownChat ? undefined : turn.threadId);
-    return { kind: "stopped", turn };
+    let interruptSent = false;
+    if (!this.#turn.reaperTurnLive(turn.turnId) && !this.#turn.isCompleting(turn.turnId)) {
+      yield* this.#turn
+        .settleOrphanedTurn(agentId, turn.threadId, turn.turnId, "interrupted")
+        .pipe(
+          Effect.mapError(
+            (failure) => new AgentLifecycleFailed({ operation: "settle interrupted orphan", cause: failure }),
+          ),
+        );
+    } else {
+      yield* this.interrupt(agentId, turn.turnId, turn.ownChat ? undefined : turn.threadId).pipe(
+        Effect.timeoutOption(5000),
+      );
+      interruptSent = true;
+    }
+    const deadline = Date.now() + 1000;
+    while (this.#runningTurnsOf(agent).some((entry) => entry.turnId === turn.turnId) && Date.now() < deadline)
+      yield* Effect.sleep(25);
+    const ended = !this.#runningTurnsOf(agent).some((entry) => entry.turnId === turn.turnId);
+    return { kind: "stopped", turn, ended, interruptSent };
   }).bind(this);
 
   agentQueues(): HostAgentQueue[] {
@@ -5694,12 +5748,14 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
     const session = this.#runningSession(agent, targetThreadId);
     if (!session) return false;
     this.#images.interrupt(agentId, session, turnId);
-    yield* client
+    const acknowledged = yield* client
       .request("turn/interrupt", { threadId: session, turnId }, decodeRecordResponse)
       .pipe(
+        Effect.interruptible,
+        Effect.timeoutOption(5000),
         Effect.mapError((failure) => new AgentLifecycleFailed({ operation: "interrupt turn", cause: failure.cause })),
       );
-    return true;
+    return acknowledged._tag === "Some";
   }, Effect.uninterruptible);
 
   /** Whether a routine run with its own session runs in this thread. No thread means the agent's chat. */

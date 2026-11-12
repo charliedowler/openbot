@@ -129,6 +129,7 @@ import {
   toProviderClientOperationError,
 } from "./provider-client-effects";
 import type { ReadProviderHistory } from "./provider-history";
+import { ProviderTurnProcess } from "./provider-turn-process";
 
 const execFileAsync = promisify(execFile);
 const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
@@ -240,7 +241,7 @@ interface ThreadRuntime {
   requestUsage: Map<string, { model: string; usage: unknown }>;
   turnRequestUsage: Map<string, { model: string; usage: unknown }>;
   toolTurns: Map<string, string>;
-  killProcess: () => void;
+  process: () => ProviderTurnProcess | null;
   contextRequest: number;
   compacting: boolean;
   config: ThreadConfig;
@@ -501,6 +502,20 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
     yield* this.#threads.close(runtime).pipe(toProviderClientOperationError);
   });
 
+  readonly turnProcessState = Effect.fn("ClaudeAgentClient.turnProcessState")(function* (
+    this: ClaudeAgentClient,
+    threadId: string,
+    turnId: string,
+  ) {
+    const runtime = this.#threads.get(threadId);
+    if (!runtime || runtime.activeTurn?.id !== turnId) return { live: false, toolOutputAt: null };
+    const child = runtime.process();
+    const toolOutputAt = child
+      ? yield* providerCall(() => child.toolOutputAt((runtime.activeTurn?.toolCalls.size ?? 0) > 0))
+      : null;
+    return { live: child?.live ?? this.#running, toolOutputAt };
+  });
+
   readonly killTurnProcess = Effect.fn("ClaudeAgentClient.killTurnProcess")(function* (
     this: ClaudeAgentClient,
     threadId: string,
@@ -508,7 +523,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
   ) {
     const runtime = this.#threads.get(threadId);
     if (!runtime || runtime.activeTurn?.id !== turnId) return false;
-    runtime.killProcess();
+    runtime.process()?.kill();
     yield* this.releaseThread(threadId);
     return true;
   });
@@ -980,7 +995,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
       // The CLI loads this file and the SDK's own `--mcp-config` value together.
       ...(mcpConfigFile ? { "mcp-config": mcpConfigFile } : {}),
     };
-    let killProcess = () => {};
+    let turnProcess: ProviderTurnProcess | null = null;
     const claudeQuery = yield* providerSync(() =>
       this.#createQuery({
         prompt: input,
@@ -996,14 +1011,13 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
                 stdio: ["pipe", "pipe", "pipe"],
                 windowsHide: true,
               });
-            const kill = () => {
-              if (child.exitCode === null && child.signalCode == null) child.kill("SIGKILL");
-            };
-            killProcess = kill;
-            options.signal.addEventListener("abort", kill, { once: true });
-            child.once("exit", () => options.signal.removeEventListener("abort", kill));
+            const tracked = new ProviderTurnProcess(child);
+            turnProcess = tracked;
+            const abort = () => tracked.kill();
+            options.signal.addEventListener("abort", abort, { once: true });
+            child.once("exit", () => options.signal.removeEventListener("abort", abort));
+            if (options.signal.aborted) abort();
             child.on("error", () => {});
-            if (options.signal.aborted) kill();
             if (
               "stderr" in child &&
               child.stderr &&
@@ -1083,7 +1097,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
       requestUsage: new Map(),
       turnRequestUsage: new Map(),
       toolTurns: new Map(),
-      killProcess: () => killProcess(),
+      process: () => turnProcess,
       contextRequest: 0,
       compacting: false,
       config,
@@ -1868,6 +1882,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
     if (!turn || !delta) return;
     turn.text += delta;
     turn.seenText += delta;
+    this.emit("notification", { method: "openbot/provider-output", params: { threadId: runtime.id, turnId: turn.id } });
   }
 
   /**
