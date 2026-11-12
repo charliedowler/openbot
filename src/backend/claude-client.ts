@@ -238,6 +238,7 @@ interface ThreadRuntime {
   resumedUsage: boolean;
   /** The usage of each API request since the last result, by message id. */
   requestUsage: Map<string, { model: string; usage: unknown }>;
+  turnRequestUsage: Map<string, { model: string; usage: unknown }>;
   contextRequest: number;
   compacting: boolean;
   config: ThreadConfig;
@@ -581,7 +582,11 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
         // A released thread has no turn to stop.
         if (this.#threads.isReleased(threadId)) return yield* providerSync(() => decoder({}));
         const runtime = yield* providerSync(() => this.#requireThread(threadId));
-        yield* providerCall(() => runtime.query.interrupt());
+        yield* providerCall(() => {
+          const turnId = getString(params, "turnId");
+          if (turnId && runtime.activeTurn?.id !== turnId) return Promise.resolve();
+          return runtime.query.interrupt();
+        });
         return yield* providerSync(() => decoder({}));
       }
       case "thread/compact/start":
@@ -1034,6 +1039,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
       usageCost: 0,
       resumedUsage: resume,
       requestUsage: new Map(),
+      turnRequestUsage: new Map(),
       contextRequest: 0,
       compacting: false,
       config,
@@ -1169,6 +1175,7 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
       retrying: false,
       unprompted,
     };
+    runtime.turnRequestUsage.clear();
     runtime.activeTurn = turn;
     runtime.nextTurnId = null;
     startClaudePlanTurn(runtime.plan);
@@ -1272,12 +1279,36 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
     message: ClaudeStreamMessage,
   ) {
     if (message.type === "assistant") {
+      if (!message.parent_tool_use_id && message.uuid) this.#outputTurn(runtime);
       // Each content block repeats its request's message; the last copy has the final count.
       const id = getString(message.message, "id");
       const model = getString(message.message, "model");
-      // Only the first usage report of a resumed process needs the requests of its turn.
       if (runtime.resumedUsage && id && model && isRecord(message.message))
         runtime.requestUsage.set(id, { model, usage: message.message.usage });
+      if (id && model && isRecord(message.message)) {
+        runtime.turnRequestUsage.set(id, { model, usage: message.message.usage });
+        const totals = Object.values(claudeTurnModelUsage(runtime.turnRequestUsage.values()));
+        const counts = totals.flatMap((entry) => [
+          entry.inputTokens,
+          entry.cacheReadInputTokens,
+          entry.cacheCreationInputTokens,
+        ]);
+        if (
+          runtime.activeTurn &&
+          counts.length &&
+          counts.every(
+            (value): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
+          )
+        )
+          this.emit("notification", {
+            method: "openbot/turn-input",
+            params: {
+              threadId: runtime.id,
+              turnId: runtime.activeTurn.id,
+              inputTokens: counts.reduce((sum, value) => sum + value, 0),
+            },
+          });
+      }
     }
     if (message.type === "system" && message.subtype === "status") {
       const status =

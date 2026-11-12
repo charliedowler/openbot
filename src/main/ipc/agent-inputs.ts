@@ -31,6 +31,7 @@ import {
   isAgentModel,
   isAgentProvider,
   isAgentTaskLimit,
+  isAgentTokenBudget,
   isAvatarColor,
   isAvatarHue,
   isAvatarSeed,
@@ -768,6 +769,16 @@ export function parseUpdateAgent(value: unknown): UpdateAgentInput {
       throw new Error("Invalid busy message mode.");
     }
     result.busyMessageMode = value.busyMessageMode;
+  }
+  if (value.sessionTokenCap !== undefined) {
+    if (value.sessionTokenCap !== null && !isAgentTokenBudget(value.sessionTokenCap))
+      throw new Error("Invalid token budget.");
+    result.sessionTokenCap = value.sessionTokenCap;
+  }
+  if (value.turnTokenBudget !== undefined) {
+    if (value.turnTokenBudget !== null && !isAgentTokenBudget(value.turnTokenBudget))
+      throw new Error("Invalid token budget.");
+    result.turnTokenBudget = value.turnTokenBudget;
   }
   if (value.taskLimit !== undefined) {
     if (value.taskLimit !== null && !isAgentTaskLimit(value.taskLimit)) throw new Error("Invalid task limit.");

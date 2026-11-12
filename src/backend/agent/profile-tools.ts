@@ -153,6 +153,10 @@ export const updateProfileToolSchema = z
 
 export const hostAgentUpdateSchema = updateProfileToolSchema
   .pick({ agentId: true, provider: true, model: true, providerAccountId: true, backupModels: true })
+  .extend({
+    sessionTokenCap: z.number().int().min(1024).max(100_000_000).nullable().optional(),
+    turnTokenBudget: z.number().int().min(1024).max(100_000_000).nullable().optional(),
+  })
   .strict();
 
 export type HostAgentUpdate = z.infer<typeof hostAgentUpdateSchema>;

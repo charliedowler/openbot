@@ -36,6 +36,7 @@ import {
   type DynamicToolCallParams,
   type DynamicToolResult,
   decodeAccountLoginCompletedResult,
+  decodeRecordResponse,
   getArray,
   getRecord,
   getString,
@@ -66,6 +67,7 @@ import {
 } from "./provider-diagnostics";
 import type { ProviderRuntime } from "./provider-runtime";
 import { isNoUpdateAnswer, settleQuietRoutineTurn } from "./routine-quiet-runs";
+import { turnTokenBudget } from "./session-budgets";
 import {
   foldCodexChildItem,
   foldCodexSubagentItem,
@@ -318,6 +320,7 @@ export class TurnLifecycle {
   readonly #turnErrors = new Map<string, string>();
   /** How many times the provider retried a request of each running turn. */
   readonly #turnRetries = new Map<string, number>();
+  readonly #budgetStops = new Set<string>();
   /**
    * The client, provider thread and start time of each running turn, from its `turn/started`.
    * `produced` is set by the first item or delta: a refused turn is run again only without one.
@@ -491,6 +494,7 @@ export class TurnLifecycle {
     this.#failoverTurns.clear();
     this.#failoverRetries.clear();
     this.#runningTurns.clear();
+    this.#budgetStops.clear();
     this.#noUpdateTurns.clear();
     this.#reportedFailures.clear();
     this.#endedTurns.clear();
@@ -622,6 +626,73 @@ export class TurnLifecycle {
     } else this.#hooks.emitError("agent_error", failover.message, agentId, failover.context);
   }
 
+  readonly #checkTurnBudget = Effect.fn("TurnLifecycle.checkTurnBudget")(function* (
+    this: TurnLifecycle,
+    agentId: string,
+    threadId: string,
+    source: AgentClient,
+    params: unknown,
+  ) {
+    const turnId = getString(params, "turnId");
+    const running = turnId ? this.#runningTurns.get(turnId) : undefined;
+    if (
+      !turnId ||
+      !running ||
+      running.client !== source ||
+      running.threadId !== threadId ||
+      running.agentId !== agentId ||
+      this.#budgetStops.has(turnId)
+    )
+      return;
+    const agent = this.#store.list().find((entry) => entry.id === agentId);
+    if (!agent) return;
+    let input: number | null = null;
+    if (
+      isRecord(params) &&
+      typeof params.inputTokens === "number" &&
+      Number.isSafeInteger(params.inputTokens) &&
+      params.inputTokens >= 0
+    )
+      input = params.inputTokens;
+    else {
+      const rows = this.#store.database.usage.readTurn(
+        agentId,
+        turnId,
+        new Date(running.startedAt - TURN_USAGE_MARGIN_MS).toISOString(),
+      );
+      const values = rows.flatMap((row) => [
+        row.tokens.uncachedInput,
+        row.tokens.cachedInput,
+        row.tokens.cacheCreation,
+      ]);
+      input =
+        values.length && values.every((value): value is number => value !== null)
+          ? values.reduce((sum, value) => sum + value, 0)
+          : null;
+    }
+    if (input === null || input < turnTokenBudget(agent)) return;
+    this.#budgetStops.add(turnId);
+    logger.warn("A turn reached its input token budget.", {
+      agentId,
+      turnId,
+      inputTokens: input,
+      budget: turnTokenBudget(agent),
+    });
+    this.#hooks.emitError(
+      "turn_input_budget_exceeded",
+      new Error(sourceText("error.backend.turnInputBudgetExceeded")),
+      agentId,
+    );
+    if (this.#runningTurns.get(turnId) !== running || this.#conversation.loadedClientFor(threadId) !== source) return;
+    yield* source
+      .request("turn/interrupt", { threadId, turnId }, decodeRecordResponse)
+      .pipe(
+        Effect.catch((failure) =>
+          Effect.sync(() => this.#hooks.emitError("turn_budget_stop_failed", failure, agentId)),
+        ),
+      );
+  });
+
   readonly handleNotification = Effect.fn("TurnLifecycle.handleNotification")(function* (
     this: TurnLifecycle,
     notification: AppServerNotification,
@@ -656,6 +727,13 @@ export class TurnLifecycle {
         }
       }
     }
+
+    if (
+      threadId &&
+      agentId &&
+      ["openbot/turn-input", "openbot/usage", "thread/tokenUsage/updated"].includes(notification.method)
+    )
+      yield* this.#checkTurnBudget(agentId, threadId, source, params);
 
     switch (notification.method) {
       case "account/login/completed": {
@@ -849,6 +927,7 @@ export class TurnLifecycle {
             source,
           );
         }
+        this.#budgetStops.delete(turnId);
         this.#compaction.threadTurnEnded(threadId);
         if (this.#compaction.isCompactionTurn(threadId, turnId)) {
           this.#compaction.finish(agentId, threadId, status);
@@ -876,10 +955,20 @@ export class TurnLifecycle {
             last.totalTokens,
             usage.modelContextWindow,
             source.contextCompaction === "native",
-            compactsOnRequest(source.contextCompaction) ? 0.8 : null,
+            compactsOnRequest(source.contextCompaction)
+              ? this.#compaction.autoCompactAt(agentId, usage.modelContextWindow)
+              : null,
             usage.estimated === true,
             isAgentContextCategories(usage.categories) ? usage.categories : undefined,
           );
+        const taskId = this.#taskForThread(agentId, threadId);
+        if (
+          ![...this.#runningTurns.values()].some((turn) => turn.threadId === threadId) &&
+          !this.#mailbox.startingDeliveryForAgent(agentId, taskId) &&
+          !this.#conversation.ensureSnapshot(agentId, threadId).activeTurnId &&
+          this.#compaction.reserve(agentId, threadId)
+        )
+          yield* this.#compaction.request(agentId, threadId);
         return;
       }
       case "openbot/context-compaction": {
@@ -1115,6 +1204,7 @@ export class TurnLifecycle {
     function* (this: TurnLifecycle, agentId: string, threadId: string, turnId: string, status: string) {
       const running = this.#runningTurns.get(turnId);
       this.#runningTurns.delete(turnId);
+      this.#budgetStops.delete(turnId);
       this.#markEnded(turnId);
       this.#completingTurns.add(turnId);
       // A turn that runs again below starts a new trace, so each path takes this one.
@@ -1545,6 +1635,7 @@ export class TurnLifecycle {
     const runningThreadId = running?.threadId ?? threadId;
     if (running) this.#keepTurnTiming(turnId, running);
     this.#runningTurns.delete(turnId);
+    this.#budgetStops.delete(turnId);
     this.#reportedFailures.delete(turnId);
     this.#markEnded(turnId);
     this.#instructions.dropTurn(agentId, turnId);

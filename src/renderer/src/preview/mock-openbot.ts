@@ -2539,6 +2539,8 @@ export function createMockOpenBot(options: MockOpenBotOptions = {}): MockOpenBot
         const {
           agentId: _agentId,
           busyMessageMode,
+          sessionTokenCap,
+          turnTokenBudget,
           taskLimit,
           providerAccountId,
           backupModels,
@@ -2564,6 +2566,10 @@ export function createMockOpenBot(options: MockOpenBotOptions = {}): MockOpenBot
         // `null` returns the agent to the app default, which an agent records by having no value.
         if (busyMessageMode === null) delete updated.busyMessageMode;
         else if (busyMessageMode) updated.busyMessageMode = busyMessageMode;
+        if (sessionTokenCap === null) delete updated.sessionTokenCap;
+        else if (sessionTokenCap !== undefined) updated.sessionTokenCap = sessionTokenCap;
+        if (turnTokenBudget === null) delete updated.turnTokenBudget;
+        else if (turnTokenBudget !== undefined) updated.turnTokenBudget = turnTokenBudget;
         if (taskLimit === null) delete updated.taskLimit;
         else if (taskLimit) updated.taskLimit = taskLimit;
         if (chatColor === null) delete updated.chatColor;

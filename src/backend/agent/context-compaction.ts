@@ -10,9 +10,11 @@ import { causeHelpers } from "../effect-boundary";
 import { decodeRecordResponse, getRecord } from "../protocol";
 import { finiteNumberOrNull } from "./account-usage";
 import type { ProviderPort } from "./provider-runtime";
+import { sessionTokenCap } from "./session-budgets";
 import type { ThreadOperationFailed } from "./thread-lifecycle";
 
 interface ThreadContextBudget {
+  agentId?: string;
   usedTokens: number;
   contextWindow: number;
   pending: boolean;
@@ -32,14 +34,6 @@ interface ThreadContextBudget {
 const logger = createOpenBotLogger("context-compaction");
 
 const CONTEXT_COMPACTION_THRESHOLD = 0.8;
-/**
- * A session that a compaction leaves at this share of its window holds mostly what no compaction
- * removes: tool schemas, instructions, and the newest messages. Codex compacted such a session five
- * times in five minutes, and each tool result was cut off (#3905). A session left at the threshold or
- * above compacts again after a small growth or a retry, so a share between the threshold and 90%
- * compacted it without end (#5150).
- */
-const INEFFECTIVE_COMPACTION_SHARE = CONTEXT_COMPACTION_THRESHOLD;
 /** After this many such compactions in a row, OpenBot stops asking for more and tells the user. */
 const INEFFECTIVE_COMPACTION_LIMIT = 2;
 /**
@@ -86,7 +80,7 @@ export interface ContextCompactionOptions {
 
 /** Whether OpenBot can ask for a compaction of this client, automatically or for the user. */
 export function compactsOnRequest(mode: AgentClient["contextCompaction"]): boolean {
-  return mode === "events" || mode === "request" || mode === "handoff";
+  return mode === "events" || mode === "request" || mode === "handoff" || mode === "native";
 }
 
 /** A queue that Codex refused because a compaction turn runs on the provider thread of its key. */
@@ -118,6 +112,7 @@ export class ContextCompaction {
   readonly #rotateSession: ContextCompactionOptions["rotateSession"];
   readonly #rotatesSession: ContextCompactionOptions["rotatesSession"];
   readonly #isStopping: () => boolean;
+  readonly #rotations = new Set<string>();
   readonly #budgets = new Map<string, ThreadContextBudget>();
   /**
    * The agent of each provider thread that compacts, and the client that runs it once `request` sends it.
@@ -175,10 +170,7 @@ export class ContextCompaction {
         const session = agent ? this.#store.database.activeProviderSession(threadId, agent.provider) : null;
         const display = session ? this.#display.get(session.externalSessionId) : null;
         if (!agent || !display) return [];
-        // A `handoff` provider compacts only a session it can replace, which a side thread never is, so
-        // nothing compacts the thread on its own.
-        const handoff = this.#providers.clientForAgent(agent)?.contextCompaction === "handoff";
-        const usage = display.usage && handoff ? { ...display.usage, autoCompactAt: null } : display.usage;
+        const usage = display.usage;
         return [{ agentId, threadId, usage, compaction: display.compaction }];
       })
       .slice(0, INPUT_LIMITS.agents * INPUT_LIMITS.agentTasks);
@@ -315,6 +307,7 @@ export class ContextCompaction {
       ineffectiveCompactions: 0,
       awaitingUsage: false,
     };
+    if (agentId) budget.agentId = agentId;
     budget.usedTokens = usedTokens;
     budget.contextWindow = contextWindow;
     this.#budgets.set(threadId, budget);
@@ -324,7 +317,7 @@ export class ContextCompaction {
     budget.awaitingUsage = false;
     if (afterCompaction) this.#checkCompaction(budget, agentId);
 
-    const pressured = usedTokens / contextWindow >= CONTEXT_COMPACTION_THRESHOLD;
+    const pressured = usedTokens >= this.#threshold(budget);
     if (!pressured) {
       budget.pending = false;
       budget.lastCompactedTokens = null;
@@ -338,11 +331,12 @@ export class ContextCompaction {
       return;
     }
 
-    const minimumGrowth = Math.max(1_024, Math.floor(contextWindow * 0.05));
+    const minimumGrowth = Math.max(1_024, Math.floor(this.#threshold(budget) * 0.05));
     if (budget.lastCompactedTokens !== null && usedTokens < budget.lastCompactedTokens + minimumGrowth) {
       return;
     }
     budget.pending = true;
+    if (agentId) this.#scheduleDrain(agentId);
   }
 
   /**
@@ -383,7 +377,7 @@ export class ContextCompaction {
     )
       return;
     const estimated = budget.usedTokens + Math.ceil(characters / CHARACTERS_PER_TOKEN);
-    if (estimated / budget.contextWindow < CONTEXT_COMPACTION_THRESHOLD) return;
+    if (estimated < this.#threshold(budget)) return;
     budget.pending = true;
     logger.info("The next input fills the session, so it compacts first.", {
       usedPercent: Math.round((budget.usedTokens / budget.contextWindow) * 100),
@@ -400,7 +394,7 @@ export class ContextCompaction {
   /** Counts a compaction that left the session almost full, and tells the user once the count reaches the limit. */
   #checkCompaction(budget: ThreadContextBudget, agentId: string | undefined): void {
     const share = budget.usedTokens / budget.contextWindow;
-    if (share < INEFFECTIVE_COMPACTION_SHARE) {
+    if (budget.usedTokens < this.#threshold(budget)) {
       budget.ineffectiveCompactions = 0;
       return;
     }
@@ -419,6 +413,16 @@ export class ContextCompaction {
       );
   }
 
+  #threshold(budget: ThreadContextBudget): number {
+    const agent = this.#store.list().find((entry) => entry.id === budget.agentId);
+    return Math.min(sessionTokenCap(agent), budget.contextWindow * CONTEXT_COMPACTION_THRESHOLD);
+  }
+
+  autoCompactAt(agentId: string, windowTokens: number): number {
+    const agent = this.#store.list().find((entry) => entry.id === agentId);
+    return Math.min(sessionTokenCap(agent) / windowTokens, CONTEXT_COMPACTION_THRESHOLD);
+  }
+
   contextInputCharacters(threadId: string): number {
     const budget = this.#budgets.get(threadId);
     // A session that `#rotate` started holds a window of 1 until its first usage report: no window is
@@ -430,15 +434,28 @@ export class ContextCompaction {
    * `manual`: the user asked, so the thread compacts below the threshold too.
    * `turnId`: the turn whose end reserves, so that only that turn can drop the hold.
    */
-  reserve(agentId: string, threadId: string, manual = false, turnId: string | null = null): boolean {
+  reserve(agentId: string, threadId: string, manual = false, turnId: string | null = null, rotate = false): boolean {
     const agent = this.#store.list().find((candidate) => candidate.id === agentId);
     const mode = agent ? this.#providers.clientForAgent(agent)?.contextCompaction : undefined;
-    if (!agent || !compactsOnRequest(mode)) return false;
-    if (mode === "handoff" && !this.#rotatesSession(agentId, threadId)) return false;
+    if (!agent || (!rotate && !compactsOnRequest(mode))) return false;
+    if ((rotate || mode === "handoff" || mode === "native") && !this.#rotatesSession(agentId, threadId)) return false;
+    if (manual && !this.#budgets.has(threadId))
+      this.#budgets.set(threadId, {
+        agentId,
+        usedTokens: 0,
+        contextWindow: 1,
+        pending: false,
+        phase: "idle",
+        compactionTurnId: null,
+        lastCompactedTokens: null,
+        ineffectiveCompactions: 0,
+        awaitingUsage: false,
+      });
     const budget = this.#budgets.get(threadId);
     if (!(budget?.pending || (manual && budget)) || budget.phase !== "idle" || this.#compacting.has(threadId)) {
       return false;
     }
+    if (rotate) this.#rotations.add(threadId);
     budget.phase = "requested";
     this.#compacting.set(threadId, { agentId, client: null, turnId });
     this.observeCompaction(threadId, "running");
@@ -467,14 +484,18 @@ export class ContextCompaction {
     if (
       budget?.phase !== "requested" ||
       !client ||
-      !compactsOnRequest(client.contextCompaction) ||
+      (!this.#rotations.has(threadId) && !compactsOnRequest(client.contextCompaction)) ||
       !this.#providers.isReady()
     ) {
       if (budget?.phase === "requested") this.observeCompaction(threadId, "failed");
       this.#release(agentId, threadId);
       return;
     }
-    if (client.contextCompaction === "handoff") {
+    if (
+      this.#rotations.has(threadId) ||
+      client.contextCompaction === "handoff" ||
+      client.contextCompaction === "native"
+    ) {
       yield* this.#rotate(agentId, threadId, client);
       return;
     }
@@ -696,6 +717,7 @@ export class ContextCompaction {
     // above the threshold does not rotate again at each turn.
     if (next)
       this.#budgets.set(next, {
+        agentId,
         usedTokens: 0,
         contextWindow: 1,
         pending: false,
@@ -750,6 +772,7 @@ export class ContextCompaction {
   }
 
   #release(agentId: string, threadId: string): void {
+    this.#rotations.delete(threadId);
     this.#clearTimer(threadId);
     const budget = this.#budgets.get(threadId);
     if (budget) {
