@@ -50,7 +50,7 @@ import type { AgentMemories } from "./agent-memories";
 import { readCodexMcpConfig } from "./codex-mcp-config";
 import type { ContextCompaction } from "./context-compaction";
 import type { ConversationRuntime } from "./conversation-runtime";
-import { agentNamesById } from "./delivery-content";
+import { agentNamesById, HANDOFF_END } from "./delivery-content";
 import {
   developerInstructions,
   memoryContext,
@@ -66,6 +66,7 @@ import {
 } from "./handoff-history";
 import { decodeCapturedSteps, readCapturedSteps } from "./handoff-tool-steps";
 import { isProviderTimeout } from "./provider-status";
+import { sessionCarryover } from "./session-carryover";
 import { sessionSettingsIdentity } from "./session-settings";
 import { isArchivedThreadError, isMissingProviderSessionError, providerLabel } from "./thread-items";
 import { VISIBLE_DYNAMIC_TOOLS } from "./tool-catalog";
@@ -1361,7 +1362,12 @@ export class ThreadLifecycle {
     const agent = this.#store.list().find((candidate) => candidate.id === agentId);
     if (!agent) return false;
     const publicThreadId = this.#conversation.publicThreadId(agentId, externalThreadId);
-    if (publicThreadId !== agent.threadId && !this.#channelThread(publicThreadId)) return false;
+    if (
+      publicThreadId !== agent.threadId &&
+      !this.#channelThread(publicThreadId) &&
+      !this.#conversation.isTaskThread(publicThreadId)
+    )
+      return false;
     return (
       this.#store.database.activeProviderSession(publicThreadId, agent.provider)?.externalSessionId === externalThreadId
     );
@@ -1382,12 +1388,22 @@ export class ThreadLifecycle {
     const agent = this.#store.list().find((candidate) => candidate.id === agentId);
     if (!agent) return null;
     const publicThreadId = this.#conversation.publicThreadId(agentId, externalThreadId);
-    if (publicThreadId !== agent.threadId && !this.#channelThread(publicThreadId)) return null;
+    if (
+      publicThreadId !== agent.threadId &&
+      !this.#channelThread(publicThreadId) &&
+      !this.#conversation.isTaskThread(publicThreadId)
+    )
+      return null;
     const session = this.#store.database.activeProviderSession(publicThreadId, client.provider);
     if (session?.externalSessionId !== externalThreadId) return null;
     // The steps first: an ACP agent keeps them only in the session that closes below.
+    const active = () =>
+      this.#conversation.ensureSnapshot(agentId, publicThreadId).activeTurnId !== null ||
+      client.hasActiveTurn?.(externalThreadId) === true;
+    if (active()) return null;
     const steps = yield* this.readWorkSteps(session);
     if (steps !== null) yield* this.saveWorkSteps(session, steps);
+    if (active()) return null;
     // The client that holds the session, while the routing entry that `retireProviderSession`
     // removes still names it. After a CLI replacement that is not the agent's current client.
     yield* this.#releaseProviderSession(externalThreadId);
@@ -1657,7 +1673,8 @@ export class ThreadLifecycle {
     threadId: string,
   ) {
     // A task keeps its own conversation across sessions, as the agent's own chat does.
-    if (this.#conversation.isExecutionThread(threadId) && !this.#conversation.isTaskThread(threadId)) return null;
+    if (this.#conversation.isExecutionThread(threadId) && !this.#conversation.isTaskThread(threadId))
+      return sessionCarryover(this.#store.database, agentId, threadId);
     const sessions = this.#store.database.listProviderSessions(threadId);
     // A branch starts with a copied conversation and no session, so its first session gets the copy.
     const branch = this.#conversation.isTaskThread(threadId) && this.#branchThread(threadId);
@@ -1677,7 +1694,10 @@ export class ThreadLifecycle {
       const text = captures.get(session.id)?.get(row.message.turnId);
       if (text) steps.set(row.message.id, text);
     }
-    return renderProviderHandoff(history, agentNames, steps, { branch });
+    const historyPacket = renderProviderHandoff(history, agentNames, steps, { branch });
+    const carryover = sessionCarryover(this.#store.database, agentId, threadId);
+    if (!historyPacket) return carryover;
+    return historyPacket.slice(0, -HANDOFF_END.length) + carryover + HANDOFF_END;
   }).bind(this);
 }
 

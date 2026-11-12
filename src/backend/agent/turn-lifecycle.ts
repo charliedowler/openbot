@@ -35,6 +35,7 @@ import {
   type DynamicToolCallParams,
   type DynamicToolResult,
   decodeAccountLoginCompletedResult,
+  decodeRecordResponse,
   getArray,
   getRecord,
   getString,
@@ -65,6 +66,7 @@ import {
 } from "./provider-diagnostics";
 import type { ProviderRuntime } from "./provider-runtime";
 import { isNoUpdateAnswer, settleQuietRoutineTurn } from "./routine-quiet-runs";
+import { turnModelCallBudget, turnTokenBudget } from "./session-budgets";
 import {
   foldCodexChildItem,
   foldCodexSubagentItem,
@@ -317,6 +319,7 @@ export class TurnLifecycle {
   readonly #turnErrors = new Map<string, string>();
   /** How many times the provider retried a request of each running turn. */
   readonly #turnRetries = new Map<string, number>();
+  readonly #budgetStops = new Map<string, string>();
   /**
    * The client, provider thread and start time of each running turn, from its `turn/started`.
    * `produced` is set by the first item or delta: a refused turn is run again only without one.
@@ -536,6 +539,7 @@ export class TurnLifecycle {
     this.#failoverRetries.clear();
     this.#runningTurns.clear();
     this.#reaperProcesses.clear();
+    this.#budgetStops.clear();
     this.#noUpdateTurns.clear();
     this.#reportedFailures.clear();
     this.#endedTurns.clear();
@@ -568,6 +572,7 @@ export class TurnLifecycle {
       this.#runningTurns.delete(turnId);
       // A routine run's own session saves no history, so its turn ends now and closes the session.
       if (
+        !this.#budgetStops.has(turnId) &&
         options.keepRecoverable &&
         !this.#conversation.isRoutineSession(turn.threadId) &&
         this.#mailbox
@@ -590,7 +595,7 @@ export class TurnLifecycle {
       this.#compaction.abandonCompaction(turn.threadId);
       // The running entry is gone already, so `#completeTurn` cannot keep the timing.
       this.#keepTurnTiming(turnId, turn);
-      yield* this.#completeTurn(turn.agentId, turn.threadId, turnId, "interrupted").pipe(
+      yield* this.#completeTurn(turn.agentId, turn.threadId, turnId, "interrupted", false).pipe(
         Effect.catchCause((cause) =>
           reportOriginalFailure(cause, (failure) =>
             this.#hooks.emitError("turn_completion_failed", failure, turn.agentId),
@@ -667,6 +672,96 @@ export class TurnLifecycle {
     } else this.#hooks.emitError("agent_error", failover.message, agentId, failover.context);
   }
 
+  readonly #checkTurnBudget = Effect.fn("TurnLifecycle.checkTurnBudget")(function* (
+    this: TurnLifecycle,
+    agentId: string,
+    threadId: string,
+    source: AgentClient,
+    params: unknown,
+  ) {
+    const turnId = getString(params, "turnId");
+    const running = turnId ? this.#runningTurns.get(turnId) : undefined;
+    if (
+      !turnId ||
+      !running ||
+      running.client !== source ||
+      running.threadId !== threadId ||
+      running.agentId !== agentId ||
+      this.#budgetStops.has(turnId)
+    )
+      return;
+    const agent = this.#store.list().find((entry) => entry.id === agentId);
+    if (!agent) return;
+    let input: number | null = null;
+    if (
+      isRecord(params) &&
+      typeof params.inputTokens === "number" &&
+      Number.isSafeInteger(params.inputTokens) &&
+      params.inputTokens >= 0
+    )
+      input = params.inputTokens;
+    else {
+      const rows = this.#store.database.usage.readTurn(
+        agentId,
+        turnId,
+        new Date(running.startedAt - TURN_USAGE_MARGIN_MS).toISOString(),
+      );
+      const values = rows.flatMap((row) => [
+        row.tokens.uncachedInput,
+        row.tokens.cachedInput,
+        row.tokens.cacheCreation,
+      ]);
+      input =
+        values.length && values.every((value): value is number => value !== null)
+          ? values.reduce((sum, value) => sum + value, 0)
+          : null;
+    }
+    const modelCalls = isRecord(params) ? params.modelCalls : undefined;
+    const callsExceeded =
+      typeof modelCalls === "number" && Number.isSafeInteger(modelCalls) && modelCalls >= turnModelCallBudget();
+    if (!callsExceeded && (input === null || input < turnTokenBudget(agent))) return;
+    const reason = sourceText(
+      callsExceeded ? "error.backend.turnModelCallBudgetExceeded" : "error.backend.turnInputBudgetExceeded",
+    );
+    this.#budgetStops.set(turnId, reason);
+    this.#turnErrors.set(turnId, reason);
+    this.#failoverTurns.delete(turnId);
+    this.#limitedTurns.delete(turnId);
+    logger.warn("A turn reached its model work budget.", {
+      agentId,
+      turnId,
+      inputTokens: input,
+      budget: turnTokenBudget(agent),
+      modelCalls,
+      modelCallBudget: turnModelCallBudget(),
+    });
+    this.#hooks.emitError(
+      callsExceeded ? "turn_model_call_budget_exceeded" : "turn_input_budget_exceeded",
+      new Error(reason),
+      agentId,
+    );
+    if (this.#runningTurns.get(turnId) !== running || this.#conversation.loadedClientFor(threadId) !== source) return;
+    yield* Effect.gen({ self: this }, function* () {
+      yield* Effect.sleep("2 seconds");
+      if (this.#runningTurns.get(turnId) !== running || !this.#budgetStops.has(turnId)) return;
+      const stopped = source.killTurnProcess
+        ? yield* source.killTurnProcess(threadId, turnId).pipe(Effect.catch(() => Effect.succeed(false)))
+        : false;
+      if (stopped && this.#runningTurns.get(turnId) === running)
+        yield* this.#completeTurn(agentId, threadId, turnId, "failed", true);
+      else if (!stopped)
+        this.#hooks.emitError(
+          "turn_budget_stop_failed",
+          new Error("The provider did not end the budget-stopped turn."),
+          agentId,
+        );
+    }).pipe(Effect.forkIn(this.#scope, { startImmediately: true }));
+    yield* source.request("turn/interrupt", { threadId, turnId }, decodeRecordResponse).pipe(
+      Effect.timeout("2 seconds"),
+      Effect.catch((failure) => Effect.sync(() => this.#hooks.emitError("turn_budget_stop_failed", failure, agentId))),
+    );
+  });
+
   readonly handleNotification = Effect.fn("TurnLifecycle.handleNotification")(function* (
     this: TurnLifecycle,
     notification: AppServerNotification,
@@ -718,6 +813,13 @@ export class TurnLifecycle {
         }
       }
     }
+
+    if (
+      threadId &&
+      agentId &&
+      ["openbot/turn-input", "openbot/usage", "thread/tokenUsage/updated"].includes(notification.method)
+    )
+      yield* this.#checkTurnBudget(agentId, threadId, source, params);
 
     switch (notification.method) {
       case "account/login/completed": {
@@ -919,7 +1021,7 @@ export class TurnLifecycle {
           return;
         }
         // A defect too: this fiber has no other handler, and the turn is settled by then.
-        yield* this.#completeTurn(agentId, threadId, turnId, status).pipe(
+        yield* this.#completeTurn(agentId, threadId, turnId, status, false).pipe(
           Effect.catchCause((cause) =>
             reportOriginalFailure(cause, (failure) =>
               this.#hooks.emitError("turn_completion_failed", failure, agentId),
@@ -940,7 +1042,9 @@ export class TurnLifecycle {
             last.totalTokens,
             usage.modelContextWindow,
             source.contextCompaction === "native",
-            compactsOnRequest(source.contextCompaction) ? 0.8 : null,
+            compactsOnRequest(source.contextCompaction)
+              ? this.#compaction.autoCompactAt(agentId, usage.modelContextWindow)
+              : null,
             usage.estimated === true,
             isAgentContextCategories(usage.categories) ? usage.categories : undefined,
           );
@@ -1176,9 +1280,21 @@ export class TurnLifecycle {
   }
 
   readonly #completeTurn = Effect.fn("TurnLifecycle.completeTurn")(
-    function* (this: TurnLifecycle, agentId: string, threadId: string, turnId: string, status: string) {
+    function* (
+      this: TurnLifecycle,
+      agentId: string,
+      threadId: string,
+      turnId: string,
+      status: string,
+      retireSession = false,
+    ) {
+      const publicThreadId = this.#conversation.publicThreadId(agentId, threadId);
+      const budgetReason = this.#budgetStops.get(turnId);
+      const budgetExceeded = budgetReason !== undefined;
+      if (budgetExceeded) status = "failed";
       const running = this.#runningTurns.get(turnId);
       this.#runningTurns.delete(turnId);
+      this.#budgetStops.delete(turnId);
       this.#markEnded(turnId);
       this.#completingTurns.add(turnId);
       // A turn that runs again below starts a new trace, so each path takes this one.
@@ -1200,19 +1316,19 @@ export class TurnLifecycle {
           durationMs: Date.now() - running.startedAt,
         });
       }
-      const reportedError = this.#turnErrors.get(turnId);
+      const reportedError = budgetReason ?? this.#turnErrors.get(turnId);
       this.#turnErrors.delete(turnId);
       this.#turnRetries.delete(turnId);
       // The error is kept only while the turn runs, so a refused turn always has its entry.
       const refusedFailure =
-        running !== undefined && status === "failed" && reportedError !== undefined
+        !budgetExceeded && running !== undefined && status === "failed" && reportedError !== undefined
           ? refusedSessionFailure(running.client.provider, reportedError)
           : null;
       const refused = running !== undefined && refusedFailure !== null;
-      const limited = status === "failed" && this.#limitedTurns.has(turnId);
+      const limited = !budgetExceeded && status === "failed" && this.#limitedTurns.has(turnId);
       const resetsAt = this.#limitedTurns.get(turnId) ?? null;
       this.#limitedTurns.delete(turnId);
-      const failover = this.#failoverTurns.get(turnId);
+      const failover = budgetExceeded ? undefined : this.#failoverTurns.get(turnId);
       this.#failoverTurns.delete(turnId);
       this.#deltas.flushTurn(turnId);
       yield* this.#images.waitForOperations(threadId, turnId);
@@ -1233,7 +1349,42 @@ export class TurnLifecycle {
         status === "failed" &&
         running !== undefined &&
         (!running.acted || transientFailure);
+      let currentContext = true;
+      if (!budgetExceeded && !limited && !routineSession && running?.client.readContextUsage) {
+        const usage = yield* running.client.readContextUsage(threadId).pipe(
+          Effect.timeout("2 seconds"),
+          Effect.catch(() => Effect.succeed(null)),
+        );
+        currentContext = usage !== null;
+        if (usage) {
+          this.#compaction.updateBudget(
+            threadId,
+            {
+              tokenUsage: {
+                last: { totalTokens: usage.usedTokens },
+                modelContextWindow: usage.windowTokens,
+              },
+            },
+            agentId,
+          );
+          this.#compaction.observeUsage(
+            threadId,
+            usage.usedTokens,
+            usage.windowTokens,
+            true,
+            this.#compaction.autoCompactAt(agentId, usage.windowTokens),
+            false,
+            usage.categories,
+          );
+        }
+      }
+      const completionSnapshot = this.#conversation.ensureSnapshot(agentId, threadId);
       const shouldCompact =
+        currentContext &&
+        completionSnapshot.activeTurnId === turnId &&
+        ![...this.#runningTurns.values()].some((entry) => entry.threadId === threadId) &&
+        !running?.client.hasActiveTurn?.(threadId) &&
+        !budgetExceeded &&
         !refused &&
         !limited &&
         !mayRunAgain &&
@@ -1241,7 +1392,7 @@ export class TurnLifecycle {
         this.#compaction.reserve(agentId, threadId, false, turnId);
       this.#browser.endControl(this.#conversation.publicThreadId(agentId, threadId), turnId);
       const snapshot = this.#conversation.ensureSnapshot(agentId, threadId);
-      snapshot.activeTurnId = null;
+      if (snapshot.activeTurnId === turnId) snapshot.activeTurnId = null;
       const deliveries = this.#mailbox.findDeliveriesByTurn(agentId, turnId);
       // A task turn ends as a turn of the agent's own chat does, in the task's own lane.
       const taskTurn = this.#conversation.isTaskThread(snapshot.threadId);
@@ -1546,7 +1697,7 @@ export class TurnLifecycle {
       this.#hooks.emit({
         type: "turn-completed",
         agentId,
-        threadId: this.#conversation.publicThreadId(agentId, threadId),
+        threadId: publicThreadId,
         turnId,
         status: outcome,
         origin: deliveries[0]?.delivery.sender.kind ?? "unknown",
@@ -1564,11 +1715,12 @@ export class TurnLifecycle {
         const sideThreadId = taskTurn ? snapshot.threadId : null;
         yield* this.#hooks.conversationTurnEnded(agentId, sideThreadId, counts, memoryCommitted);
       }
+      if (retireSession) yield* this.#hooks.dropRefusedSession(agentId, threadId);
       if (shouldCompact) yield* this.#compaction.request(agentId, threadId);
       else this.#hooks.scheduleDrain(agentId);
     },
     Effect.uninterruptible,
-    (completion, agentId, threadId, turnId, status) =>
+    (completion, agentId, threadId, turnId, status, retireSession) =>
       // The turn is already out of `#runningTurns`, so a step above that fails must not leave its
       // deliveries running: nothing else would end them, and the agent's queue would wait (#2214).
       // Nor a compaction that it reserved and did not ask for: its hold has no deadline (#4960).
@@ -1584,7 +1736,20 @@ export class TurnLifecycle {
         Effect.ensuring(
           Effect.andThen(
             Effect.sync(() => this.#completingTurns.delete(turnId)),
-            this.#hooks.closeRoutineSession(threadId),
+            Effect.andThen(
+              this.#hooks.closeRoutineSession(threadId),
+              retireSession
+                ? this.#hooks
+                    .dropRefusedSession(agentId, threadId)
+                    .pipe(
+                      Effect.catchCause((cause) =>
+                        reportOriginalFailure(cause, (failure) =>
+                          this.#hooks.emitError("turn_completion_failed", failure, agentId),
+                        ),
+                      ),
+                    )
+                : Effect.void,
+            ),
           ),
         ),
       ),
@@ -1609,6 +1774,7 @@ export class TurnLifecycle {
     const runningThreadId = running?.threadId ?? threadId;
     if (running) this.#keepTurnTiming(turnId, running);
     this.#runningTurns.delete(turnId);
+    this.#budgetStops.delete(turnId);
     this.#reportedFailures.delete(turnId);
     this.#markEnded(turnId);
     this.#instructions.dropTurn(agentId, turnId);

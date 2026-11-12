@@ -3815,6 +3815,21 @@ export class AgentService extends EventEmitter<AgentServiceEvents> {
    * Compacts the context of the agent's own chat now, below the automatic threshold too. Only for a
    * provider that OpenBot can ask to compact, and only when no turn or queued message needs the session.
    */
+  readonly controlAgentContext = Effect.fn("AgentService.controlAgentContext")(function* (
+    this: AgentService,
+    agentId: string,
+    mode: "compact" | "rotate",
+  ) {
+    const agent = this.#store.list().find((entry) => entry.id === agentId);
+    if (!agent) return { kind: "unknown-agent" as const };
+    if (this.#threads.mainContextBusy(agent)) return { kind: "busy" as const };
+    const session = agent.threadId ? this.#store.database.activeProviderSession(agent.threadId, agent.provider) : null;
+    if (!session || !this.#compaction.reserve(agentId, session.externalSessionId, true, null, mode === "rotate"))
+      return { kind: "unavailable" as const };
+    yield* this.#compaction.request(agentId, session.externalSessionId);
+    return { kind: "accepted" as const, threadId: agent.threadId };
+  }, Effect.uninterruptible).bind(this);
+
   readonly compactAgentContext = Effect.fn("AgentService.compactAgentContext")(function* (
     this: AgentService,
     agentId: string,

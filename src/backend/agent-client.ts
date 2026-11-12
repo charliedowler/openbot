@@ -1,4 +1,9 @@
-import type { AgentProviderId, AgentSessionSettingsSnapshot, AgentSessionSettingValue } from "@openbot/contracts/ipc";
+import type {
+  AgentContextCategoryUsage,
+  AgentProviderId,
+  AgentSessionSettingsSnapshot,
+  AgentSessionSettingValue,
+} from "@openbot/contracts/ipc";
 import { sourceText } from "@openbot/i18n/source";
 import type { Effect } from "effect";
 import type { AppServerNotification, AppServerRequest, RequestId, ResponseDecoder, RpcError } from "./protocol";
@@ -31,6 +36,15 @@ export interface AgentClient {
     turnId: string,
   ): Effect.Effect<{ live: boolean; toolOutputAt: number | null }, ProviderClientOperationError>;
   killTurnProcess?(threadId: string, turnId: string): Effect.Effect<boolean, ProviderClientOperationError>;
+  hasActiveTurn?(threadId: string): boolean;
+  readContextUsage?(threadId: string): Effect.Effect<
+    {
+      usedTokens: number;
+      windowTokens: number;
+      categories: AgentContextCategoryUsage[];
+    } | null,
+    ProviderClientOperationError
+  >;
   readonly readHistory?: ReadProviderHistory;
   /**
    * True when the user's MCP tools in this thread wait for the provider's own `tool_search`. OpenBot's

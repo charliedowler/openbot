@@ -170,7 +170,11 @@ try {
   await quiet();
   const summary = channels.store.summary(busyChannel);
   assert.ok(summary.version >= 1, "The summary has a version.");
-  assert.ok(summary.text.startsWith("Summary pass"), "The summary is the lead model's text.");
+  assert.match(
+    summary.text,
+    /(?:^|\n)Summary pass \d+:/u,
+    "The summary keeps the lead model's text after the history-window notice.",
+  );
   assert.ok(uncoveredCharacters(busyChannel) <= 30_000, "At most a quarter of the budget stays uncovered.");
   assert.equal(channels.store.assignments(busyChannel).length, 0, "No assignment started.");
   assert.deepEqual([...purposes], ["channel-summary"], "Only summary generations ran.");
@@ -179,7 +183,6 @@ try {
     "A quiet channel with uncovered messages over a quarter of the budget is compacted without an assignment.",
   );
 
-  // 2. A compaction covers everything but the newest messages, in as many passes as it takes.
   const passesSoFar = report.summaryPasses;
   seedHistory(busyChannel, lead, 240);
   await send(busyChannel, "And the Android side?", lead);
@@ -188,8 +191,12 @@ try {
     () => uncoveredCharacters(busyChannel) <= 30_000 && report.summaryPasses > passesSoFar,
   );
   await quiet();
-  assert.ok(report.summaryPasses - passesSoFar >= 2, "A larger backlog takes more than one pass.");
-  report.checks.push("A backlog larger than one pass is compacted in several passes in one run.");
+  assert.ok(
+    report.summaryPasses - passesSoFar >= 1 && report.summaryPasses - passesSoFar <= 2,
+    "A larger backlog uses the bounded recent window.",
+  );
+  assert.ok(channels.store.messages(busyChannel).length >= 400, "The full source history remains stored.");
+  report.checks.push("A large backlog uses the bounded recent window and keeps source history.");
 
   // 3. A small channel is not summarized at all.
   const small = await create("Compass");

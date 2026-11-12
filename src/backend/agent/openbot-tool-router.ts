@@ -2059,7 +2059,12 @@ export class OpenBotToolRouter {
         throw new Error("At least one profile field is required.");
       }
       const target = this.#requireAgent(agentId);
-      return yield* this.#hooks.updateAgent({ agentId, ...this.#runtimeInput(target, fields) });
+      return yield* this.#hooks.updateAgent({
+        agentId,
+        ...this.#runtimeInput(target, fields),
+        ...(fields.sessionTokenCap === undefined ? {} : { sessionTokenCap: fields.sessionTokenCap }),
+        ...(fields.turnTokenBudget === undefined ? {} : { turnTokenBudget: fields.turnTokenBudget }),
+      });
     },
     Effect.catchDefect((cause) => Effect.fail(new ToolOperationFailed({ cause }))),
     Effect.uninterruptible,

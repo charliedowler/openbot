@@ -791,16 +791,6 @@ export class DrainScheduler {
           ? this.#channels?.store.context(assignment.channelId, assignment.agentId).threadId
           : (this.#messaging?.threadForDelivery(context.delivery.id) ?? agent?.threadId);
         if (agent && publicThreadId === agent.threadId) this.#hooks.dropRequestedNewChat(agentId);
-        // A routine run in its own session leaves the chat session as it is.
-        const session =
-          agent && publicThreadId && !this.#runsInOwnSession(context)
-            ? this.#store.database.activeProviderSession(publicThreadId, agent.provider)
-            : null;
-        if (session) this.#compaction.expectInput(session.externalSessionId, context.delivery.text.length);
-        if (session && this.#compaction.reserve(agentId, session.externalSessionId)) {
-          yield* this.#compaction.request(agentId, session.externalSessionId);
-          return;
-        }
       }
       // One message from the user lets one turn try a limit, so the other lanes stay held.
       this.#usageLimits.tryStarted(agentId);

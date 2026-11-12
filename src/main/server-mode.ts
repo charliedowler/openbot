@@ -93,7 +93,8 @@ export interface ServerModeOptions {
     | null;
   nativeWork?: () => { idle: boolean; compactions: number; providerOperations: number; reasons: string[] };
   usageLimits?: Pick<AgentService, "releaseUsageLimits">;
-  agents?: Pick<AgentService, "listAgents" | "interruptRunningTurn" | "updateAgentRuntime" | "agentQueues">;
+  agents?: Pick<AgentService, "listAgents" | "interruptRunningTurn" | "updateAgentRuntime" | "agentQueues"> &
+    Partial<Pick<AgentService, "controlAgentContext">>;
   routines?: Pick<HostEventsService, "listRoutines" | "saveRoutine">;
   channelIds?: () => readonly string[];
   cpuProfiler?: Pick<CpuProfiler, "take">;
@@ -242,6 +243,8 @@ export class ServerMode {
         return this.#resetUsage(body.get("provider") ?? "", body.get("accountId"));
       case "POST /v1/turns/interrupt":
         return this.#interruptTurn(body);
+      case "POST /v1/agents/compact":
+        return this.#compactAgent(body);
       case "POST /v1/agents/update":
         return this.#updateAgent(body);
       case "GET /v1/agents/queue":
@@ -367,6 +370,23 @@ export class ServerMode {
     }
   }
 
+  async #compactAgent(body: URLSearchParams): Promise<Answer> {
+    const agents = this.#options.agents;
+    if (!agents?.controlAgentContext) return failure(404, "not_found");
+    for (const key of new Set(body.keys())) {
+      if (key !== "agentId" && key !== "mode") return failure(400, "unknown_field", key);
+      if (body.getAll(key).length !== 1) return failure(400, "repeated_field", key);
+    }
+    const agentId = body.get("agentId")?.trim() ?? "";
+    const mode = body.get("mode") ?? "compact";
+    if (!agentId || agentId.length > INPUT_LIMITS.identifier) return failure(400, "invalid_agent");
+    if (mode !== "compact" && mode !== "rotate") return failure(400, "invalid_mode");
+    const result = await runCauseEffect(agents.controlAgentContext(agentId, mode));
+    if (result.kind === "unknown-agent") return failure(404, "unknown_agent");
+    if (result.kind === "busy" || result.kind === "unavailable") return failure(409, result.kind);
+    return { status: 202, lines: { accepted: mode, agentId, threadId: result.threadId } };
+  }
+
   async #updateAgent(body: URLSearchParams): Promise<Answer> {
     const agents = this.#options.agents;
     if (!agents) return failure(404, "not_found");
@@ -389,6 +409,11 @@ export class ServerMode {
     }
     const request = {
       agentId,
+      ...Object.fromEntries(
+        ["sessionTokenCap", "turnTokenBudget"]
+          .filter((key) => body.has(key))
+          .map((key) => [key, body.get(key) === "default" ? null : Number(body.get(key))]),
+      ),
       ...(provider === null ? {} : { provider }),
       ...(model === null ? {} : { model }),
       ...(account === null ? {} : { providerAccountId: account === DEFAULT_ACCOUNT_FIELD ? null : account }),
@@ -408,6 +433,8 @@ export class ServerMode {
         model: updated.model,
         providerAccountId: updated.providerAccountId ?? DEFAULT_ACCOUNT_FIELD,
         backupModels: JSON.stringify(updated.backupModels ?? null),
+        sessionTokenCap: updated.sessionTokenCap ?? "default",
+        turnTokenBudget: updated.turnTokenBudget ?? "default",
         pendingRuntime: updated.pendingRuntime ? JSON.stringify(updated.pendingRuntime) : null,
       },
     };
@@ -645,7 +672,15 @@ async function readBody(request: IncomingMessage): Promise<URLSearchParams | nul
   return body === null ? null : new URLSearchParams(body.toString("utf8"));
 }
 
-const AGENT_UPDATE_FIELDS = new Set(["agentId", "provider", "model", "providerAccountId", "backupModels"]);
+const AGENT_UPDATE_FIELDS = new Set([
+  "agentId",
+  "provider",
+  "model",
+  "providerAccountId",
+  "backupModels",
+  "sessionTokenCap",
+  "turnTokenBudget",
+]);
 const ROUTINE_UPDATE_FIELDS = new Set(["routineId", "runIn"]);
 
 function runInUpdate(routine: EventRoutine, runIn: RoutineRunPlace): SaveEventRoutineInput {

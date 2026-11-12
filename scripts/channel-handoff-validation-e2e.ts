@@ -79,6 +79,7 @@ const answer = (message) => {
       const text = (params.input || []).map((item) => item.text || "").join("\\n");
       write({ id: message.id, result: { turn: { id: turnId, status: "inProgress", items: [] } } });
       write({ method: "turn/started", params: { threadId: params.threadId, turn: { id: turnId } } });
+      if (text.includes("Summarize shared facts, decisions, completed work, open questions, and source message IDs.")) return setTimeout(() => finish(params.threadId, turnId), 20);
       const currentAssignment = text.split("Current assignment:").at(-1).split("Expected result:")[0];
       if (!currentAssignment.includes(${JSON.stringify(CALL_MARK)})) return setTimeout(() => finish(params.threadId, turnId), 20);
       const calls = text.includes(${JSON.stringify(CALL_MARK)}) ? [...text.matchAll(/<<ARGS([\\s\\S]*?)ARGS>>/g)] : [];

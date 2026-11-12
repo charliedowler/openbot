@@ -34,7 +34,7 @@ const SUMMARY_THROUGH = 560;
 const RECENT = MESSAGES - SUMMARY_THROUGH;
 /** The sha256 of the packet that 9859956a builds for the first channel below. */
 const EXPECTED_PACKET_SHA256 = "e841b5950b97c575fc50608b511c1159cc6b75d3bfb591b9dcfbe335dd730313";
-const EXPECTED_LONG_PACKET_SHA256 = "3038f32aa3a84ce978987c96faa0bb487449513f17bca2db21ad51f032459f11";
+const EXPECTED_LONG_PACKET_SHA256 = "f0c60f2c6783145bdce6516a94bac7e11423eb151e17ec47a59f9b806daf334b";
 
 interface Report {
   checks: string[];
@@ -308,13 +308,19 @@ try {
   assert.ok(prompts.length >= 1, "A channel over the limit was not summarized.");
   const passes = prompts.length;
   report.longPacketSha256 = packetSha(longPacket.text, longPacket.throughSequence, longPacket.summaryVersion);
+  assert.match(longPacket.text, /History window:/u);
+  assert.equal(store.messages(second.channel.id).length, second.total);
+  assert.ok(
+    prompts.every((prompt) => !prompt.includes("Message 561.")),
+    "Summary input excludes messages outside the recent window.",
+  );
   assert.equal(
     report.longPacketSha256,
     EXPECTED_LONG_PACKET_SHA256,
-    "The summarized packet differs from the one that 9859956a builds.",
+    "The summarized packet differs from the bounded-window fixture.",
   );
   report.checks.push(
-    `A channel over the limit is summarized (${passes} pass) and gives the packet that 9859956a builds (sha256).`,
+    `A channel over the limit uses the bounded summary window (${passes} pass), preserves source rows and gives the saved packet (sha256).`,
   );
 
   const services = new ChannelService(

@@ -135,7 +135,12 @@ function scenario(lead: AgentSummary, sizes: number[]) {
   return { channel, task };
 }
 
-async function prepare(lead: AgentSummary, sizes: number[], answers: string[]) {
+async function prepare(
+  lead: AgentSummary,
+  sizes: number[],
+  answers: string[],
+  onPrompt?: (channelId: string, call: number) => void,
+) {
   const { channel, task } = scenario(lead, sizes);
   const prompts: string[] = [];
   const history = new ChannelHistory(
@@ -145,6 +150,7 @@ async function prepare(lead: AgentSummary, sizes: number[], answers: string[]) {
       const purpose = "channel-summary";
       const answer = answers[prompts.length];
       prompts.push(prompt);
+      onPrompt?.(channel.id, prompts.length);
       if (answer === undefined) return Effect.die(new Error(`Unexpected summary call ${prompts.length}.`));
       return generateTextWithoutTools(
         new ClaudeShapedClient(answer),
@@ -166,6 +172,58 @@ try {
   const lead = await Effect.runPromise(
     agents.createAgent({ name: "Planner", description: "Synthetic", avatarSeed: "planner", avatarHue: null }),
   );
+  const windowed = await prepare(
+    lead,
+    Array.from({ length: 200 }, () => 1000),
+    [shortSummary, shortSummary, shortSummary],
+  );
+  assert.ok(Result.isSuccess(windowed.result));
+  assert.ok(windowed.prompts.length <= 3);
+  assert.ok(windowed.prompts.every((prompt) => !prompt.includes("marker-0.")));
+  assert.ok(windowed.prompts.some((prompt) => prompt.includes("marker-160.")));
+  assert.ok(windowed.prompts.every((prompt) => prompt.length <= 73_000));
+  assert.match(windowed.summary.text, /History window:/u);
+  assert.equal(store.messages(windowed.channel.id).length, 200);
+  report.checks.push(
+    "Summary generation reads a bounded recent window, records the history gap and keeps all source messages.",
+  );
+  const reset = await prepare(
+    lead,
+    Array.from({ length: 200 }, () => 1000),
+    [shortSummary, shortSummary, shortSummary],
+    (channelId, call) => {
+      if (call === 1)
+        store.saveSummary(channelId, {
+          version: store.summary(channelId).version + 1,
+          throughSequence: 0,
+          text: "Concurrent reset.",
+        });
+    },
+  );
+  assert.ok(Result.isSuccess(reset.result));
+  assert.equal(reset.prompts.length, 2);
+  assert.ok(reset.prompts.every((prompt) => !prompt.includes("marker-0.")));
+  assert.match(reset.summary.text, /History window:/u);
+  report.checks.push("A concurrent summary reset cannot restore the full backlog to model input.");
+  const streaming = scenario(
+    lead,
+    Array.from({ length: 200 }, () => 1000),
+  );
+  const streamingMessages = store.messages(streaming.channel.id);
+  const head = streamingMessages[160];
+  assert.ok(head);
+  head.message.status = "streaming";
+  store.update(store.get(streaming.channel.id), { messages: streamingMessages });
+  const streamingHistory = new ChannelHistory(
+    store,
+    () => Effect.die(new Error("Streaming history cannot be summarized.")),
+    memories,
+  );
+  const streamingPacket = await Effect.runPromise(streamingHistory.prepare(streaming.task, lead, lead, null, []));
+  assert.match(streamingPacket.text, /Messages 1 to \d+ are left out/u);
+  assert.equal(store.summary(streaming.channel.id).throughSequence, 0);
+  assert.equal(store.messages(streaming.channel.id).length, 200);
+  report.checks.push("A streaming window boundary retains exact omission metadata without claiming summary coverage.");
   const history = [26_000, 26_000, 26_000];
 
   const trimmed = await prepare(lead, history, [longSummary, longerSummary, stillLong]);

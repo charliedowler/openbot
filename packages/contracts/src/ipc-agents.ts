@@ -278,6 +278,8 @@ export interface AgentSummary {
    * means `AGENT_TASK_LIMIT_DEFAULT`; see `agentTaskLimit`.
    */
   taskLimit?: number;
+  sessionTokenCap?: number;
+  turnTokenBudget?: number;
   /**
    * The provider account the agent's turns run on. Local-only, like `access`. Absent means the
    * provider's own sign-in, `DEFAULT_PROVIDER_ACCOUNT_ID`.
@@ -364,6 +366,8 @@ function hasAgentSummaryFields(value: DynamicRecord): boolean {
     (value.fastMode === undefined || isBoolean(value.fastMode)) &&
     (value.busyMessageMode === undefined || isBusyMessageMode(value.busyMessageMode)) &&
     (value.taskLimit === undefined || isAgentTaskLimit(value.taskLimit)) &&
+    (value.sessionTokenCap === undefined || isAgentTokenBudget(value.sessionTokenCap)) &&
+    (value.turnTokenBudget === undefined || isAgentTokenBudget(value.turnTokenBudget)) &&
     (value.providerAccountId === undefined || isProviderAccountId(value.providerAccountId)) &&
     (value.backupModels === undefined || isAgentBackupModels(value.backupModels)) &&
     (value.usageLimitReturn === undefined || isAgentUsageLimitReturn(value.usageLimitReturn)) &&
@@ -421,6 +425,8 @@ export interface UpdateAgentInput {
   busyMessageMode?: BusyMessageMode | null;
   /** `null` returns the agent to the default task limit. */
   taskLimit?: number | null;
+  sessionTokenCap?: number | null;
+  turnTokenBudget?: number | null;
   /** `null` returns the agent to the provider's own sign-in. */
   providerAccountId?: string | null;
   /** `null` returns the agent to the default: ask, with no saved order. */
@@ -452,4 +458,8 @@ export interface AvatarImageInput {
 export interface SetAgentAvatarInput {
   agentId: string;
   image: AvatarImageInput | null;
+}
+
+export function isAgentTokenBudget(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1024 && value <= 100_000_000;
 }

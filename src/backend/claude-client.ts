@@ -240,6 +240,8 @@ interface ThreadRuntime {
   /** The usage of each API request since the last result, by message id. */
   requestUsage: Map<string, { model: string; usage: unknown }>;
   process: () => ProviderTurnProcess | null;
+  turnRequestUsage: Map<string, { model: string; usage: unknown }>;
+  toolTurns: Map<string, string>;
   contextRequest: number;
   compacting: boolean;
   config: ThreadConfig;
@@ -1094,6 +1096,8 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
       resumedUsage: resume,
       requestUsage: new Map(),
       process: () => turnProcess,
+      turnRequestUsage: new Map(),
+      toolTurns: new Map(),
       contextRequest: 0,
       compacting: false,
       config,
@@ -1229,6 +1233,8 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
       retrying: false,
       unprompted,
     };
+    runtime.turnRequestUsage.clear();
+    runtime.toolTurns.clear();
     runtime.activeTurn = turn;
     runtime.nextTurnId = null;
     startClaudePlanTurn(runtime.plan);
@@ -1332,12 +1338,42 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
     message: ClaudeStreamMessage,
   ) {
     if (message.type === "assistant") {
+      if (!message.parent_tool_use_id && message.uuid) this.#outputTurn(runtime);
       // Each content block repeats its request's message; the last copy has the final count.
       const id = getString(message.message, "id");
       const model = getString(message.message, "model");
-      // Only the first usage report of a resumed process needs the requests of its turn.
       if (runtime.resumedUsage && id && model && isRecord(message.message))
         runtime.requestUsage.set(id, { model, usage: message.message.usage });
+      const ownerTurn = message.parent_tool_use_id
+        ? runtime.toolTurns.get(message.parent_tool_use_id)
+        : runtime.activeTurn?.id;
+      if (ownerTurn && ownerTurn === runtime.activeTurn?.id) {
+        for (const call of messageToolCalls(message.message)) runtime.toolTurns.set(call.id, ownerTurn);
+      }
+      if (ownerTurn && ownerTurn === runtime.activeTurn?.id && id && model && isRecord(message.message)) {
+        runtime.turnRequestUsage.set(id, { model, usage: message.message.usage });
+        const totals = Object.values(claudeTurnModelUsage(runtime.turnRequestUsage.values()));
+        const counts = totals.flatMap((entry) => [
+          entry.inputTokens,
+          entry.cacheReadInputTokens,
+          entry.cacheCreationInputTokens,
+        ]);
+        const completeInput =
+          counts.length > 0 &&
+          counts.every(
+            (value): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
+          );
+        if (runtime.activeTurn)
+          this.emit("notification", {
+            method: "openbot/turn-input",
+            params: {
+              threadId: runtime.id,
+              turnId: runtime.activeTurn.id,
+              ...(completeInput ? { inputTokens: counts.reduce((sum, value) => sum + value, 0) } : {}),
+              modelCalls: runtime.turnRequestUsage.size,
+            },
+          });
+      }
     }
     if (message.type === "system" && message.subtype === "status") {
       const status =
@@ -1639,29 +1675,38 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
     }
     const status = interrupted ? "interrupted" : message.subtype === "success" && !apiError ? "completed" : "failed";
     yield* this.#completeTurn(runtime, status, errors.length > 0 ? errors.join("\n") : apiError ? fallback : null);
-    // A local SDK control request reads context; it does not send a user turn or call a model.
-    // Run outside the stream consumer so the result cannot block the queue or the SDK reader.
-    const contextRequest = ++runtime.contextRequest;
-    if (runtime.query.getContextUsage)
-      yield* Effect.forkIn(
-        providerCall(() => runtime.query.getContextUsage?.({ detail: "summary" })).pipe(
-          Effect.timeout("2 seconds"),
-          Effect.tap((usage) =>
-            Effect.sync(() => {
-              if (
-                this.#threads.get(runtime.id) !== runtime ||
-                runtime.contextRequest !== contextRequest ||
-                runtime.activeTurn ||
-                !isRecord(usage)
-              )
-                return;
-              this.#emitContextUsage(runtime, usage.totalTokens, usage.rawMaxTokens, claudeContextCategories(usage));
-            }),
-          ),
-          Effect.ignore,
-        ),
-        this.#scope,
-      );
+  });
+
+  hasActiveTurn(threadId: string): boolean {
+    return this.#threads.get(threadId)?.activeTurn != null;
+  }
+
+  readonly readContextUsage = Effect.fn("ClaudeAgentClient.readContextUsage")(function* (
+    this: ClaudeAgentClient,
+    threadId: string,
+  ) {
+    const runtime = this.#threads.get(threadId);
+    if (!runtime || runtime.activeTurn || !runtime.query.getContextUsage) return null;
+    const generation = ++runtime.contextRequest;
+    const usage = yield* providerCall(() => runtime.query.getContextUsage?.({ detail: "summary" }));
+    if (
+      this.#threads.get(threadId) !== runtime ||
+      runtime.contextRequest !== generation ||
+      runtime.activeTurn ||
+      !isRecord(usage) ||
+      typeof usage.totalTokens !== "number" ||
+      !Number.isFinite(usage.totalTokens) ||
+      usage.totalTokens < 0 ||
+      typeof usage.rawMaxTokens !== "number" ||
+      !Number.isFinite(usage.rawMaxTokens) ||
+      usage.rawMaxTokens <= 0
+    )
+      return null;
+    return {
+      usedTokens: usage.totalTokens,
+      windowTokens: usage.rawMaxTokens,
+      categories: claudeContextCategories(usage) ?? [],
+    };
   });
 
   #emitContextUsage(
@@ -1965,11 +2010,11 @@ export class ClaudeAgentClient extends EventEmitter<ClientEvents> {
       });
     }
     this.#emitSubagents(runtime, endSubagentTurn(runtime.subagents, turn.id, new Date().toISOString()));
+    runtime.activeTurn = null;
     this.emit("notification", {
       method: "turn/completed",
       params: { threadId: runtime.id, turn: { id: turn.id, status } },
     });
-    runtime.activeTurn = null;
     yield* this.#threads.markIdle(runtime);
   });
 

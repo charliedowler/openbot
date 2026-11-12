@@ -52,6 +52,7 @@ import {
   isAgentSessionSettingOverrides,
   isAgentSessionSettingResets,
   isAgentTaskLimit,
+  isAgentTokenBudget,
   isAgentUsageLimitReturn,
   isAvatarColor,
   isAvatarHue,
@@ -437,6 +438,8 @@ export class AgentStore {
         );
       record.computerUse = source.computerUse;
       if (source.busyMessageMode) record.busyMessageMode = source.busyMessageMode;
+      if (source.sessionTokenCap !== undefined) record.sessionTokenCap = source.sessionTokenCap;
+      if (source.turnTokenBudget !== undefined) record.turnTokenBudget = source.turnTokenBudget;
       if (source.taskLimit !== undefined) record.taskLimit = source.taskLimit;
       if (source.backupModels) record.backupModels = structuredClone(source.backupModels);
       record.avatarSeed = source.avatarSeed;
@@ -810,6 +813,16 @@ export class AgentStore {
         if (!isBusyMessageMode(input.busyMessageMode)) throw new Error("Invalid busy message mode.");
         next.busyMessageMode = input.busyMessageMode;
       }
+      if (input.sessionTokenCap === null) delete next.sessionTokenCap;
+      else if (input.sessionTokenCap !== undefined) {
+        if (!isAgentTokenBudget(input.sessionTokenCap)) throw new Error("Invalid token budget.");
+        next.sessionTokenCap = input.sessionTokenCap;
+      }
+      if (input.turnTokenBudget === null) delete next.turnTokenBudget;
+      else if (input.turnTokenBudget !== undefined) {
+        if (!isAgentTokenBudget(input.turnTokenBudget)) throw new Error("Invalid token budget.");
+        next.turnTokenBudget = input.turnTokenBudget;
+      }
       if (input.taskLimit === null) delete next.taskLimit;
       else if (input.taskLimit !== undefined) {
         if (!isAgentTaskLimit(input.taskLimit)) throw new Error("Invalid task limit.");
@@ -877,6 +890,8 @@ export class AgentStore {
       // A copy cannot remove a field, and `null` above returned the agent to the app default or to
       // the provider's own sign-in, and an agent flag to the account default.
       if (next.busyMessageMode === undefined) delete agent.busyMessageMode;
+      if (next.sessionTokenCap === undefined) delete agent.sessionTokenCap;
+      if (next.turnTokenBudget === undefined) delete agent.turnTokenBudget;
       if (next.taskLimit === undefined) delete agent.taskLimit;
       if (next.providerAccountId === undefined) delete agent.providerAccountId;
       if (next.backupModels === undefined) delete agent.backupModels;
@@ -895,6 +910,8 @@ export class AgentStore {
       } catch (error) {
         Object.assign(agent, previous);
         if (previous.busyMessageMode === undefined) delete agent.busyMessageMode;
+        if (previous.sessionTokenCap === undefined) delete agent.sessionTokenCap;
+        if (previous.turnTokenBudget === undefined) delete agent.turnTokenBudget;
         if (previous.taskLimit === undefined) delete agent.taskLimit;
         if (previous.providerAccountId === undefined) delete agent.providerAccountId;
         if (previous.backupModels === undefined) delete agent.backupModels;
@@ -1919,6 +1936,8 @@ function isStoredAgent(value: unknown): value is PersistedStoredAgent {
     (record.browserProfileId === undefined || isBrowserProfileId(record.browserProfileId)) &&
     (record.fastMode === undefined || isBoolean(record.fastMode)) &&
     (record.busyMessageMode === undefined || isBusyMessageMode(record.busyMessageMode)) &&
+    (record.sessionTokenCap === undefined || isAgentTokenBudget(record.sessionTokenCap)) &&
+    (record.turnTokenBudget === undefined || isAgentTokenBudget(record.turnTokenBudget)) &&
     (record.taskLimit === undefined || isAgentTaskLimit(record.taskLimit)) &&
     (record.providerAccountId === undefined || isProviderAccountId(record.providerAccountId)) &&
     (record.backupModels === undefined || isAgentBackupModels(record.backupModels)) &&
@@ -2019,6 +2038,14 @@ function readStoredAgent(value: unknown): ReadStoredAgent | UnreadableStoredAgen
     value.busyMessageMode === undefined || isBusyMessageMode(value.busyMessageMode)
       ? value.busyMessageMode
       : reset("busyMessageMode", undefined);
+  const sessionTokenCap =
+    value.sessionTokenCap === undefined || isAgentTokenBudget(value.sessionTokenCap)
+      ? value.sessionTokenCap
+      : reset("sessionTokenCap", undefined);
+  const turnTokenBudget =
+    value.turnTokenBudget === undefined || isAgentTokenBudget(value.turnTokenBudget)
+      ? value.turnTokenBudget
+      : reset("turnTokenBudget", undefined);
   const taskLimit =
     value.taskLimit === undefined || isAgentTaskLimit(value.taskLimit)
       ? value.taskLimit
@@ -2106,6 +2133,8 @@ function readStoredAgent(value: unknown): ReadStoredAgent | UnreadableStoredAgen
     ...(browserProfileId === undefined ? {} : { browserProfileId }),
     ...(fastMode === undefined ? {} : { fastMode }),
     ...(busyMessageMode === undefined ? {} : { busyMessageMode }),
+    ...(sessionTokenCap === undefined ? {} : { sessionTokenCap }),
+    ...(turnTokenBudget === undefined ? {} : { turnTokenBudget }),
     ...(taskLimit === undefined ? {} : { taskLimit }),
     ...(providerAccountId === undefined ? {} : { providerAccountId }),
     ...(backupModels === undefined ? {} : { backupModels }),
